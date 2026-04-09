@@ -39,7 +39,8 @@ CRAN_packages <- c(
   "patchwork",
   "pwr",
   "missForest",
-  "data.table"
+  "data.table",
+  "GGally"
 )
 not_inst <- CRAN_packages[
   !(CRAN_packages %in% installed.packages()[, "Package"])
