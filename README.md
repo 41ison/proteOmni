@@ -48,9 +48,7 @@
 
 <details>
 
-<summary>
-
-'Rscript' is not recognized (Windows) \</summary\>
+<summary>Rscript is not recognized (Windows)\</summary\>
 
 When trying to execute the application using the `proteOmni.bat` file for the first time on Windows, you might encounter the following error:
 
