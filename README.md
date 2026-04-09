@@ -62,13 +62,13 @@ This happens because Windows doesn't know where the R executable (`Rscript.exe`)
 
 <p align = "center">
 
-<img src = "https://github.com/41ison/proteOmni/blob/main/images/paste-10.png" width = "500">
+<img src = "![](images/paste-8.png)" width = "300">
 
 </p>
 
 2.  In the System Properties window, click the **"Environment Variables..."** button near the bottom.
 
-    ![](images/paste-8.png){width="326"}
+    ![](images/paste-8.png)
 
 3.  In the new window, find the **"Path"** variable under the *System variables* list (or *User variables*), select it, and click **"Edit..."**.
 
