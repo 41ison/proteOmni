@@ -62,21 +62,34 @@ This happens because Windows doesn't know where the R executable (`Rscript.exe`)
 
 <p align = "center">
 
-<img src = "![](images/paste-8.png)" width = "300">
+<img src = "https://github.com/41ison/proteOmni/blob/main/images/paste-7.png" width = "300">
 
 </p>
 
 2.  In the System Properties window, click the **"Environment Variables..."** button near the bottom.
 
-    ![](images/paste-8.png)
+    <p align = "center">
+
+    <img src = "https://github.com/41ison/proteOmni/blob/main/images/paste-8.png" width = "300">
+
+    </p>
 
 3.  In the new window, find the **"Path"** variable under the *System variables* list (or *User variables*), select it, and click **"Edit..."**.
 
-    ![](images/paste-9.png){width="398"}
+    <p align = "center">
+
+    <img src = "https://github.com/41ison/proteOmni/blob/main/images/paste-9.png" width = "300">
+
+    </p>
 
 4.  Click **"New"** and paste the folder path to your R `bin` directory. This path usually looks like: `C:\\\\Program Files\\\\R\\\\R-4.x.x\\\\bin` *(Replace `4.x.x` with your specific R version)*.
 
-    ![](images/paste-11.png){width="329"}![](images/paste-12.png){width="329"}
+    <p align = "center">
+
+    <img src = "https://github.com/41ison/proteOmni/blob/main/images/paste-10.png" width = "300">
+    <img src = "https://github.com/41ison/proteOmni/blob/main/images/paste-12.png" width = "300">
+
+    </p>
 
 5.  Click **"OK"** on all windows to save the changes.
 
