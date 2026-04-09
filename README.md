@@ -62,7 +62,11 @@ This happens because Windows doesn't know where the R executable (`Rscript.exe`)
 
 1.  Open the Windows **Start Menu**, search for **"Environment Variables"**, and click on **"Edit the system environment variables"**.
 
-    ![](images/paste-7.png){width="481"}
+    <p align = "center">
+
+    <img src = "https://github.com/41ison/proteOmni/blob/main/images/paste-10.png" width = "1000">
+
+    </p>
 
 2.  In the System Properties window, click the **"Environment Variables..."** button near the bottom.
 
