@@ -4,7 +4,7 @@
 
 <p align = "center">
 
-<img src = "https://github.com/41ison/proteOmni/blob/main/images/proteomni_interface.png.png" width = "500">
+<img src = "https://github.com/41ison/proteOmni/blob/main/images/proteomni_interface.png" width = "700">
 
 </p>
 
