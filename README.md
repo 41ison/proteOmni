@@ -48,9 +48,7 @@
 
 <details>
 
-<summary>
-
-Rscript is not recognized (Windows)\<\\summary\>
+<summary> <b> Rscript is not recognized (Windows) </b></summary\>
 
 When trying to execute the application using the `proteOmni.bat` file for the first time on Windows, you might encounter the following error:
 
@@ -64,7 +62,7 @@ This happens because Windows doesn't know where the R executable (`Rscript.exe`)
 
     <p align = "center">
 
-    <img src = "https://github.com/41ison/proteOmni/blob/main/images/paste-10.png" width = "1000">
+    <img src = "https://github.com/41ison/proteOmni/blob/main/images/paste-10.png" width = "500">
 
     </p>
 
