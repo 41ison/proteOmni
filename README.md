@@ -2,6 +2,12 @@
 
 **proteOmni** is a comprehensive, unified Shiny-based dashboard for visual quality control (QC), diagnostics, and differential abundance analysis of proteomics results from multiple search engines and acquisition strategies. It centralizes eight specialized modules covering DDA, DIA, and *de novo* sequencing workflows into a single interactive application.
 
+<p align = "center">
+
+<img src = "https://github.com/41ison/proteOmni/blob/main/images/proteomni_interface.png.png" width = "500">
+
+</p>
+
 ## Benefits of using proteOmni
 
 -   **Unified Interface**: One central hub for evaluating proteomics results across Data-Dependent Acquisition (DDA), Data-Independent Acquisition (DIA), and *de novo* sequencing — from FragPipe, DIA-NN, MaxQuant, Sage, EncyclopeDIA, Casanovo, and InstaNovo.

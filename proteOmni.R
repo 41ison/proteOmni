@@ -40,7 +40,11 @@ CRAN_packages <- c(
   "pwr",
   "missForest",
   "data.table",
-  "GGally"
+  "GGally",
+  "ape",
+  "ggiraph",
+  "ggforce",
+  "ggridges"
 )
 not_inst <- CRAN_packages[
   !(CRAN_packages %in% installed.packages()[, "Package"])
@@ -64,6 +68,11 @@ if (!requireNamespace("sva", quietly = TRUE)) {
 if (!requireNamespace("clusterProfiler", quietly = TRUE)) {
   BiocManager::install("clusterProfiler", update = FALSE, ask = FALSE)
 }
+
+if (!requireNamespace("GO.db", quietly = TRUE)) {
+  BiocManager::install("GO.db", update = FALSE, ask = FALSE)
+}
+
 if (!requireNamespace("enrichplot", quietly = TRUE)) {
   BiocManager::install("enrichplot", update = FALSE, ask = FALSE)
 }

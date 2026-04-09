@@ -84,6 +84,6 @@ $RECYCLE.BIN/
 
 #My prints folder
 /Prints_for_docs/
-
+Session_Info_log.txt
 
 # End of https://www.toptal.com/developers/gitignore/api/windows,r
