@@ -39,7 +39,7 @@
 
    | Module | Required files | Optional |
    |---|---|---|
-   | **PSManalyst** | `psm.tsv`, `protein.tsv`, `combined_protein.tsv` | FASTA file |
+   | **PSManalyst** | `psm.tsv`, `combined_protein.tsv` | FASTA file |
    | **QC4DIANN** | `report.parquet` | FASTA file |
    | **PwrQuant** | Protein abundance matrix (`.tsv` / `.csv`) | — |
    | **Casanovo** | Path to directory containing `.mztab` files | — |
