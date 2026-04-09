@@ -104,7 +104,7 @@ If the error points to a different package, replace `"promises"` with the packag
 packageVersion("promises")
 ```
 
-</summary>
+</details>
 
 ## Citation
 
