@@ -48,7 +48,7 @@
 
 <details>
 
-<summary> <b> Rscript is not recognized (Windows) </b></summary\>
+<summary> <b> Rscript is not recognized (Windows) </b> </summary>
 
 When trying to execute the application using the `proteOmni.bat` file for the first time on Windows, you might encounter the following error:
 
@@ -56,15 +56,15 @@ When trying to execute the application using the `proteOmni.bat` file for the fi
 
 This happens because Windows doesn't know where the R executable (`Rscript.exe`) is located. To fix this, you must add the R `bin` folder to your system's Environment Variables path.
 
-**How to add R to your PATH:**
+**How to add R to your PATH:** 
 
-1.  Open the Windows **Start Menu**, search for **"Environment Variables"**, and click on **"Edit the system environment variables"**.
+1. Open the Windows **Start Menu**, search for **"Environment Variables"**, and click on **"Edit the system environment variables"**.
 
-    <p align = "center">
+<p align = "center">
 
-    <img src = "https://github.com/41ison/proteOmni/blob/main/images/paste-10.png" width = "500">
+<img src = "https://github.com/41ison/proteOmni/blob/main/images/paste-10.png" width = "500">
 
-    </p>
+</p>
 
 2.  In the System Properties window, click the **"Environment Variables..."** button near the bottom.
 
