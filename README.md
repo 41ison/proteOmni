@@ -84,7 +84,9 @@ This happens because Windows doesn't know where the R executable (`Rscript.exe`)
 
 </details>
 
-### Error in loadNamespace (Windows / macOS)
+<details>
+
+<summary> <b>Error in loadNamespace (Windows / macOS) </b> </summary>
 
 When launching proteOmni via the `.bat` or `.command` file, you may see an error like:
 
@@ -101,6 +103,8 @@ If the error points to a different package, replace `"promises"` with the packag
 ``` r
 packageVersion("promises")
 ```
+
+</summary>
 
 ## Citation
 
