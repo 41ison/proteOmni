@@ -19,6 +19,12 @@
 -   **Publication-Ready Output**: Download filtered result matrices and universally formatted plots (PNG/ZIP) ready for reporting and publication.
 -   **Session Logging**: Automatic session and console logging with a one-click log download for reproducibility.
 
+<p align = "center">
+
+<img src = "https://github.com/41ison/proteOmni/blob/main/images/video.gif" width = "700">
+
+</p>
+
 ## Modules Included
 
 1.  **PSManalyst** *(FragPipe / DDA)*: Visual QC for FragPipe DDA results. Tabs include a **PSM Viewer** (protease fingerprint, N/C-termini sequence logos, m/z over retention time, mass error distributions, charge states, peptide length, amino acid frequencies, missed cleavages, and sample-to-sample scatter plots), an **MS/MS Spectrum Viewer** (annotated b/y fragment ion spectra for any selected PSM), and a **Protein Viewer** (peptide coverage mapped onto FASTA sequences with sample comparison via cosine and Jaccard similarity).
