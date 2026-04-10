@@ -1,4 +1,4 @@
-## proteOmni — Unified Proteomics QC Dashboard
+## proteOmni — Unified Proteomics QC Dashboard 
 ## Modules: PSManalyst (FragPipe - DDA QC), QC4DIANN (DIA-NN - DIA QC),
 ##          deNovo (Casanovo - de novo MS/MS), PwrQuant (limma + ORA),
 ##          MaxQuant (MaxQuant - DDA QC), InstaNovo (InstaNovo - de novo MS/MS),
