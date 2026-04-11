@@ -100,7 +100,7 @@ PwrQuant_sidebar_ui <- function(id) {
         ns("limma_method"),
         "Limma Regression Method",
         choices = c("ls", "robust"),
-        selected = "robust"
+        selected = "ls"
       ),
       selectInput(
         ns("trend_param"),
