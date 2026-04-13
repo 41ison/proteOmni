@@ -1595,7 +1595,7 @@ PwrQuant_server <- function(id) {
             ) +
             labs(
               x = "Residual standard deviation (Sigma)",
-              y = "|Observed log<sub>2</sub>FC|",
+              y = "Observed |log<sub>2</sub>FC|",
               color = "Significant difference with 80% power"
             ) +
             scale_color_brewer(palette = "Dark2") +
@@ -1912,7 +1912,7 @@ PwrQuant_server <- function(id) {
           ) +
             geom_boxplot(outlier.alpha = 0.3) +
             scale_fill_brewer(palette = "Dark2") +
-            labs(x = NULL, y = "log2(abundance)") +
+            labs(x = NULL, y = "log<sub>2</sub>(abundance)") +
             theme_bw() +
             theme(
               axis.text.x = element_text(
@@ -1927,7 +1927,7 @@ PwrQuant_server <- function(id) {
                 face = "bold",
                 color = "black"
               ),
-              axis.title = element_text(size = 16, face = "bold"),
+              axis.title = element_markdown(size = 16, face = "bold"),
               legend.position = "none",
               text = element_text(size = 16)
             )
@@ -1959,7 +1959,7 @@ PwrQuant_server <- function(id) {
               ) +
                 geom_boxplot(outlier.alpha = 0.3) +
                 scale_fill_brewer(palette = "Dark2") +
-                labs(x = NULL, y = "log2(abundance)") +
+                labs(x = NULL, y = "log<sub>2</sub>(abundance)") +
                 theme_bw() +
                 theme(
                   axis.text.x = element_text(
@@ -1974,7 +1974,7 @@ PwrQuant_server <- function(id) {
                     face = "bold",
                     color = "black"
                   ),
-                  axis.title = element_text(size = 16, face = "bold"),
+                  axis.title = element_markdown(size = 16, face = "bold"),
                   legend.position = "none",
                   text = element_text(size = 16)
                 )
@@ -2022,13 +2022,13 @@ PwrQuant_server <- function(id) {
                   ) +
                   facet_wrap(~comparison, ncol = 2) +
                   theme_bw() +
-                  labs(x = "log2 average abundance", y = "log2FC") +
+                  labs(x = "log<sub>2</sub> average abundance", y = "log<sub>2</sub>FC") +
                   theme(
                     text = element_text(size = 16),
                     strip.text = element_text(face = "bold", size = 14),
                     strip.background = element_blank(),
                     legend.position = "bottom",
-                    axis.title = element_text(face = "bold", size = 16),
+                    axis.title = element_markdown(face = "bold", size = 16),
                     axis.text = element_text(
                       color = "black",
                       face = "bold",
@@ -2154,14 +2154,14 @@ PwrQuant_server <- function(id) {
                     )
                   ) +
                   facet_wrap(~comparison, scales = "free_y") +
-                  labs(x = NULL, y = "log2FC", fill = NULL) +
+                  labs(x = NULL, y = "log<sub>2</sub>FC", fill = NULL) +
                   theme_bw() +
                   theme(
                     text = element_text(size = 14),
                     strip.text = element_text(face = "bold", size = 14),
                     strip.background = element_blank(),
                     legend.position = "bottom",
-                    axis.title = element_text(face = "bold", size = 14),
+                    axis.title = element_markdown(face = "bold", size = 14),
                     axis.text = element_text(color = "black", size = 12),
                     axis.text.y = element_text(size = 9)
                   )
@@ -2174,6 +2174,9 @@ PwrQuant_server <- function(id) {
             safe_save("power_plot.png", function() {
               ggplot(lr, aes(x = Sigma, y = abs(logFC))) +
                 geom_point(aes(color = Is_reliable), alpha = 0.3) +
+                guides(
+                  color = guide_legend(override.aes = list(alpha = 1, size = 3))
+                ) +
                 geom_line(
                   aes(y = Min_Detectable_Log2FC),
                   color = "red",
@@ -2182,7 +2185,7 @@ PwrQuant_server <- function(id) {
                 ) +
                 labs(
                   x = "Residual standard deviation (Sigma)",
-                  y = "|Observed log2FC|",
+                  y = "Observed |log<sub>2</sub>FC|",
                   color = "80% power"
                 ) +
                 scale_color_brewer(palette = "Dark2") +
@@ -2191,7 +2194,7 @@ PwrQuant_server <- function(id) {
                 theme(
                   text = element_text(size = 16),
                   legend.position = "bottom",
-                  axis.title = element_text(face = "bold", size = 16),
+                  axis.title = element_markdown(face = "bold", size = 16),
                   axis.text = element_text(
                     color = "black",
                     face = "bold",
