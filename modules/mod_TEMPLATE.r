@@ -320,7 +320,7 @@ Template_server <- function(id) {
               scale_fill_brewer(palette = input$color_palette) +
               labs(
                 x = NULL,
-                y = "log<sub>2</sub>(Intensity)"
+                y = "log₂(Intensity)"
               ) +
               theme_bw() +
               theme(
@@ -337,7 +337,7 @@ Template_server <- function(id) {
             ggplot(plot_df, aes(x = log2_intensity)) +
               geom_histogram(bins = 50, fill = "#2c3e50", alpha = 0.7) +
               labs(
-                x = "log<sub>2</sub>(Intensity)",
+                x = "log₂(Intensity)",
                 y = "Count"
               ) +
               theme_bw() +

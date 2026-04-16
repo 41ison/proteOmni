@@ -1046,7 +1046,7 @@ PwrQuant_server <- function(id) {
             ) +
             facet_wrap(~condition) +
             labs(
-              x = "Mean log<sub>2</sub>(abundance)",
+              x = "Mean log₂(abundance)",
               y = "Protein variance"
             ) +
             theme_bw() +
@@ -1097,7 +1097,7 @@ PwrQuant_server <- function(id) {
             scale_fill_brewer(palette = "Dark2") +
             labs(
               x = NULL,
-              y = "log<sub>2</sub>(abundance)"
+              y = "log₂(abundance)"
             ) +
             theme_bw() +
             theme(
@@ -1156,7 +1156,7 @@ PwrQuant_server <- function(id) {
             scale_fill_brewer(palette = "Dark2") +
             labs(
               x = NULL,
-              y = "log<sub>2</sub>(abundance)"
+              y = "log₂(abundance)"
             ) +
             theme_bw() +
             theme(
@@ -1237,8 +1237,8 @@ PwrQuant_server <- function(id) {
             facet_wrap(~comparison, ncol = 2) +
             theme_bw() +
             labs(
-              x = "log<sub>2</sub> average abundance",
-              y = "log<sub>2</sub>FC"
+              x = "log₂ average abundance",
+              y = "log₂FC"
             ) +
             theme(
               text = element_text(size = 16),
@@ -1313,7 +1313,7 @@ PwrQuant_server <- function(id) {
             facet_wrap(~comparison, ncol = 2) +
             theme_bw() +
             labs(
-              x = "log<sub>2</sub>FC",
+              x = "log₂FC",
               y = "-log<sub>10</sub>(adj. p-value)"
             ) +
             theme(
@@ -1394,7 +1394,7 @@ PwrQuant_server <- function(id) {
             facet_wrap(~comparison, scales = "free_y") +
             labs(
               x = NULL,
-              y = "log<sub>2</sub>FC",
+              y = "log₂FC",
               fill = NULL
             ) +
             theme_bw() +
@@ -1562,8 +1562,8 @@ PwrQuant_server <- function(id) {
             ) +
             labs(
               title = paste(input$adv_corr_x, "vs", input$adv_corr_y),
-              x = paste0("log<sub>2</sub>FC: ", input$adv_corr_x),
-              y = paste0("log<sub>2</sub>FC: ", input$adv_corr_y),
+              x = paste0("log₂FC: ", input$adv_corr_x),
+              y = paste0("log₂FC: ", input$adv_corr_y),
               color = "Classification"
             ) +
             theme_bw() +
@@ -1595,7 +1595,7 @@ PwrQuant_server <- function(id) {
             ) +
             labs(
               x = "Residual standard deviation (Sigma)",
-              y = "Observed |log<sub>2</sub>FC|",
+              y = "Observed |log₂FC|",
               color = "Significant difference with 80% power"
             ) +
             scale_color_brewer(palette = "Dark2") +
@@ -1874,7 +1874,7 @@ PwrQuant_server <- function(id) {
             ) +
             facet_wrap(~condition) +
             labs(
-              x = "Mean log<sub>2</sub>(abundance)",
+              x = "Mean log₂(abundance)",
               y = "Protein variance"
             ) +
             theme_bw() +
@@ -1912,7 +1912,7 @@ PwrQuant_server <- function(id) {
           ) +
             geom_boxplot(outlier.alpha = 0.3) +
             scale_fill_brewer(palette = "Dark2") +
-            labs(x = NULL, y = "log<sub>2</sub>(abundance)") +
+            labs(x = NULL, y = "log₂(abundance)") +
             theme_bw() +
             theme(
               axis.text.x = element_text(
@@ -1959,7 +1959,7 @@ PwrQuant_server <- function(id) {
               ) +
                 geom_boxplot(outlier.alpha = 0.3) +
                 scale_fill_brewer(palette = "Dark2") +
-                labs(x = NULL, y = "log<sub>2</sub>(abundance)") +
+                labs(x = NULL, y = "log₂(abundance)") +
                 theme_bw() +
                 theme(
                   axis.text.x = element_text(
@@ -2022,7 +2022,7 @@ PwrQuant_server <- function(id) {
                   ) +
                   facet_wrap(~comparison, ncol = 2) +
                   theme_bw() +
-                  labs(x = "log<sub>2</sub> average abundance", y = "log<sub>2</sub>FC") +
+                  labs(x = "log₂ average abundance", y = "log₂FC") +
                   theme(
                     text = element_text(size = 16),
                     strip.text = element_text(face = "bold", size = 14),
@@ -2091,7 +2091,7 @@ PwrQuant_server <- function(id) {
                   facet_wrap(~comparison, ncol = 2) +
                   theme_bw() +
                   labs(
-                    x = "log<sub>2</sub>FC",
+                    x = "log₂FC",
                     y = "-log<sub>10</sub>(adj. p-value)"
                   ) +
                   theme(
@@ -2154,7 +2154,7 @@ PwrQuant_server <- function(id) {
                     )
                   ) +
                   facet_wrap(~comparison, scales = "free_y") +
-                  labs(x = NULL, y = "log<sub>2</sub>FC", fill = NULL) +
+                  labs(x = NULL, y = "log₂FC", fill = NULL) +
                   theme_bw() +
                   theme(
                     text = element_text(size = 14),
@@ -2185,7 +2185,7 @@ PwrQuant_server <- function(id) {
                 ) +
                 labs(
                   x = "Residual standard deviation (Sigma)",
-                  y = "Observed |log<sub>2</sub>FC|",
+                  y = "Observed |log₂FC|",
                   color = "80% power"
                 ) +
                 scale_color_brewer(palette = "Dark2") +

@@ -3061,7 +3061,7 @@ PSManalyst_server <- function(id) {
               width = 0.1,
               show.legend = FALSE
             ) +
-            labs(x = NULL, y = "log<sub>2</sub>(MaxLFQ intensity)") +
+            labs(x = NULL, y = "log₂(MaxLFQ intensity)") +
             theme(
               axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5)
             )
@@ -3097,8 +3097,8 @@ PSManalyst_server <- function(id) {
         geom_point(alpha = 0.7, show.legend = FALSE) +
         geom_smooth(method = "lm", se = FALSE, color = input$plot_color) +
         labs(
-          x = paste0("log2(", input$xcol, ")"),
-          y = paste0("log2(", input$ycol, ")")
+          x = paste0("log₂(", input$xcol, ")"),
+          y = paste0("log₂(", input$ycol, ")")
         ) +
         theme_bw()
       ggplotly(p)
