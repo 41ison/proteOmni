@@ -153,11 +153,37 @@ InstaNovo_sidebar_ui <- function(id) {
       max = 15
     ),
     tags$hr(style = "border-color:#2d3741;margin:6px 0;"),
+    tags$hr(style = "border-color:#2d3741;margin:6px 0;"),
+    selectInput(
+      ns("plot_select"),
+      "Select Graphic",
+      choices = c(
+        "Score distribution (log_probs)" = "plot_score",
+        "Peptide length distribution" = "plot_length",
+        "Charge state distribution" = "plot_charge",
+        "Mass error distribution (ppm)" = "plot_mz_error",
+        "Retained PSMs vs. score threshold" = "plot_elbow",
+        "Median score by peptide length" = "plot_score_length",
+        "ppm error vs score" = "plot_mz_score",
+        "GRAVY Index Distribution" = "plot_gravy",
+        "Isoelectric Point (pI) Distribution" = "plot_pi",
+        "Amino acid frequencies" = "plot_aa_freq",
+        "N-terminus SeqLogo" = "plot_nterm",
+        "C-terminus SeqLogo" = "plot_cterm"
+      )
+    ),
+    actionButton(
+      ns("run_plot"),
+      "Plot Selected Graphic",
+      icon = icon("chart-bar"),
+      class = "btn-primary",
+      style = "width:80%;margin-bottom:8px;"
+    ),
     div(
       style = "padding:0 8px;",
       downloadButton(
-        ns("download_plots"),
-        "⬇ Download plots",
+        ns("download_plot"),
+        "⬇ Download Plot (.png)",
         class = "dl-btn",
         style = "width:100%;text-align:left;"
       )
@@ -175,142 +201,18 @@ InstaNovo_body_ui <- function(id) {
       id = ns("tabs"),
       type = "tabs",
 
-      # ── Overview ─────────────────────────────────────────────────────────────
+      # ── Interactive Plot Viewer ──────────────────────────────────────────────
       tabPanel(
-        "Overview",
+        "Interactive Plot Viewer",
         fluidRow(infoBoxOutput(ns("info_box"), width = 12)),
         fluidRow(
           box(
-            title = "Score distribution (log_probs)",
-            status = "success",
+            title = "Dynamic Plot View",
+            status = "primary",
             solidHeader = TRUE,
             width = 12,
             collapsible = TRUE,
-            sp_wrap_ins(ns("spi01"), uiOutput(ns("plot_score_ui")))
-          )
-        ),
-        fluidRow(
-          box(
-            title = "Peptide length distribution",
-            status = "success",
-            solidHeader = TRUE,
-            width = 12,
-            collapsible = TRUE,
-            sp_wrap_ins(ns("spi02"), uiOutput(ns("plot_length_ui")))
-          )
-        ),
-        fluidRow(
-          box(
-            title = "Charge state distribution",
-            status = "success",
-            solidHeader = TRUE,
-            width = 12,
-            collapsible = TRUE,
-            sp_wrap_ins(ns("spi03"), uiOutput(ns("plot_charge_ui")))
-          )
-        ),
-        fluidRow(
-          box(
-            title = "Mass error distribution (ppm)",
-            status = "success",
-            solidHeader = TRUE,
-            width = 12,
-            collapsible = TRUE,
-            sp_wrap_ins(ns("spi04"), uiOutput(ns("plot_mz_error_ui")))
-          )
-        ),
-        fluidRow(
-          box(
-            title = "Number of retained PSMs vs. score threshold",
-            status = "success",
-            solidHeader = TRUE,
-            width = 12,
-            collapsible = TRUE,
-            sp_wrap_ins(ns("spi05"), uiOutput(ns("plot_elbow_ui")))
-          )
-        )
-      ),
-
-      # ── Peptide Analysis ─────────────────────────────────────────────────────
-      tabPanel(
-        "Peptide Analysis",
-        fluidRow(
-          box(
-            title = "Median score by peptide length",
-            status = "success",
-            solidHeader = TRUE,
-            width = 12,
-            collapsible = TRUE,
-            sp_wrap_ins(ns("spi06"), uiOutput(ns("plot_score_length_ui")))
-          )
-        ),
-        fluidRow(
-          box(
-            title = "ppm error vs InstaNovo score",
-            status = "success",
-            solidHeader = TRUE,
-            width = 12,
-            collapsible = TRUE,
-            sp_wrap_ins(ns("spi07"), uiOutput(ns("plot_mz_score_ui")))
-          )
-        ),
-        fluidRow(
-          box(
-            title = "GRAVY Index Distribution",
-            status = "success",
-            solidHeader = TRUE,
-            width = 12,
-            collapsible = TRUE,
-            sp_wrap_ins(ns("spi11"), uiOutput(ns("plot_gravy_ui")))
-          )
-        ),
-        fluidRow(
-          box(
-            title = "Isoelectric Point (pI) Distribution",
-            status = "success",
-            solidHeader = TRUE,
-            width = 12,
-            collapsible = TRUE,
-            sp_wrap_ins(ns("spi12"), uiOutput(ns("plot_pi_ui")))
-          )
-        ),
-        fluidRow(
-          box(
-            title = "Amino acid frequencies (Identified peptides)",
-            status = "success",
-            solidHeader = TRUE,
-            width = 12,
-            collapsible = TRUE,
-            sp_wrap_ins(ns("spi08"), uiOutput(ns("plot_aa_freq_ui")))
-          )
-        )
-      ),
-
-      # ── Termini SeqLogos ──────────────────────────────────────────────────────
-      tabPanel(
-        "Termini SeqLogos",
-        fluidRow(
-          box(
-            title = "N-terminus SeqLogo",
-            status = "success",
-            solidHeader = TRUE,
-            width = 12,
-            collapsible = TRUE,
-            sp_wrap_ins(
-              ns("spi09"),
-              plotOutput(ns("plot_nterm"), height = "280px")
-            )
-          ),
-          box(
-            title = "C-terminus SeqLogo",
-            status = "success",
-            solidHeader = TRUE,
-            width = 12,
-            collapsible = TRUE,
-            sp_wrap_ins(
-              ns("spi10"),
-              plotOutput(ns("plot_cterm"), height = "280px")
-            )
+            sp_wrap_ins(ns("spi_main"), uiOutput(ns("dynamic_plot_ui")))
           )
         )
       ),
@@ -595,7 +497,12 @@ InstaNovo_server <- function(id, fasta_digest) {
       if (nrow(td) < 10) {
         return(
           ggplot() +
-            annotate("text", x = 0.5, y = 0.5, label = "Not enough scored PSMs") +
+            annotate(
+              "text",
+              x = 0.5,
+              y = 0.5,
+              label = "Not enough scored PSMs"
+            ) +
             theme_void()
         )
       }
@@ -901,57 +808,37 @@ InstaNovo_server <- function(id, fasta_digest) {
       max(400L, ceiling(n / 3L) * 350L)
     })
 
-    make_ins_plot_ui <- function(plot_id) {
-      renderUI({ req(data()); plotOutput(ns(plot_id), height = paste0(ins_plot_h(), "px")) })
-    }
+    # ── Dynamic UI & Master Plot Routing ─────────────────────────────────────
+    output$dynamic_plot_ui <- renderUI({
+      req(data())
+      plotOutput(ns("dynamic_plot_out"), height = paste0(ins_plot_h(), "px"))
+    })
 
-    output$plot_score_ui        <- make_ins_plot_ui("plot_score")
-    output$plot_length_ui       <- make_ins_plot_ui("plot_length")
-    output$plot_charge_ui       <- make_ins_plot_ui("plot_charge")
-    output$plot_mz_error_ui     <- make_ins_plot_ui("plot_mz_error")
-    output$plot_elbow_ui        <- make_ins_plot_ui("plot_elbow")
-    output$plot_score_length_ui <- make_ins_plot_ui("plot_score_length")
-    output$plot_mz_score_ui     <- make_ins_plot_ui("plot_mz_score")
-    output$plot_aa_freq_ui      <- make_ins_plot_ui("plot_aa_freq")
-    output$plot_gravy_ui        <- make_ins_plot_ui("plot_gravy")
-    output$plot_pi_ui           <- make_ins_plot_ui("plot_pi")
+    current_plot_obj <- eventReactive(input$run_plot, {
+      req(input$plot_select)
+      shinyjs::show(id = "spi_main")
 
-    # ── Render UI plots
-    output$plot_score <- renderPlot({
-      rh(function() plot_score_obj(), "spi01")
+      switch(
+        input$plot_select,
+        "plot_score" = plot_score_obj(),
+        "plot_length" = plot_length_obj(),
+        "plot_charge" = plot_charge_obj(),
+        "plot_mz_error" = plot_mz_error_obj(),
+        "plot_elbow" = plot_elbow_obj(),
+        "plot_score_length" = plot_score_length_obj(),
+        "plot_mz_score" = plot_mz_score_obj(),
+        "plot_aa_freq" = plot_aa_freq_obj(),
+        "plot_nterm" = plot_nterm_obj(),
+        "plot_cterm" = plot_cterm_obj(),
+        "plot_gravy" = plot_gravy_obj(),
+        "plot_pi" = plot_pi_obj()
+      )
     })
-    output$plot_length <- renderPlot({
-      rh(function() plot_length_obj(), "spi02")
-    })
-    output$plot_charge <- renderPlot({
-      rh(function() plot_charge_obj(), "spi03")
-    })
-    output$plot_mz_error <- renderPlot({
-      rh(function() plot_mz_error_obj(), "spi04")
-    })
-    output$plot_elbow <- renderPlot({
-      rh(function() plot_elbow_obj(), "spi05")
-    })
-    output$plot_score_length <- renderPlot({
-      rh(function() plot_score_length_obj(), "spi06")
-    })
-    output$plot_mz_score <- renderPlot({
-      rh(function() plot_mz_score_obj(), "spi07")
-    })
-    output$plot_aa_freq <- renderPlot({
-      rh(function() plot_aa_freq_obj(), "spi08")
-    })
-    output$plot_nterm <- renderPlot({
-      rh(function() plot_nterm_obj(), "spi09")
-    })
-    output$plot_cterm <- renderPlot({
-      rh(function() plot_cterm_obj(), "spi10")
-    })
-    output$plot_gravy <- renderPlot({
-      rh(function() plot_gravy_obj(), "spi11")
-    })
-    output$plot_pi <- renderPlot({
-      rh(function() plot_pi_obj(), "spi12")
+
+    output$dynamic_plot_out <- renderPlot({
+      on.exit(hide_sp("spi_main"), add = TRUE)
+      req(current_plot_obj())
+      current_plot_obj()
     })
 
     # ── PSM Table
@@ -982,143 +869,20 @@ InstaNovo_server <- function(id, fasta_digest) {
     })
 
     # ── Download Plots
-    output$download_plots <- downloadHandler(
+    output$download_plot <- downloadHandler(
       filename = function() {
-        paste0("InstaNovo_Plots_", format(Sys.time(), "%Y%m%d_%H%M"), ".zip")
+        paste0("InstaNovo_", input$plot_select, "_", Sys.Date(), ".png")
       },
       content = function(file) {
-        req(plot_score_obj())
-
-        tmp_dir <- file.path(
-          tempdir(),
-          paste0("InstaNovo_Plots_", as.integer(Sys.time()))
+        req(current_plot_obj())
+        ggsave(
+          file,
+          current_plot_obj(),
+          width = 11,
+          height = 8,
+          bg = "white",
+          device = "png"
         )
-        dir.create(tmp_dir, showWarnings = FALSE)
-
-        tryCatch(
-          ggsave(
-            file.path(tmp_dir, "01_Score_Dist.png"),
-            plot_score_obj(),
-            width = 11,
-            height = 8,
-            dpi = 300
-          ),
-          error = function(e) NULL
-        )
-        tryCatch(
-          ggsave(
-            file.path(tmp_dir, "02_Length_Dist.png"),
-            plot_length_obj(),
-            width = 11,
-            height = 8,
-            dpi = 300
-          ),
-          error = function(e) NULL
-        )
-        tryCatch(
-          ggsave(
-            file.path(tmp_dir, "03_Charge_Dist.png"),
-            plot_charge_obj(),
-            width = 11,
-            height = 8,
-            dpi = 300
-          ),
-          error = function(e) NULL
-        )
-        tryCatch(
-          ggsave(
-            file.path(tmp_dir, "04_MZ_Error_Dist.png"),
-            plot_mz_error_obj(),
-            width = 11,
-            height = 8,
-            dpi = 300
-          ),
-          error = function(e) NULL
-        )
-        tryCatch(
-          ggsave(
-            file.path(tmp_dir, "05_PSMs_vs_Threshold.png"),
-            plot_elbow_obj(),
-            width = 11,
-            height = 8,
-            dpi = 300
-          ),
-          error = function(e) NULL
-        )
-        tryCatch(
-          ggsave(
-            file.path(tmp_dir, "06_Median_Score_Length.png"),
-            plot_score_length_obj(),
-            width = 11,
-            height = 8,
-            dpi = 300
-          ),
-          error = function(e) NULL
-        )
-        tryCatch(
-          ggsave(
-            file.path(tmp_dir, "07_PPM_Error_vs_Score.png"),
-            plot_mz_score_obj(),
-            width = 11,
-            height = 8,
-            dpi = 300
-          ),
-          error = function(e) NULL
-        )
-        tryCatch(
-          ggsave(
-            file.path(tmp_dir, "08_AA_Frequencies.png"),
-            plot_aa_freq_obj(),
-            width = 11,
-            height = 8,
-            dpi = 300
-          ),
-          error = function(e) NULL
-        )
-        tryCatch(
-          ggsave(
-            file.path(tmp_dir, "09_N_Term_SeqLogo.png"),
-            plot_nterm_obj(),
-            width = 11,
-            height = 8,
-            dpi = 300
-          ),
-          error = function(e) NULL
-        )
-        tryCatch(
-          ggsave(
-            file.path(tmp_dir, "10_C_Term_SeqLogo.png"),
-            plot_cterm_obj(),
-            width = 11,
-            height = 8,
-            dpi = 300
-          ),
-          error = function(e) NULL
-        )
-        tryCatch(
-          ggsave(
-            file.path(tmp_dir, "11_GRAVY_Dist.png"),
-            plot_gravy_obj(),
-            width = 11,
-            height = 8,
-            dpi = 300
-          ),
-          error = function(e) NULL
-        )
-        tryCatch(
-          ggsave(
-            file.path(tmp_dir, "12_pI_Dist.png"),
-            plot_pi_obj(),
-            width = 11,
-            height = 8,
-            dpi = 300
-          ),
-          error = function(e) NULL
-        )
-
-        owd <- setwd(tmp_dir)
-        on.exit(setwd(owd))
-        utils::zip(zipfile = file, files = list.files(tmp_dir))
       }
     )
   })

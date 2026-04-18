@@ -81,15 +81,15 @@ QC4DIANN_sidebar_ui <- function(id) {
   )
 }
 
-# ── Body UI (2-column layout) ──
+# ── Body UI (2-column layout) ───────────────────────────────────────────────
 QC4DIANN_ui <- function(id) {
   ns <- NS(id)
   WIDE_HEIGHT <- "700px"
 
   tagList(
     fluidRow(infoBoxOutput(ns("info_box1"), width = 12)),
-    
-        tabsetPanel(
+
+    tabsetPanel(
       id = ns("tabs"),
       type = "tabs",
 
@@ -412,6 +412,7 @@ QC4DIANN_server <- function(id) {
       d <- data()
       req(d, "Run" %in% names(d))
       n <- length(unique(d$Run))
+
       grid_rows <- ceiling(sqrt(n))
       max(500L, grid_rows * 180L)
     })
@@ -445,10 +446,10 @@ QC4DIANN_server <- function(id) {
         Lib.PG.Q.Value <= 0.01 &
         Lib.Q.Value <= 0.01 &
         PG.Q.Value <= 0.01 &
-        # If input is null, use zero else use the user input
-        PG.MaxLFQ.Quality >= ifelse(is.null(input$PG.MaxLFQ.Quality), 0, input$PG.MaxLFQ.Quality) &
-        # If input is null, use zero else use the user input
-        Empirical.Quality >= ifelse(is.null(input$Empirical.Quality), 0, input$Empirical.Quality)
+        # If (0 <= input <= 1), use the input, else use 0
+        PG.MaxLFQ.Quality >= ifelse(input$PG.MaxLFQ.Quality %between% c(0,1), input$PG.MaxLFQ.Quality, 0) &
+        # If (0 <= input <= 1), use the input, else use 0
+        Empirical.Quality >= ifelse(input$Empirical.Quality %between% c(0,1), input$Empirical.Quality, 0)
       ]
       
       # TODO: input$cRAP was not implemented yet #######
@@ -519,25 +520,14 @@ QC4DIANN_server <- function(id) {
 
     QuantUMS_scores <- reactive({
       req(input$report)
-      
-      data_parquet <- arrow::read_parquet(input$report$datapath) %>%
-        data.table::as.data.table() # Dataset must be a data.table from data.table package
-      
-      # Filters
-      data_parquet <- data_parquet[
-        Lib.PG.Q.Value <= 0.01 &
-        Lib.Q.Value <= 0.01 &
-        PG.Q.Value <= 0.01 
-      ]
-      
-      # TODO: input$cRAP was not implemented yet #######
-      # # If the user select to remove the cRAP, remove it
-      # if(input$cRAP) {
-      #   data_parquet <- data_parquet[!grepl("cRAP", Protein.Ids)]
-      # }
-      
-      # Select columns
-      data_parquet[, .(
+      arrow::read_parquet(input$report$datapath) %>%
+        dplyr::filter(
+          Lib.PG.Q.Value <= 0.01,
+          Lib.Q.Value <= 0.01,
+          PG.Q.Value <= 0.01,
+          !stringr::str_detect(Protein.Ids, "cRAP")
+        ) %>%
+        dplyr::select(
           Run,
           Precursor.Id,
           PG.MaxLFQ.Quality,
@@ -591,19 +581,13 @@ QC4DIANN_server <- function(id) {
 
     MS_corr <- reactive({
       req(input$report)
-
-      data_parquet <- arrow::read_parquet(input$report$datapath) %>%
-        data.table::as.data.table() # Dataset must be a data.table from data.table package
-      
-      # Filters
-      data_parquet <- data_parquet[
-        Lib.PG.Q.Value <= 0.01 &
-        Lib.Q.Value <= 0.01 &
-        PG.Q.Value <= 0.01 
-      ]    
-    
-      # Mutate
-      data_parquet <- data_parquet[, File.Name := Run]
+      arrow::read_parquet(input$report$datapath) %>%
+        dplyr::filter(
+          Lib.PG.Q.Value <= 0.01,
+          Lib.Q.Value <= 0.01,
+          PG.Q.Value <= 0.01
+        ) %>%
+        dplyr::mutate(File.Name = Run)
     })
 
     PCA_label <- reactive({
@@ -1866,16 +1850,23 @@ QC4DIANN_server <- function(id) {
         paste0("QC4DIANN_", input$qc_plot_select, "_", Sys.Date(), ".png")
       },
       content = function(file) {
-        req(current_qc_plot_obj())
-        ggsave(
-          file,
-          current_qc_plot_obj(),
-          width = 11,
-          height = 8,
-          bg = "white",
-          device = "png",
-          dpi = 300
-        )
+        obj <- current_qc_plot_obj()
+        req(obj)
+        if (inherits(obj, "Heatmap") || inherits(obj, "HeatmapList")) {
+          png(file, width = 11, height = 8, units = "in", res = 300)
+          ComplexHeatmap::draw(obj)
+          dev.off()
+        } else {
+          ggsave(
+            file,
+            obj,
+            width = 11,
+            height = 8,
+            bg = "white",
+            device = "png",
+            dpi = 300
+          )
+        }
       }
     )
   })

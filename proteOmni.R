@@ -1,4 +1,4 @@
-## proteOmni — Unified Proteomics QC Dashboard 
+## proteOmni — Unified Proteomics QC Dashboard
 ## Modules: PSManalyst (FragPipe - DDA QC), QC4DIANN (DIA-NN - DIA QC),
 ##          deNovo (Casanovo - de novo MS/MS), PwrQuant (limma + ORA),
 ##          MaxQuant (MaxQuant - DDA QC), InstaNovo (InstaNovo - de novo MS/MS),
@@ -46,6 +46,7 @@ CRAN_packages <- c(
   "ggforce",
   "ggridges"
 )
+
 not_inst <- CRAN_packages[
   !(CRAN_packages %in% installed.packages()[, "Package"])
 ]
@@ -238,7 +239,7 @@ source("modules/mod_MaxQuantMSMS.r")
 options(shiny.maxRequestSize = 2000 * 1024^2)
 
 theme_set(theme_bw(base_size = 13))
-theme_update(
+ggplot2::theme_update(
   text = element_text(color = "black", family = "sans"),
   axis.text = element_text(color = "black", face = "bold"),
   axis.title = element_text(color = "black", face = "bold"),
@@ -357,7 +358,6 @@ omni_css <- "
 # ── UI ────────────────────────────────────────────────────────────────────────
 ui <- dashboardPage(
   skin = "blue",
-
   dashboardHeader(
     title = tags$span(
       icon("knight", style = "margin-right:6px;", lib = "glyphicon"),
@@ -365,7 +365,6 @@ ui <- dashboardPage(
     ),
     titleWidth = 220
   ),
-
   dashboardSidebar(
     width = 290,
     useShinyjs(),
@@ -403,7 +402,6 @@ ui <- dashboardPage(
     uiOutput("active_sidebar_controls"),
     Fasta_sidebar_ui("global_fasta")
   ),
-
   dashboardBody(
     tabItems(
       # ── Home ──────────────────────────────────────────────────────────────

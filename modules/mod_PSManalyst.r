@@ -49,8 +49,7 @@ extract_matrix_per_sample <- function(data) {
   mats <- dplyr::group_by(filtered, sample_name) %>%
     dplyr::group_map(
       ~ {
-        fp <- strsplit(
-          c(.x$fingerprint_Nterm, .x$fingerprint_Cterm), "")
+        fp <- strsplit(c(.x$fingerprint_Nterm, .x$fingerprint_Cterm), "")
 
         if (length(fp) == 0) {
           return(NULL)
@@ -415,10 +414,9 @@ build_psm_spectrum <- function(tidy_data, label_size = 3) {
 }
 
 
-# ── UI — organized into 2 columns ─────────────────────────────────────────
-PSManalyst_ui <- function(id) {
+# ── Body UI — organized into 2 columns ─────────────────────────────
+PSManalyst_sidebar_ui <- function(id) {
   ns <- NS(id)
-
   tagList(
     tags$div(class = "sidebar-section-label", "PSManalyst Controls"),
     tags$div(
@@ -432,7 +430,7 @@ PSManalyst_ui <- function(id) {
         ns("load_psm_folder"),
         "Load PSM Files",
         class = "btn-primary btn-sm",
-        style = "width:100%;margin-bottom:6px;"
+        style = "width:80%;margin-bottom:6px;"
       ),
       uiOutput(ns("psm_folder_status")),
       tags$hr(style = "border-color:#2d3741;"),
