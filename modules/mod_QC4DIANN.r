@@ -446,9 +446,9 @@ QC4DIANN_server <- function(id) {
         Lib.Q.Value <= 0.01 &
         PG.Q.Value <= 0.01 &
         # If (0 <= input <= 1), use the input, else use 0
-        PG.MaxLFQ.Quality >= ifelse(is.null(input$PG.MaxLFQ.Quality), input$PG.MaxLFQ.Quality, 0) &
+        PG.MaxLFQ.Quality >= ifelse(is.null(input$PG.MaxLFQ.Quality), 0, input$PG.MaxLFQ.Quality) &
         # If (0 <= input <= 1), use the input, else use 0
-        Empirical.Quality >= ifelse(is.null(input$Empirical.Quality), input$Empirical.Quality, 0)
+        Empirical.Quality >= ifelse(is.null(input$Empirical.Quality), 0, input$Empirical.Quality)
       ]
       
       # TODO: input$cRAP was not implemented yet #######
