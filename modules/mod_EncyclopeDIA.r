@@ -9,6 +9,7 @@ library(dplyr)
 library(tidyr)
 library(stringr)
 library(ggplot2)
+library(data.table)
 library(readr)
 library(purrr)
 library(DT)
@@ -208,7 +209,7 @@ EncyclopeDIA_server <- function(id, fasta_digest) {
           res <- tryCatch(
             {
               map_dfr(enc_files, function(f) {
-                d <- read_tsv(f, col_types = cols(), show_col_types = FALSE)
+                d <- data.table::fread(f, sep = "\t", header = TRUE)
 
                 if (!"peptide" %in% names(d) && "Peptide" %in% names(d)) {
                   d$peptide <- d$Peptide
