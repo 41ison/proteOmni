@@ -471,6 +471,29 @@ PwrQuant_body_ui <- function(id) {
           )
         )
       )
+    ),
+    tabPanel(
+      "UpSet — Proteins by Condition",
+      fluidRow(
+        box(
+          title = "UpSet plot — proteins detected per condition",
+          status = "primary",
+          solidHeader = TRUE,
+          width = 12,
+          p(
+            "A protein is considered detected in a condition if it has at least one non-missing value across all samples belonging to that condition."
+          ),
+          div(
+            class = "plot-wrap",
+            tags$div(
+              class = "spinner-overlay",
+              id = ns("sp_upset"),
+              icon("spinner", class = "fa-spin")
+            ),
+            uiOutput(ns("upset_plot_ui"))
+          )
+        )
+      )
     )
   )
 }
@@ -2264,5 +2287,62 @@ PwrQuant_server <- function(id) {
         }
       }
     )
+
+    # ── UpSet — Proteins by Condition ──────────────────────────────────────────────
+    upset_sets <- reactive({
+      req(raw_matrix(), meta_edit_df())
+      mat <- raw_matrix()
+      meta <- meta_edit_df()
+
+      # For each condition: union of proteins with at least one non-NA value
+      conditions <- unique(meta$Condition)
+      sets <- lapply(conditions, function(cond) {
+        samples <- meta$Sample[meta$Condition == cond]
+        samples <- intersect(samples, colnames(mat))
+        if (length(samples) == 0) {
+          return(character(0))
+        }
+        sub <- mat[, samples, drop = FALSE]
+        rownames(sub)[apply(sub, 1, function(x) any(!is.na(x)))]
+      })
+      names(sets) <- conditions
+      sets[vapply(sets, length, integer(1)) > 0]
+    })
+
+    output$upset_plot_ui <- renderUI({
+      req(upset_sets())
+      n_cond <- length(upset_sets())
+      h <- max(500, 300 + n_cond * 40)
+      plotOutput(ns("upset_plot"), height = paste0(h, "px"))
+    })
+
+    output$upset_plot <- renderPlot({
+      shinyjs::show(id = "sp_upset")
+      on.exit(shinyjs::hide(id = "sp_upset"), add = TRUE)
+      sets <- upset_sets()
+      req(length(sets) >= 2)
+
+      m <- ComplexHeatmap::make_comb_mat(sets)
+      ComplexHeatmap::UpSet(
+        m,
+        comb_order = order(ComplexHeatmap::comb_size(m), decreasing = TRUE),
+        top_annotation = ComplexHeatmap::upset_top_annotation(
+          m,
+          add_numbers = TRUE,
+          annotation_name_rot = 0,
+          annotation_name_gp = grid::gpar(fontsize = 12, fontface = "bold"),
+          gp = grid::gpar(fill = "#1B4965")
+        ),
+        right_annotation = ComplexHeatmap::upset_right_annotation(
+          m,
+          add_numbers = TRUE,
+          annotation_name_gp = grid::gpar(fontsize = 12, fontface = "bold"),
+          gp = grid::gpar(fill = "#5FA8D3")
+        ),
+        row_names_gp = grid::gpar(fontsize = 11, fontface = "bold"),
+        column_title = "Proteins detected per condition",
+        column_title_gp = grid::gpar(fontsize = 14, fontface = "bold")
+      )
+    })
   })
 }
