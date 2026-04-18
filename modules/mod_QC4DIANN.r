@@ -1,18 +1,12 @@
-## QC4DIANN Shiny Module — wraps QC4DIANN_v1.1.0 logic as a module for proteOmni
+## QC4DIANN Shiny Module — QC4DIANN_v1.1.0 module for proteOmni
 
-# ── UI ─────────────────────────────────────────────────────────────────────
-QC4DIANN_ui <- function(id) {
+# ── Sidebar UI (moved to dashboard sidebar via switch in proteOmni.R) ──
+QC4DIANN_sidebar_ui <- function(id) {
   ns <- NS(id)
-  STD_HEIGHT <- "580px"
-  WIDE_HEIGHT <- "700px"
-
   tagList(
+    tags$div(class = "sidebar-section-label", "Data Input"),
     tags$div(
-      id = ns("sidebar_content"),
-      tags$div(
-        style = "padding:12px 16px 4px;color:#adb5bd;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:1px;",
-        "Data Input"
-      ),
+      style = "padding:0 16px;",
       fileInput(
         ns("report"),
         "Parquet Report",
@@ -32,12 +26,13 @@ QC4DIANN_ui <- function(id) {
         min = 0,
         max = 3,
         step = 1
-      ),
-      tags$hr(style = "border-color:#2d3741;margin:4px 0;"),
-      tags$div(
-        style = "padding:8px 16px 4px;color:#adb5bd;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:1px;",
-        "QuantUMS Filters"
-      ),
+      )
+    ),
+    tags$hr(style = "border-color:#2d3741;margin:4px 0;"),
+
+    tags$div(class = "sidebar-section-label", "QuantUMS Filters"),
+    tags$div(
+      style = "padding:0 16px;",
       sliderInput(
         ns("PG.MaxLFQ.Quality"),
         "PG MaxLFQ Quality",
@@ -53,20 +48,15 @@ QC4DIANN_ui <- function(id) {
         max = 1,
         value = 0,
         step = 0.05
-      ),
-      tags$hr(style = "border-color:#2d3741;margin:4px 0;"),
-      tags$div(
-        style = "padding:8px 16px 4px;color:#adb5bd;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:1px;",
-        "Interactive Viewer"
-      ),
+      )
+    ),
+    tags$hr(style = "border-color:#2d3741;margin:4px 0;"),
+
+    tags$div(class = "sidebar-section-label", "Interactive Viewer"),
+    tags$div(
+      style = "padding:0 16px;",
       selectInput(ns("xcol"), "X Sample", choices = NULL),
       selectInput(ns("ycol"), "Y Sample", choices = NULL),
-      tags$hr(style = "border-color:#495057;margin:10px 0;"),
-      tags$h5(
-        "Interactive Viewer / EFA",
-        class = "sidebar-heading",
-        style = "color:#adb5bd;font-weight:600;padding-left:15px;"
-      ),
       numericInput(
         ns("efa_factors"),
         "EFA Latent Factors",
@@ -74,286 +64,104 @@ QC4DIANN_ui <- function(id) {
         min = 1,
         max = 20,
         step = 1
-      ),
-      tags$br(),
-      tags$div(
-        style = "padding:8px 16px 4px;color:#adb5bd;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:1px;",
-        "Downloads"
-      ),
-      div(
-        style = "padding:0 8px;",
-        div(
-          style = "margin-bottom:8px;",
-          downloadButton(
-            ns("download_matrix"),
-            "⬇ Filtered Protein Matrix",
-            class = "dl-btn",
-            style = "width:100%;text-align:left;"
-          )
-        ),
-        div(downloadButton(
-          ns("download_all_figs"),
-          "⬇ All Figures (ZIP)",
-          class = "dl-btn",
-          style = "width:100%;text-align:left;"
-        ))
-      ),
-      tags$br()
+      )
     ),
+    tags$hr(style = "border-color:#2d3741;margin:4px 0;"),
 
-    ## BODY
-    tabsetPanel(
+    tags$div(class = "sidebar-section-label", "Downloads"),
+    tags$div(
+      style = "padding:0 16px;",
+      downloadButton(
+        ns("download_matrix"),
+        tagList(icon("download"), " Filtered Protein Matrix"),
+        class = "dl-btn",
+        style = "width:100%;margin-bottom:8px;"
+      )
+    )
+  )
+}
+
+# ── Body UI (2-column layout) ──
+QC4DIANN_ui <- function(id) {
+  ns <- NS(id)
+  WIDE_HEIGHT <- "700px"
+
+  tagList(
+    fluidRow(infoBoxOutput(ns("info_box1"), width = 12)),
+    
+        tabsetPanel(
       id = ns("tabs"),
       type = "tabs",
+
+      # ── TAB 1: QC Filters & Distributions (2-column) ──
       tabPanel(
         "QC Filters & Distributions",
-        fluidRow(infoBoxOutput(ns("info_box1"), width = 12)),
-        fluidRow(box(
-          title = "Reconstruction of XIC",
-          status = "primary",
-          solidHeader = TRUE,
-          width = 12,
-          collapsible = TRUE,
-          div(
-            class = "plot-wrap",
-            tags$div(
-              class = "spinner-overlay",
-              id = ns("sp1"),
-              icon("spinner", class = "fa-spin")
-            ),
-            uiOutput(ns("plot1_ui"))
-          )
-        )),
-        fluidRow(box(
-          title = "Density of Ions (m/z vs RT)",
-          status = "primary",
-          solidHeader = TRUE,
-          width = 12,
-          collapsible = TRUE,
-          div(
-            class = "plot-wrap",
-            tags$div(
-              class = "spinner-overlay",
-              id = ns("sp2"),
-              icon("spinner", class = "fa-spin")
-            ),
-            uiOutput(ns("plot2_ui"))
-          )
-        )),
-        fluidRow(box(
-          title = "Retention Time Prediction Error",
-          status = "primary",
-          solidHeader = TRUE,
-          width = 12,
-          collapsible = TRUE,
-          div(
-            class = "plot-wrap",
-            tags$div(
-              class = "spinner-overlay",
-              id = ns("sp3"),
-              icon("spinner", class = "fa-spin")
-            ),
-            uiOutput(ns("plot3_ui"))
-          )
-        )),
         fluidRow(
-          box(
-            title = "Charge State Distribution",
-            status = "primary",
-            solidHeader = TRUE,
-            width = 6,
-            collapsible = TRUE,
-            div(
-              class = "plot-wrap",
-              tags$div(
-                class = "spinner-overlay",
-                id = ns("sp4"),
-                icon("spinner", class = "fa-spin")
+          column(
+            4,
+            box(
+              title = "QC Plot Controls",
+              status = "primary",
+              solidHeader = TRUE,
+              width = NULL,
+              selectInput(
+                ns("qc_plot_select"),
+                "Select Graphic",
+                choices = c(
+                  "Reconstruction of XIC" = "plot1",
+                  "Density of Ions (m/z vs RT)" = "plot2",
+                  "Retention Time Prediction Error" = "plot3",
+                  "Charge State Distribution" = "plot4",
+                  "Peptide Length Distribution" = "plot5",
+                  "Peptides per Sample" = "plot6",
+                  "Proteins per Sample" = "plot7",
+                  "Cysteine Counts in Peptides" = "plot15",
+                  "Sparsity Profile (Missing Values %)" = "plot8",
+                  "Missing Values vs Median Abundance" = "plot9",
+                  "Abundance Before and After MAD Normalization" = "plot10",
+                  "Missed Cleavage Sites" = "plot11",
+                  "MS1 Profile Correlation" = "plot12",
+                  "QuantUMS Score Distributions" = "plot13",
+                  "Gene Quantity Distribution" = "plot14"
+                )
               ),
-              uiOutput(ns("plot4_ui"))
+              actionButton(
+                ns("run_qc_plot"),
+                "Plot Selected Graphic",
+                icon = icon("chart-bar"),
+                class = "btn-primary",
+                style = "width:100%;margin-bottom:8px;"
+              ),
+              downloadButton(
+                ns("download_qc_plot"),
+                tagList(icon("download"), " Download (.png)"),
+                class = "dl-btn",
+                style = "width:100%;"
+              )
             )
           ),
-          box(
-            title = "Peptide Length Distribution",
-            status = "primary",
-            solidHeader = TRUE,
-            width = 6,
-            collapsible = TRUE,
-            div(
-              class = "plot-wrap",
-              tags$div(
-                class = "spinner-overlay",
-                id = ns("sp5"),
-                icon("spinner", class = "fa-spin")
-              ),
-              uiOutput(ns("plot5_ui"))
+          column(
+            8,
+            box(
+              title = "Dynamic QC Plot View",
+              status = "primary",
+              solidHeader = TRUE,
+              width = NULL,
+              div(
+                class = "plot-wrap",
+                tags$div(
+                  class = "spinner-overlay",
+                  id = ns("sp_qc_main"),
+                  icon("spinner", class = "fa-spin")
+                ),
+                uiOutput(ns("dynamic_qc_plot_ui"))
+              )
             )
           )
-        ),
-        fluidRow(
-          box(
-            title = "Peptides per Sample",
-            status = "primary",
-            solidHeader = TRUE,
-            width = 6,
-            collapsible = TRUE,
-            div(
-              class = "plot-wrap",
-              tags$div(
-                class = "spinner-overlay",
-                id = ns("sp6"),
-                icon("spinner", class = "fa-spin")
-              ),
-              uiOutput(ns("plot6_ui"))
-            )
-          ),
-          box(
-            title = "Proteins per Sample",
-            status = "primary",
-            solidHeader = TRUE,
-            width = 6,
-            collapsible = TRUE,
-            div(
-              class = "plot-wrap",
-              tags$div(
-                class = "spinner-overlay",
-                id = ns("sp7"),
-                icon("spinner", class = "fa-spin")
-              ),
-              uiOutput(ns("plot7_ui"))
-            )
-          )
-        ),
-        fluidRow(box(
-          title = "Cysteine Counts in Peptides",
-          status = "primary",
-          solidHeader = TRUE,
-          width = 12,
-          collapsible = TRUE,
-          div(
-            class = "plot-wrap",
-            tags$div(
-              class = "spinner-overlay",
-              id = ns("sp15"),
-              icon("spinner", class = "fa-spin")
-            ),
-            uiOutput(ns("plot15_ui"))
-          )
-        )),
-        fluidRow(box(
-          title = "Sparsity Profile (Missing Values %)",
-          status = "primary",
-          solidHeader = TRUE,
-          width = 12,
-          collapsible = TRUE,
-          div(
-            class = "plot-wrap",
-            tags$div(
-              class = "spinner-overlay",
-              id = ns("sp8"),
-              icon("spinner", class = "fa-spin")
-            ),
-            uiOutput(ns("plot8_ui"))
-          )
-        )),
-        fluidRow(box(
-          title = "Missing Values vs Median Abundance",
-          status = "primary",
-          solidHeader = TRUE,
-          width = 12,
-          collapsible = TRUE,
-          div(
-            class = "plot-wrap",
-            tags$div(
-              class = "spinner-overlay",
-              id = ns("sp9"),
-              icon("spinner", class = "fa-spin")
-            ),
-            uiOutput(ns("plot9_ui"))
-          )
-        )),
-        fluidRow(box(
-          title = "Abundance Before and After MAD Normalization",
-          status = "primary",
-          solidHeader = TRUE,
-          width = 12,
-          collapsible = TRUE,
-          div(
-            class = "plot-wrap",
-            tags$div(
-              class = "spinner-overlay",
-              id = ns("sp10"),
-              icon("spinner", class = "fa-spin")
-            ),
-            uiOutput(ns("plot10_ui"))
-          )
-        )),
-        fluidRow(box(
-          title = "Missed Cleavage Sites",
-          status = "primary",
-          solidHeader = TRUE,
-          width = 12,
-          collapsible = TRUE,
-          div(
-            class = "plot-wrap",
-            tags$div(
-              class = "spinner-overlay",
-              id = ns("sp11"),
-              icon("spinner", class = "fa-spin")
-            ),
-            uiOutput(ns("plot11_ui"))
-          )
-        )),
-        fluidRow(box(
-          title = "MS1 Profile Correlation",
-          status = "primary",
-          solidHeader = TRUE,
-          width = 12,
-          collapsible = TRUE,
-          div(
-            class = "plot-wrap",
-            tags$div(
-              class = "spinner-overlay",
-              id = ns("sp12"),
-              icon("spinner", class = "fa-spin")
-            ),
-            uiOutput(ns("plot12_ui"))
-          )
-        )),
-        fluidRow(box(
-          title = "QuantUMS Score Distributions",
-          status = "primary",
-          solidHeader = TRUE,
-          width = 12,
-          collapsible = TRUE,
-          div(
-            class = "plot-wrap",
-            tags$div(
-              class = "spinner-overlay",
-              id = ns("sp13"),
-              icon("spinner", class = "fa-spin")
-            ),
-            uiOutput(ns("plot13_ui"))
-          )
-        )),
-        fluidRow(box(
-          title = "Gene Quantity Distribution",
-          status = "primary",
-          solidHeader = TRUE,
-          width = 12,
-          collapsible = TRUE,
-          div(
-            class = "plot-wrap",
-            tags$div(
-              class = "spinner-overlay",
-              id = ns("sp14"),
-              icon("spinner", class = "fa-spin")
-            ),
-            uiOutput(ns("plot14_ui"))
-          )
-        ))
+        )
       ),
 
+      # ── TAB 2: Interactive Viewer ──
       tabPanel(
         "Interactive Viewer",
         fluidRow(
@@ -441,6 +249,7 @@ QC4DIANN_ui <- function(id) {
         )
       ),
 
+      # ── TAB 3: Peptide Mapping ──
       tabPanel(
         "Peptide Mapping",
         fluidRow(uiOutput(ns("pep_map_banner"))),
@@ -471,7 +280,7 @@ QC4DIANN_ui <- function(id) {
               3,
               numericInput(
                 ns("aa_per_line"),
-                "Amino Acids per Line:",
+                "AAs per line:",
                 value = 50,
                 min = 10,
                 max = 200
@@ -546,6 +355,7 @@ QC4DIANN_ui <- function(id) {
         ))
       ),
 
+      # ── TAB 4: Protease Specificity ──
       tabPanel(
         "Protease Specificity",
         fluidRow(uiOutput(ns("prot_spec_banner"))),
@@ -573,39 +383,11 @@ QC4DIANN_ui <- function(id) {
 # ── Server ──────────────────────────────────────────────────────────────────
 QC4DIANN_server <- function(id) {
   moduleServer(id, function(input, output, session) {
-    qc_plot_h <- reactive({
-      d <- data()
-      req(d, "Run" %in% names(d))
-      n <- length(unique(d$Run))
-      # facet_wrap defaults to a roughly square grid
-      grid_rows <- ceiling(sqrt(n))
-      max(500L, grid_rows * 180L)
-    })
-    
-    make_qc_plot_ui <- function(plot_id) {
-      renderUI({ req(data()); plotOutput(ns(plot_id), height = paste0(qc_plot_h(), "px")) })
-    }
-    
-    output$plot1_ui <- make_qc_plot_ui("plot1")
-    output$plot2_ui <- make_qc_plot_ui("plot2")
-    output$plot3_ui <- make_qc_plot_ui("plot3")
-    output$plot4_ui <- make_qc_plot_ui("plot4")
-    output$plot5_ui <- make_qc_plot_ui("plot5")
-    output$plot6_ui <- make_qc_plot_ui("plot6")
-    output$plot7_ui <- make_qc_plot_ui("plot7")
-    output$plot8_ui <- make_qc_plot_ui("plot8")
-    output$plot9_ui <- make_qc_plot_ui("plot9")
-    output$plot10_ui <- make_qc_plot_ui("plot10")
-    output$plot11_ui <- make_qc_plot_ui("plot11")
-    output$plot12_ui <- make_qc_plot_ui("plot12")
-    output$plot13_ui <- make_qc_plot_ui("plot13")
-    output$plot14_ui <- make_qc_plot_ui("plot14")
-    output$plot15_ui <- make_qc_plot_ui("plot15")
-    output$plot_aa_freq_ui <- make_qc_plot_ui("plot_aa_freq")
-    output$plot_pep_type_count_ui <- make_qc_plot_ui("plot_pep_type_count")
-    output$plot_pep_type_prop_ui <- make_qc_plot_ui("plot_pep_type_prop")
-
+    # ── Namespace + helpers declared FIRST ──
     ns <- session$ns
+
+    show_spinner <- function(sid) shinyjs::show(id = sid)
+    hide_spinner <- function(sid) shinyjs::hide(id = sid)
 
     pal <- c(
       proteotypic = "#2D6A4F",
@@ -617,30 +399,44 @@ QC4DIANN_server <- function(id) {
       green1 = "#2D6A4F"
     )
 
-    # ── spinner helpers ────────────────────────────────────────────────────
-    show_spinner <- function(sid) shinyjs::show(id = sid)
-    hide_spinner <- function(sid) shinyjs::hide(id = sid)
+    heatmap_theme <- theme(
+      text = element_text(size = 14),
+      axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5),
+      axis.text.y = element_text(hjust = 1),
+      legend.position = "bottom",
+      legend.key.width = unit(2.5, "cm")
+    )
 
-    # ── reactives ──────────────────────────────────────────────────────────
+    # ── Dynamic-height helper for Run-faceted plots ─────────────────────────
+    qc_plot_h <- reactive({
+      d <- data()
+      req(d, "Run" %in% names(d))
+      n <- length(unique(d$Run))
+      grid_rows <- ceiling(sqrt(n))
+      max(500L, grid_rows * 180L)
+    })
+
+    make_qc_plot_ui <- function(plot_id) {
+      renderUI({
+        req(data())
+        plotOutput(ns(plot_id), height = paste0(qc_plot_h(), "px"))
+      })
+    }
+
+    output$dynamic_qc_plot_ui <- renderUI({
+      req(data())
+      plotOutput(ns("dynamic_qc_plot_out"), height = paste0(qc_plot_h(), "px"))
+    })
+
+    output$plot_aa_freq_ui <- make_qc_plot_ui("plot_aa_freq")
+    output$plot_pep_type_count_ui <- make_qc_plot_ui("plot_pep_type_count")
+    output$plot_pep_type_prop_ui <- make_qc_plot_ui("plot_pep_type_prop")
+
+    # ════════════════════════════════════════════════════════════════════════
+    # A. DATA REACTIVES
+    # ════════════════════════════════════════════════════════════════════════
     data <- reactive({
       req(input$report)
-      show_spinner("sp1")
-      show_spinner("sp2")
-      show_spinner("sp3")
-      show_spinner("sp4")
-      show_spinner("sp5")
-      show_spinner("sp6")
-      show_spinner("sp7")
-      show_spinner("sp8")
-      show_spinner("sp9")
-      show_spinner("sp10")
-      show_spinner("sp11")
-      show_spinner("sp14")
-      show_spinner("sp15")
-      show_spinner("sp_aa")
-      show_spinner("spefa")
-      show_spinner("sp_pca")
-      show_spinner("sp_hm")
       arrow::read_parquet(input$report$datapath) %>%
         dplyr::filter(
           Lib.PG.Q.Value <= 0.01,
@@ -652,8 +448,16 @@ QC4DIANN_server <- function(id) {
           peptide_length = nchar(Stripped.Sequence)
         ) %>%
         dplyr::filter(
-          if (is.null(input$PG.MaxLFQ.Quality)) TRUE else PG.MaxLFQ.Quality >= input$PG.MaxLFQ.Quality,
-          if (is.null(input$Empirical.Quality)) TRUE else Empirical.Quality >= input$Empirical.Quality
+          if (is.null(input$PG.MaxLFQ.Quality)) {
+            TRUE
+          } else {
+            PG.MaxLFQ.Quality >= input$PG.MaxLFQ.Quality
+          },
+          if (is.null(input$Empirical.Quality)) {
+            TRUE
+          } else {
+            Empirical.Quality >= input$Empirical.Quality
+          }
         ) %>%
         dplyr::filter(!stringr::str_detect(Protein.Ids, "cRAP"))
     })
@@ -711,7 +515,6 @@ QC4DIANN_server <- function(id) {
 
     QuantUMS_scores <- reactive({
       req(input$report)
-      show_spinner("sp13")
       arrow::read_parquet(input$report$datapath) %>%
         dplyr::filter(
           Lib.PG.Q.Value <= 0.01,
@@ -773,7 +576,6 @@ QC4DIANN_server <- function(id) {
 
     MS_corr <- reactive({
       req(input$report)
-      show_spinner("sp12")
       arrow::read_parquet(input$report$datapath) %>%
         dplyr::filter(
           Lib.PG.Q.Value <= 0.01,
@@ -880,6 +682,7 @@ QC4DIANN_server <- function(id) {
         dplyr::summarise(n = n(), .groups = "drop")
     })
 
+    # ── Cleavage windows helpers ───────────────────────────────
     extract_one_window <- function(pep, prot_id, full_seqs) {
       if (
         is.null(prot_id) ||
@@ -1022,15 +825,9 @@ QC4DIANN_server <- function(id) {
       mat
     }
 
-    # ── outputs ─────────────────────────────────────────────────────────────
-    heatmap_theme <- theme(
-      text = element_text(size = 14),
-      axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5),
-      axis.text.y = element_text(hjust = 1),
-      legend.position = "bottom",
-      legend.key.width = unit(2.5, "cm")
-    )
-
+    # ════════════════════════════════════════════════════════════════════════
+    # B. INFO + BANNERS
+    # ════════════════════════════════════════════════════════════════════════
     output$info_box1 <- renderInfoBox({
       infoBox(
         title = "Active Filters",
@@ -1067,7 +864,9 @@ QC4DIANN_server <- function(id) {
       }
     })
 
-    # plot1–14 reactive objects
+    # ════════════════════════════════════════════════════════════════════════
+    # C. QC PLOT REACTIVES (plot1–15)  — helpers on top
+    # ════════════════════════════════════════════════════════════════════════
     plot1_obj <- reactive({
       req(data())
       data() %>%
@@ -1077,6 +876,7 @@ QC4DIANN_server <- function(id) {
         labs(x = "Retention time (min)", y = "Precursor quantity") +
         facet_wrap(~Run, scales = "free_y")
     })
+
     plot2_obj <- reactive({
       req(data())
       data() %>%
@@ -1092,6 +892,7 @@ QC4DIANN_server <- function(id) {
         ) +
         facet_wrap(~Run)
     })
+
     plot3_obj <- reactive({
       req(data())
       data() %>%
@@ -1112,6 +913,7 @@ QC4DIANN_server <- function(id) {
         ) +
         facet_wrap(~Run)
     })
+
     plot4_obj <- reactive({
       req(data())
       data() %>%
@@ -1121,6 +923,7 @@ QC4DIANN_server <- function(id) {
         labs(x = "Precursor charge", y = "Density") +
         facet_wrap(~Run)
     })
+
     plot5_obj <- reactive({
       req(data())
       data() %>%
@@ -1129,6 +932,7 @@ QC4DIANN_server <- function(id) {
         labs(x = "Peptide length (a.a.)", y = "Count") +
         facet_wrap(~Run, scales = "free_y")
     })
+
     plot6_obj <- reactive({
       req(peptides_per_run())
       peptides_per_run() %>%
@@ -1143,6 +947,7 @@ QC4DIANN_server <- function(id) {
         ) +
         labs(y = NULL, x = "Number of peptides")
     })
+
     plot7_obj <- reactive({
       req(proteins())
       proteins() %>%
@@ -1157,6 +962,7 @@ QC4DIANN_server <- function(id) {
         ) +
         labs(y = NULL, x = "Number of proteins")
     })
+
     plot8_obj <- reactive({
       req(unique_genes())
       unique_genes() %>%
@@ -1171,6 +977,7 @@ QC4DIANN_server <- function(id) {
         labs(x = NULL, y = "Missing values (%)") +
         theme(axis.text.x = element_text(angle = 45, hjust = 1))
     })
+
     plot9_obj <- reactive({
       req(missing_vs_mean())
       missing_vs_mean() %>%
@@ -1180,6 +987,7 @@ QC4DIANN_server <- function(id) {
         labs(x = "Missing values (%)", y = "Median log₂(intensity)") +
         facet_wrap(~norm)
     })
+
     plot10_obj <- reactive({
       req(combined_data())
       combined_data() %>%
@@ -1199,6 +1007,7 @@ QC4DIANN_server <- function(id) {
         labs(x = NULL, y = "log₂(Intensity)") +
         facet_wrap(~norm)
     })
+
     plot11_obj <- reactive({
       req(data())
       data() %>%
@@ -1227,6 +1036,7 @@ QC4DIANN_server <- function(id) {
         labs(y = NULL, x = "Count", fill = "Specificity") +
         theme(legend.position = "top")
     })
+
     plot12_obj <- reactive({
       req(MS_corr(), input$Empirical.Quality)
       MS_corr() %>%
@@ -1254,6 +1064,7 @@ QC4DIANN_server <- function(id) {
         theme(legend.position = "top") +
         facet_wrap(~Run)
     })
+
     plot13_obj <- reactive({
       req(QuantUMS_scores())
       QuantUMS_scores() %>%
@@ -1271,6 +1082,7 @@ QC4DIANN_server <- function(id) {
         theme(legend.position = "bottom") +
         facet_wrap(~Run)
     })
+
     plot14_obj <- reactive({
       req(gene_quantity())
       gene_quantity() %>%
@@ -1296,7 +1108,7 @@ QC4DIANN_server <- function(id) {
         dplyr::select(Run, Stripped.Sequence) %>%
         dplyr::distinct() %>%
         dplyr::mutate(
-          cysteine_count = str_count(Stripped.Sequence, "C"),
+          cysteine_count = stringr::str_count(Stripped.Sequence, "C"),
           cysteine_count_group = ifelse(
             cysteine_count >= 3,
             "3+",
@@ -1316,6 +1128,39 @@ QC4DIANN_server <- function(id) {
         facet_wrap(~Run, scales = "free_y")
     })
 
+    # ── Dynamic QC plot dispatcher ──
+    current_qc_plot_obj <- eventReactive(input$run_qc_plot, {
+      req(input$qc_plot_select)
+      show_spinner("sp_qc_main")
+      switch(
+        input$qc_plot_select,
+        "plot1" = plot1_obj(),
+        "plot2" = plot2_obj(),
+        "plot3" = plot3_obj(),
+        "plot4" = plot4_obj(),
+        "plot5" = plot5_obj(),
+        "plot6" = plot6_obj(),
+        "plot7" = plot7_obj(),
+        "plot8" = plot8_obj(),
+        "plot9" = plot9_obj(),
+        "plot10" = plot10_obj(),
+        "plot11" = plot11_obj(),
+        "plot12" = plot12_obj(),
+        "plot13" = plot13_obj(),
+        "plot14" = plot14_obj(),
+        "plot15" = plot15_obj()
+      )
+    })
+
+    output$dynamic_qc_plot_out <- renderPlot({
+      on.exit(hide_spinner("sp_qc_main"), add = TRUE)
+      req(current_qc_plot_obj())
+      current_qc_plot_obj()
+    })
+
+    # ════════════════════════════════════════════════════════════════════════
+    # D. AA FREQUENCY PLOT
+    # ════════════════════════════════════════════════════════════════════════
     plot_aa_freq_obj <- reactive({
       req(input$fasta_file, data())
       base_aas <- c(
@@ -1402,6 +1247,14 @@ QC4DIANN_server <- function(id) {
         facet_wrap(~Run)
     })
 
+    output$plot_aa_freq <- renderPlot({
+      on.exit(hide_spinner("sp_aa"), add = TRUE)
+      plot_aa_freq_obj()
+    })
+
+    # ════════════════════════════════════════════════════════════════════════
+    # E. PROTEIN COVERAGE
+    # ════════════════════════════════════════════════════════════════════════
     observe({
       req(data(), input$fasta_file)
       identified_proteins <- unique(unlist(strsplit(data()$Protein.Ids, ";")))
@@ -1515,7 +1368,6 @@ QC4DIANN_server <- function(id) {
           x_pos = seq_along(aas),
           stringsAsFactors = FALSE
         )
-
         cov_df <- do.call(
           rbind,
           lapply(seq_along(runs), function(i) {
@@ -1547,10 +1399,10 @@ QC4DIANN_server <- function(id) {
             height = 0.9,
             fill = "lightgray",
             color = "black",
-            size = 0.2,
+            linewidth = 0.2,
             alpha = 0.3
           )
-        if (input$show_sequence) {
+        if (isTRUE(input$show_sequence)) {
           p <- p +
             geom_text(
               data = ad,
@@ -1570,7 +1422,6 @@ QC4DIANN_server <- function(id) {
               fontface = "bold"
             )
         }
-
         if (!is.null(cov_df) && nrow(cov_df) > 0) {
           p <- p +
             geom_tile(
@@ -1579,7 +1430,7 @@ QC4DIANN_server <- function(id) {
               width = 0.9,
               height = 0.8,
               color = "black",
-              size = 0.1
+              linewidth = 0.1
             ) +
             scale_fill_manual(values = run_colors, drop = FALSE)
         }
@@ -1599,60 +1450,9 @@ QC4DIANN_server <- function(id) {
       )
     })
 
-    render_and_hide <- function(plotobj, spinner_id) {
-      on.exit(shinyjs::hide(id = spinner_id), add = TRUE)
-      plotobj()
-    }
-
-    output$plot1 <- renderPlot({
-      render_and_hide(plot1_obj, "sp1")
-    })
-    output$plot2 <- renderPlot({
-      render_and_hide(plot2_obj, "sp2")
-    })
-    output$plot3 <- renderPlot({
-      render_and_hide(plot3_obj, "sp3")
-    })
-    output$plot4 <- renderPlot({
-      render_and_hide(plot4_obj, "sp4")
-    })
-    output$plot5 <- renderPlot({
-      render_and_hide(plot5_obj, "sp5")
-    })
-    output$plot6 <- renderPlot({
-      render_and_hide(plot6_obj, "sp6")
-    })
-    output$plot7 <- renderPlot({
-      render_and_hide(plot7_obj, "sp7")
-    })
-    output$plot8 <- renderPlot({
-      render_and_hide(plot8_obj, "sp8")
-    })
-    output$plot9 <- renderPlot({
-      render_and_hide(plot9_obj, "sp9")
-    })
-    output$plot10 <- renderPlot({
-      render_and_hide(plot10_obj, "sp10")
-    })
-    output$plot11 <- renderPlot({
-      render_and_hide(plot11_obj, "sp11")
-    })
-    output$plot12 <- renderPlot({
-      render_and_hide(plot12_obj, "sp12")
-    })
-    output$plot13 <- renderPlot({
-      render_and_hide(plot13_obj, "sp13")
-    })
-    output$plot14 <- renderPlot({
-      render_and_hide(plot14_obj, "sp14")
-    })
-    output$plot15 <- renderPlot({
-      render_and_hide(plot15_obj, "sp15")
-    })
-    output$plot_aa_freq <- renderPlot({
-      render_and_hide(plot_aa_freq_obj, "sp_aa")
-    })
-
+    # ════════════════════════════════════════════════════════════════════════
+    # F. INTERACTIVE VIEWER
+    # ════════════════════════════════════════════════════════════════════════
     cosine_obj <- reactive({
       req(unique_genes())
       unique_genes() %>%
@@ -1672,6 +1472,7 @@ QC4DIANN_server <- function(id) {
         heatmap_theme +
         labs(x = NULL, y = NULL, fill = "Cosine similarity")
     })
+
     euclidean_obj <- reactive({
       req(unique_genes())
       unique_genes() %>%
@@ -1692,6 +1493,7 @@ QC4DIANN_server <- function(id) {
         heatmap_theme +
         labs(x = NULL, y = NULL, fill = "Euclidean distance")
     })
+
     jaccard_obj <- reactive({
       req(unique_genes())
       mat <- unique_genes() %>%
@@ -1713,6 +1515,17 @@ QC4DIANN_server <- function(id) {
         labs(x = NULL, y = NULL, fill = "Jaccard similarity")
     })
 
+    output$cosine_similarity <- renderPlot({
+      cosine_obj()
+    })
+    output$euclidean_distance <- renderPlot({
+      euclidean_obj()
+    })
+    output$jaccard_similarity <- renderPlot({
+      jaccard_obj()
+    })
+
+    # ── Sample-correlation scatterplot matrix (ggpairs) ──
     plot_ggpairs_obj <- reactive({
       req(unique_genes())
       d_mat <- unique_genes() %>% log2()
@@ -1749,10 +1562,13 @@ QC4DIANN_server <- function(id) {
         theme_bw() +
         theme(strip.text = element_text(face = "bold", size = 10))
     })
+
     output$plot_ggpairs <- renderPlot({
-      render_and_hide(plot_ggpairs_obj, "sp_hm")
+      on.exit(hide_spinner("sp_hm"), add = TRUE)
+      plot_ggpairs_obj()
     })
 
+    # ── Exploratory Factor Analysis ──
     plot_efa_obj <- reactive({
       req(unique_genes(), input$efa_factors)
       df <- unique_genes() %>% log2() %>% na.omit() %>% as.data.frame()
@@ -1762,7 +1578,6 @@ QC4DIANN_server <- function(id) {
           if ("efaList" %in% class(fit)) {
             est <- lavaan::standardizedSolution(fit[[1]])
             loadings <- est[est$op == "=~", ]
-
             ggplot(loadings, aes(x = lhs, y = est.std)) +
               geom_boxplot(outliers = FALSE, fill = "#5FA8D3", alpha = 0.3) +
               geom_jitter(width = 0.2, color = "#1B4965", alpha = 0.7) +
@@ -1783,11 +1598,10 @@ QC4DIANN_server <- function(id) {
               labs(
                 x = "Latent Factor",
                 y = "Standardized Loading",
-                title = paste(
+                title = paste0(
                   "Exploratory Factor Analysis (",
                   input$efa_factors,
-                  " Factors)",
-                  sep = ""
+                  " Factors)"
                 )
               ) +
               theme(text = element_text(size = 14))
@@ -1804,25 +1618,18 @@ QC4DIANN_server <- function(id) {
               "text",
               x = 0.5,
               y = 0.5,
-              label = paste("EFA failed:\n", e$message)
+              label = paste0("EFA failed:\n", e$message)
             )
         }
       )
     })
+
     output$plot_efa <- renderPlot({
-      render_and_hide(plot_efa_obj, "spefa")
+      on.exit(hide_spinner("spefa"), add = TRUE)
+      plot_efa_obj()
     })
 
-    output$cosine_similarity <- renderPlot({
-      cosine_obj()
-    })
-    output$euclidean_distance <- renderPlot({
-      euclidean_obj()
-    })
-    output$jaccard_similarity <- renderPlot({
-      jaccard_obj()
-    })
-
+    # ── Interactive scatter (Corr) ──
     output$Corr <- renderPlotly({
       req(unique_genes(), input$xcol, input$ycol)
       p <- unique_genes() %>%
@@ -1838,6 +1645,7 @@ QC4DIANN_server <- function(id) {
       ggplotly(p)
     })
 
+    # ── 3D QuantUMS score distribution ──
     output$QuantUMS_dist <- renderPlotly({
       req(data())
       data() %>%
@@ -1860,12 +1668,16 @@ QC4DIANN_server <- function(id) {
         )
     })
 
+    # ── PCA ──
     output$PCA <- renderPlotly({
-      on.exit(shinyjs::hide("sp_pca"), add = TRUE)
+      on.exit(hide_spinner("sp_pca"), add = TRUE)
       req(pca_data())
       ggplotly(pca_data())
     })
 
+    # ════════════════════════════════════════════════════════════════════════
+    # G. PEPTIDE MAPPING PLOTS & TABLE
+    # ════════════════════════════════════════════════════════════════════════
     plot_pep_count_obj <- reactive({
       req(peptide_summary())
       peptide_summary() %>%
@@ -1888,6 +1700,7 @@ QC4DIANN_server <- function(id) {
         labs(y = NULL, x = "Number of peptides", fill = "Peptide type") +
         theme(legend.position = "top")
     })
+
     plot_pep_prop_obj <- reactive({
       req(peptide_summary())
       peptide_summary() %>%
@@ -1915,11 +1728,14 @@ QC4DIANN_server <- function(id) {
 
     output$plot_pep_type_count <- renderPlot({
       req(input$fasta_file)
-      render_and_hide(plot_pep_count_obj, "sp_pc")
+      on.exit(hide_spinner("sp_pc"), add = TRUE)
+      plot_pep_count_obj()
     })
+
     output$plot_pep_type_prop <- renderPlot({
       req(input$fasta_file)
-      render_and_hide(plot_pep_prop_obj, "sp_pp")
+      on.exit(hide_spinner("sp_pp"), add = TRUE)
+      plot_pep_prop_obj()
     })
 
     output$peptide_table <- DT::renderDT(
@@ -1943,6 +1759,9 @@ QC4DIANN_server <- function(id) {
       server = FALSE
     )
 
+    # ════════════════════════════════════════════════════════════════════════
+    # H. PROTEASE SPECIFICITY (SeqLogos)
+    # ════════════════════════════════════════════════════════════════════════
     seqlogo_x_scale <- scale_x_continuous(
       breaks = 1:8,
       labels = c("P4", "P3", "P2", "P1", "P1'", "P2'", "P3'", "P4'")
@@ -2005,6 +1824,9 @@ QC4DIANN_server <- function(id) {
       }
     })
 
+    # ════════════════════════════════════════════════════════════════════════
+    # I. DOWNLOADS
+    # ════════════════════════════════════════════════════════════════════════
     output$download_matrix <- downloadHandler(
       filename = function() {
         paste0("filtered_protein_matrix_", Sys.Date(), ".tsv")
@@ -2018,127 +1840,21 @@ QC4DIANN_server <- function(id) {
       }
     )
 
-    output$download_all_figs <- downloadHandler(
-      filename = function() paste0("QC4DIANN_figures_", Sys.Date(), ".zip"),
-      content = function(zipfile) {
-        tmpdir <- file.path(
-          tempdir(),
-          paste0("QC4DIANN_", format(Sys.time(), "%Y%m%d_%H%M%S"))
+    output$download_qc_plot <- downloadHandler(
+      filename = function() {
+        paste0("QC4DIANN_", input$qc_plot_select, "_", Sys.Date(), ".png")
+      },
+      content = function(file) {
+        req(current_qc_plot_obj())
+        ggsave(
+          file,
+          current_qc_plot_obj(),
+          width = 11,
+          height = 8,
+          bg = "white",
+          device = "png",
+          dpi = 300
         )
-        dir.create(tmpdir, showWarnings = FALSE)
-        plot_specs <- list(
-          list(obj = plot1_obj, name = "01_XIC_reconstruction", w = 16, h = 8),
-          list(obj = plot2_obj, name = "02_Density_of_ions", w = 16, h = 8),
-          list(obj = plot3_obj, name = "03_RT_prediction_error", w = 16, h = 8),
-          list(
-            obj = plot4_obj,
-            name = "04_Charge_state_distribution",
-            w = 14,
-            h = 7
-          ),
-          list(obj = plot5_obj, name = "05_Peptide_length", w = 14, h = 7),
-          list(obj = plot6_obj, name = "06_Peptides_per_sample", w = 10, h = 8),
-          list(obj = plot7_obj, name = "07_Proteins_per_sample", w = 10, h = 8),
-          list(obj = plot8_obj, name = "08_Sparsity_profile", w = 14, h = 6),
-          list(obj = plot9_obj, name = "09_Missing_vs_median", w = 10, h = 6),
-          list(
-            obj = plot10_obj,
-            name = "10_Abundance_normalization",
-            w = 16,
-            h = 7
-          ),
-          list(
-            obj = plot11_obj,
-            name = "11_Missed_cleavage_sites",
-            w = 14,
-            h = 7
-          ),
-          list(
-            obj = plot12_obj,
-            name = "12_MS1_profile_correlation",
-            w = 16,
-            h = 8
-          ),
-          list(
-            obj = plot13_obj,
-            name = "13_QuantUMS_score_dist",
-            w = 16,
-            h = 8
-          ),
-          list(obj = plot14_obj, name = "14_Gene_quantity_dist", w = 16, h = 8),
-          list(obj = plot15_obj, name = "15_Cysteine_counts", w = 14, h = 7),
-          list(obj = cosine_obj, name = "16_Cosine_similarity", w = 10, h = 9),
-          list(
-            obj = euclidean_obj,
-            name = "17_Euclidean_distance",
-            w = 10,
-            h = 9
-          ),
-          list(
-            obj = jaccard_obj,
-            name = "18_Jaccard_similarity",
-            w = 10,
-            h = 9
-          ),
-          list(
-            obj = plot_ggpairs_obj,
-            name = "19_GGally_pairs",
-            w = 16,
-            h = 12
-          ),
-          list(obj = plot_efa_obj, name = "20_EFA_plot", w = 12, h = 7)
-        )
-        if (!is.null(input$fasta_file)) {
-          plot_specs <- c(
-            plot_specs,
-            list(
-              list(
-                obj = plot_aa_freq_obj,
-                name = "21_AA_frequency",
-                w = 16,
-                h = 8
-              ),
-              list(
-                obj = plot_pep_count_obj,
-                name = "22_Pep_type_counts",
-                w = 12,
-                h = 7
-              ),
-              list(
-                obj = plot_pep_prop_obj,
-                name = "23_Pep_type_proportions",
-                w = 12,
-                h = 7
-              )
-            )
-          )
-        }
-        saved_files <- character()
-        withProgress(message = "Saving figures…", value = 0, {
-          for (k in seq_along(plot_specs)) {
-            spec <- plot_specs[[k]]
-            tryCatch(
-              {
-                p <- spec$obj()
-                path <- file.path(tmpdir, paste0(spec$name, ".png"))
-                ggplot2::ggsave(
-                  path,
-                  plot = p,
-                  width = spec$w,
-                  height = spec$h,
-                  dpi = 300,
-                  bg = "white"
-                )
-                saved_files <- c(saved_files, path)
-              },
-              error = function(e) {
-                message("Skipping ", spec$name, ": ", e$message)
-              }
-            )
-            incProgress(k / length(plot_specs))
-          }
-        })
-        zip::zip(zipfile, files = saved_files, mode = "cherry-pick")
       }
     )
   })
