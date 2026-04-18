@@ -1852,11 +1852,11 @@ QC4DIANN_server <- function(id) {
         paste0("filtered_protein_matrix_", Sys.Date(), ".tsv")
       },
       content = function(file) {
-        readr::write_tsv(
-          as.data.frame(unique_genes()) %>%
+        data.table::fwrite(as.data.frame(unique_genes()) %>%
             tibble::rownames_to_column("protein_id"),
-          file
-        )
+        file = file,
+        sep = ",",
+        na = "NA")
       }
     )
 
