@@ -11,6 +11,7 @@ suppressPackageStartupMessages({
   library(stringr)
   library(ggplot2)
   library(readr)
+  library(data.table)
   library(arrow)
   library(ggpointdensity)
   library(ggridges)
@@ -223,11 +224,7 @@ Sage_server <- function(id, fasta_digest) {
             if (ext == "parquet") {
               df <- arrow::read_parquet(input$sage_file$datapath)
             } else {
-              df <- read_tsv(
-                input$sage_file$datapath,
-                col_types = cols(),
-                show_col_types = FALSE
-              )
+              df <- data.table::fread(input$sage_file$datapath, sep = "\t", header = TRUE)
             }
 
             if (
