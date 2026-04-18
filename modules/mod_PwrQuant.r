@@ -1743,7 +1743,7 @@ PwrQuant_server <- function(id) {
         paste0("limma_results_", Sys.Date(), ".tsv")
       },
       content = function(file) {
-        readr::write_tsv(limma_results_ev()$limma_results, file)
+        data.table::fwrite(limma_results_ev()$limma_results, file = file, sep = "\t", na = "NA")
       }
     )
 
@@ -1767,7 +1767,7 @@ PwrQuant_server <- function(id) {
             row_data$status,
             ".tsv"
           )
-          readr::write_tsv(res_tbl, fname)
+          data.table::fwrite(res_tbl, file = fname, sep = "\t", na = "NA")
           files_to_zip <- c(files_to_zip, fname)
         }
         zip::zipr(file, files_to_zip)
