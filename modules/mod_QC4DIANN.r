@@ -445,9 +445,9 @@ QC4DIANN_server <- function(id) {
         Lib.PG.Q.Value <= 0.01 &
         Lib.Q.Value <= 0.01 &
         PG.Q.Value <= 0.01 &
-        # If (0 <= input <= 1), use the input, else use 0
+        # If input is null, use zero else use the user input
         PG.MaxLFQ.Quality >= ifelse(is.null(input$PG.MaxLFQ.Quality), 0, input$PG.MaxLFQ.Quality) &
-        # If (0 <= input <= 1), use the input, else use 0
+        # If input is null, use zero else use the user input
         Empirical.Quality >= ifelse(is.null(input$Empirical.Quality), 0, input$Empirical.Quality)
       ]
       
