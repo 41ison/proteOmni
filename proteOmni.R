@@ -52,7 +52,6 @@ not_inst <- CRAN_packages[
 if (length(not_inst)) {
   install.packages(not_inst)
 }
-
 if (!requireNamespace("diann", quietly = TRUE)) {
   devtools::install_github("https://github.com/vdemichev/diann-rpackage")
 }
@@ -65,18 +64,18 @@ if (!requireNamespace("Biostrings", quietly = TRUE)) {
 if (!requireNamespace("sva", quietly = TRUE)) {
   BiocManager::install("sva", update = FALSE, ask = FALSE)
 }
+if (!requireNamespace("ComplexHeatmap", quietly = TRUE)) {
+  BiocManager::install("ComplexHeatmap", update = FALSE, ask = FALSE)
+}
 if (!requireNamespace("clusterProfiler", quietly = TRUE)) {
   BiocManager::install("clusterProfiler", update = FALSE, ask = FALSE)
 }
-
 if (!requireNamespace("GO.db", quietly = TRUE)) {
   BiocManager::install("GO.db", update = FALSE, ask = FALSE)
 }
-
 if (!requireNamespace("enrichplot", quietly = TRUE)) {
   BiocManager::install("enrichplot", update = FALSE, ask = FALSE)
 }
-
 Sys.setenv(LIBARROW_MINIMAL = "false", ARROW_WITH_ZSTD = "ON")
 if (!requireNamespace("arrow", quietly = TRUE)) {
   install.packages("arrow")
@@ -114,6 +113,7 @@ library(limma)
 library(lavaan)
 library(patchwork)
 library(enrichplot)
+library(ComplexHeatmap)
 
 # ── Session info & Logging ─────────────────────────────────────────────────
 cat("\n========== proteOmni Session Info ==========", "\n")
