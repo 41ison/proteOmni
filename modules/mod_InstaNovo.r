@@ -12,6 +12,7 @@ suppressPackageStartupMessages({
   library(ggplot2)
   library(ggseqlogo)
   library(readr)
+  library(data.table)
   library(ggpointdensity)
   library(viridis)
   library(colourpicker)
@@ -27,7 +28,7 @@ strip_sequence_instanovo <- function(seq) {
 }
 
 read_instanovo_csv <- function(path) {
-  df <- read_csv(path, show_col_types = FALSE)
+  df <- data.table::fread(path, sep = ",", header = TRUE)
 
   req_cols <- c(
     "predictions",
