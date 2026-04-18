@@ -885,7 +885,7 @@ MaxQuantMSMS_server <- function(id) {
       filename = function() {
         paste0("msms_tidy_", input$peptide_seq, "_", Sys.Date(), ".tsv")
       },
-      content = function(file) readr::write_tsv(tidy_msms_data(), file)
+      content = function(file) data.table::fwrite(tidy_msms_data(), file = file, sep = ",", na = "NA")
     )
 
     # Evidence plot PDF
@@ -914,7 +914,7 @@ MaxQuantMSMS_server <- function(id) {
       filename = function() {
         paste0("evidence_data_", Sys.Date(), ".tsv")
       },
-      content = function(file) readr::write_tsv(raw_evidence(), file)
+      content = function(file) data.table::fwrite(raw_evidence(), file = file, sep = ",", na = "NA")
     )
   })
 }

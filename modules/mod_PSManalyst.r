@@ -2638,7 +2638,7 @@ PSManalyst_server <- function(id) {
               paired <- mod_diag_data()
               if (!is.null(paired) && nrow(paired) > 0) {
                 rt_csv <- file.path(td, "PSM_RT_Shift_Table.csv")
-                readr::write_csv(paired, rt_csv)
+                data.table::fwrite(paired, file = rt_csv, sep = ",", na = "NA")
                 fps <<- c(fps, rt_csv)
               }
             })
