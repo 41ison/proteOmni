@@ -2,7 +2,7 @@
 ## Modules: PSManalyst (FragPipe - DDA QC), QC4DIANN (DIA-NN - DIA QC),
 ##          deNovo (Casanovo - de novo MS/MS), PwrQuant (limma + ORA),
 ##          MaxQuant (MaxQuant - DDA QC), InstaNovo (InstaNovo - de novo MS/MS),
-##          EncyclopeDIA (EncyclopeDIA - DIA aggregation), Sage (Sage - DDA/DIA QC)
+##          EncyclopeDIA (EncyclopeDIA - DIA), Sage (Sage - DDA/DIA QC)
 
 # ── Package installation ─────────────────────────────────────────────────────
 options(repos = c(CRAN = "https://cran.rstudio.com/"))
@@ -764,8 +764,8 @@ server <- function(input, output, session) {
 
     switch(
       tab,
-      psm_tab = tags$div(uiOutput("psm_sidebar_placeholder")),
-      qc_tab = tags$div(uiOutput("qc_sidebar_placeholder")),
+      psm_tab = PSManalyst_sidebar_ui("psm"),
+      qc_tab = QC4DIANN_sidebar_ui("qc4"),
       pwr_tab = PwrQuant_sidebar_ui("pwr"),
       dnv_tab = deNovo_sidebar_ui("dnv"),
       ins_tab = InstaNovo_sidebar_ui("ins"),
