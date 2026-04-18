@@ -1835,12 +1835,13 @@ PSManalyst_server <- function(id) {
         recursive = TRUE
       )
       req(length(prot_file) > 0)
-      readr::read_tsv(prot_file[1]) %>% janitor::clean_names()
+      data.table::fread(prot_file[1], sep = "\t", header = TRUE) %>%
+        janitor::clean_names()
     })
 
     combined_protein_data <- reactive({
       req(input$combined_protein)
-      readr::read_tsv(input$combined_protein$datapath) %>%
+      data.table::fread(input$combined_protein$datapath, sep = "\t", header = TRUE) %>%
         janitor::clean_names() %>%
         dplyr::select(protein_id, ends_with("max_lfq_intensity")) %>%
         column_to_rownames("protein_id") %>%
@@ -1850,7 +1851,7 @@ PSManalyst_server <- function(id) {
 
     combined_protein_raw <- reactive({
       req(input$combined_protein)
-      raw <- readr::read_tsv(input$combined_protein$datapath) %>%
+      raw <- data.table::fread(input$combined_protein$datapath, sep = "\t", header = TRUE) %>%
         janitor::clean_names()
       keep <- c(
         "entry_name",
