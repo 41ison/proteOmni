@@ -437,29 +437,33 @@ QC4DIANN_server <- function(id) {
     # ════════════════════════════════════════════════════════════════════════
     data <- reactive({
       req(input$report)
-      arrow::read_parquet(input$report$datapath) %>%
-        dplyr::filter(
-          Lib.PG.Q.Value <= 0.01,
-          Lib.Q.Value <= 0.01,
-          PG.Q.Value <= 0.01
-        ) %>%
-        dplyr::mutate(
-          File.Name = Run,
-          peptide_length = nchar(Stripped.Sequence)
-        ) %>%
-        dplyr::filter(
-          if (is.null(input$PG.MaxLFQ.Quality)) {
-            TRUE
-          } else {
-            PG.MaxLFQ.Quality >= input$PG.MaxLFQ.Quality
-          },
-          if (is.null(input$Empirical.Quality)) {
-            TRUE
-          } else {
-            Empirical.Quality >= input$Empirical.Quality
-          }
-        ) %>%
-        dplyr::filter(!stringr::str_detect(Protein.Ids, "cRAP"))
+      data_parquet <- arrow::read_parquet(input$report$datapath) %>%
+      data.table::as.data.table() # Dataset must be a data.table from data.table package
+      
+      # Filters
+      data_parquet <- data_parquet[
+        Lib.PG.Q.Value <= 0.01 &
+        Lib.Q.Value <= 0.01 &
+        PG.Q.Value <= 0.01 &
+        # If (0 <= input <= 1), use the input, else use 0
+        PG.MaxLFQ.Quality >= ifelse(input$PG.MaxLFQ.Quality %between% c(0,1), input$PG.MaxLFQ.Quality, 0) &
+        # If (0 <= input <= 1), use the input, else use 0
+        Empirical.Quality >= ifelse(input$Empirical.Quality %between% c(0,1), input$Empirical.Quality, 0)
+      ]
+      
+      # TODO: input$cRAP was not implemented yet #######
+      # # If the user select to remove the cRAP, remove it
+      # if(input$cRAP) {
+      #   data_parquet <- data_parquet[!grepl("cRAP", Protein.Ids)]
+      # }
+      
+      # Mutate
+      data_parquet <- data_parquet[, `:=` (
+        File.Name = Run,
+        peptide_length = nchar(Stripped.Sequence)
+      )]
+      
+      # return(data_parquet) # is implicit, no need to declare it
     })
 
     proteins <- reactive({
@@ -515,20 +519,31 @@ QC4DIANN_server <- function(id) {
 
     QuantUMS_scores <- reactive({
       req(input$report)
-      arrow::read_parquet(input$report$datapath) %>%
-        dplyr::filter(
-          Lib.PG.Q.Value <= 0.01,
-          Lib.Q.Value <= 0.01,
-          PG.Q.Value <= 0.01,
-          !stringr::str_detect(Protein.Ids, "cRAP")
-        ) %>%
-        dplyr::select(
+      
+      data_parquet <- arrow::read_parquet(input$report$datapath) %>%
+        data.table::as.data.table() # Dataset must be a data.table from data.table package
+      
+      # Filters
+      data_parquet <- data_parquet[
+        Lib.PG.Q.Value <= 0.01 &
+        Lib.Q.Value <= 0.01 &
+        PG.Q.Value <= 0.01 
+      ]
+      
+      # TODO: input$cRAP was not implemented yet #######
+      # # If the user select to remove the cRAP, remove it
+      # if(input$cRAP) {
+      #   data_parquet <- data_parquet[!grepl("cRAP", Protein.Ids)]
+      # }
+      
+      # Select columns
+      data_parquet[, .(
           Run,
           Precursor.Id,
           PG.MaxLFQ.Quality,
           Empirical.Quality,
           Quantity.Quality
-        ) %>%
+      )] %>%
         tidyr::pivot_longer(
           -c(Run, Precursor.Id),
           names_to = "Filter",
@@ -576,13 +591,19 @@ QC4DIANN_server <- function(id) {
 
     MS_corr <- reactive({
       req(input$report)
-      arrow::read_parquet(input$report$datapath) %>%
-        dplyr::filter(
-          Lib.PG.Q.Value <= 0.01,
-          Lib.Q.Value <= 0.01,
-          PG.Q.Value <= 0.01
-        ) %>%
-        dplyr::mutate(File.Name = Run)
+
+      data_parquet <- arrow::read_parquet(input$report$datapath) %>%
+        data.table::as.data.table() # Dataset must be a data.table from data.table package
+      
+      # Filters
+      data_parquet <- data_parquet[
+        Lib.PG.Q.Value <= 0.01 &
+        Lib.Q.Value <= 0.01 &
+        PG.Q.Value <= 0.01 
+      ]    
+    
+      # Mutate
+      data_parquet <- data_parquet[, File.Name := Run]
     })
 
     PCA_label <- reactive({
