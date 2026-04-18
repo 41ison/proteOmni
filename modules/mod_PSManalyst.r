@@ -1,7 +1,6 @@
-## PSManalyst Shiny Module — wraps PSManalyst logic for proteOmni
+## PSManalyst Shiny Module — PSManalyst module for proteOmni
 
 # ── Helper functions ─────────────────────────────────────────────────────────
-
 aa_freq <- function(x) table(x) / length(x) * 100
 
 complete_and_reorder_amino_acids <- function(element) {
@@ -33,12 +32,6 @@ complete_and_reorder_amino_acids <- function(element) {
   element[match(aas, names(element))]
 }
 
-#' Extract matrix of amino acids at P4-P4' positions from the fingerprint columns.
-#'
-#' @param data A tibble with columns \code{fingerprint_Nterm}, \code{fingerprint_Cterm}, and \code{sample_name}.
-#' @return A named list of 20×8 numeric matrices of amino acid frequencies (%) per position,
-#'   one matrix per sample.
-
 extract_matrix_per_sample <- function(data) {
   filtered <- data %>%
     dplyr::filter(
@@ -57,9 +50,7 @@ extract_matrix_per_sample <- function(data) {
     dplyr::group_map(
       ~ {
         fp <- strsplit(
-          c(.x$fingerprint_Nterm, .x$fingerprint_Cterm),
-          ""
-        )
+          c(.x$fingerprint_Nterm, .x$fingerprint_Cterm), "")
 
         if (length(fp) == 0) {
           return(NULL)
@@ -67,7 +58,7 @@ extract_matrix_per_sample <- function(data) {
 
         mat <- matrix(unlist(fp), ncol = 8, byrow = TRUE)
         mat <- mat[
-          !apply(mat, 1, function(x) any(x %in% c("B", "X", "Z", "U"))),
+          !apply(mat, 1, function(x) any(x %in% c("B", "X", "Z", "U", "O"))),
           ,
           drop = FALSE
         ]
@@ -114,19 +105,8 @@ extract_matrix_per_sample <- function(data) {
       }
     )
 
-  result <- stats::setNames(mats, sample_names)
-  purrr::compact(result)
+  purrr::compact(stats::setNames(mats, sample_names))
 }
-
-color_blue_seq <- c(
-  "#d4e6f1",
-  "#a9cce3",
-  "#7fb3d5",
-  "#5499c7",
-  "#2980b9",
-  "#1f618d",
-  "#154360"
-)
 
 analyze_terminus_cooccurrence <- function(
   df,
@@ -281,10 +261,7 @@ analyze_terminus_cooccurrence <- function(
 
 # ── Multi-file PSM ingestion helpers ────────────────────────────────────
 
-#' Recursively find all psm.tsv files inside a directory tree.
-#'
-#' @param root_path  Character. Top-level folder chosen by the user.
-#' @return Character vector of full file paths.
+# Recursively find all psm.tsv files inside a directory tree.
 find_psm_files <- function(root_path) {
   list.files(
     path = root_path,
@@ -294,10 +271,7 @@ find_psm_files <- function(root_path) {
   )
 }
 
-#' Read one psm.tsv and add a sample_name column derived from the Spectrum column.
-#'
-#' @param path  Character. Full path to a single psm.tsv file.
-#' @return A tibble with an extra \code{sample_name} column.
+# Read one psm.tsv and add a sample_name column derived from the Spectrum column.
 read_single_psm <- function(path) {
   suppressMessages(readr::read_tsv(path)) %>%
     janitor::clean_names() %>%
@@ -306,10 +280,7 @@ read_single_psm <- function(path) {
     )
 }
 
-#' Read and row-bind all psm.tsv files found under \code{root_path}.
-#'
-#' @param root_path  Character. Top-level folder.
-#' @return A combined tibble with a \code{sample_name} column.
+# Read and row-bind all psm.tsv files found under \code{root_path}.
 read_all_psm_files <- function(root_path) {
   paths <- find_psm_files(root_path)
   if (length(paths) == 0L) {
@@ -321,11 +292,7 @@ read_all_psm_files <- function(root_path) {
 
 # ── MS/MS spectrum builder (FragPipe PSM columns) ──────────────────────
 
-#' Tidy the combined PSM data for a single peptide sequence.
-#'
-#' @param data        Combined PSM tibble (output of \code{read_all_psm_files()}).
-#' @param peptide_seq Character. Peptide sequence to subset.
-#' @return A tidy tibble ready for \code{build_psm_spectrum()}.
+# Tidy the combined PSM data for a single peptide sequence.
 tidy_psm_spectrum <- function(data, peptide_seq) {
   data %>%
     dplyr::filter(peptide == peptide_seq) %>%
@@ -361,11 +328,7 @@ tidy_psm_spectrum <- function(data, peptide_seq) {
 }
 
 
-#' Build an annotated MS/MS fragmentation spectrum ggplot from FragPipe PSM data.
-#'
-#' @param tidy_data  Tibble from \code{tidy_psm_spectrum()}.
-#' @param label_size Numeric. Font size for ion annotations.
-#' @return A ggplot object.
+# Build an annotated MS/MS fragmentation spectrum ggplot from FragPipe PSM data.
 build_psm_spectrum <- function(tidy_data, label_size = 3) {
   if (nrow(tidy_data) == 0L) {
     return(
@@ -452,516 +415,212 @@ build_psm_spectrum <- function(tidy_data, label_size = 3) {
 }
 
 
-# ── UI ────────────────────────────────────────────────────────────────────────
+# ── UI — organized into 2 columns ─────────────────────────────────────────
 PSManalyst_ui <- function(id) {
   ns <- NS(id)
 
   tagList(
-    # ── Sidebar content ───────────────────────────────────────────────────────
+    tags$div(class = "sidebar-section-label", "PSManalyst Controls"),
     tags$div(
-      id = ns("sidebar_content"),
-
-      # ── PSM folder upload ─────────────────────────────────────────────────
-      tags$div(
-        style = "padding:12px 16px 4px;color:#adb5bd;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:1px;",
-        "PSM Viewer"
-      ),
+      style = "padding:0 16px;",
       textInput(
         ns("psm_folder"),
-        "Path to folder containing psm.tsv files",
-        placeholder = "/path/to/fragpipe/output"
+        "Path to folder with psm.tsv files",
+        placeholder = "/path/to/fragpipe"
       ),
       actionButton(
         ns("load_psm_folder"),
         "Load PSM Files",
         class = "btn-primary btn-sm",
-        style = "width:90%;margin:4px auto 8px;display:block;"
+        style = "width:100%;margin-bottom:6px;"
       ),
-      uiOutput(ns("psm_folder_status")), # feedback: n files found
-      sliderInput(
-        ns("hyperscore"),
-        "PSM hyperscore filter",
-        min = 0,
-        max = 1000,
-        value = 0,
-        step = 5
-      ),
-      sliderInput(
-        ns("probability"),
-        "PeptideProphet Probability",
-        min = 0,
-        max = 1,
-        value = 0.95,
-        step = 0.01
-      ),
+      uiOutput(ns("psm_folder_status")),
+      tags$hr(style = "border-color:#2d3741;"),
+      sliderInput(ns("hyperscore"), "Hyperscore", 0, 1000, 0, 5),
+      sliderInput(ns("probability"), "Probability", 0, 1, 0.95, 0.01),
       selectInput(
         ns("specificity_filter"),
-        "Proteolysis fingerprinting specificity",
+        "Proteolysis specificity",
         choices = c(
           "All" = "all",
           "Fully specific" = "fully_specific",
-          "Semi-specific at N-termini" = "semi_n_termini",
-          "Semi-specific at C-termini" = "semi_c_termini",
+          "Semi N-termini" = "semi_n_termini",
+          "Semi C-termini" = "semi_c_termini",
           "Fully semi-specific" = "fully_semi_specific"
-        ),
-        selected = "all"
-      ),
-      tags$hr(style = "border-color:#2d3741;margin:4px 0;"),
-
-      # ── MS/MS Spectrum viewer controls ────────────────────────────────────
-      tags$div(
-        style = "padding:12px 16px 4px;color:#adb5bd;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:1px;",
-        "MS/MS Spectrum Viewer"
-      ),
-      selectizeInput(
-        ns("spectrum_peptide"),
-        "Select Peptide Sequence",
-        choices = NULL,
-        options = list(
-          placeholder = "Load PSM files first…",
-          maxOptions = 5000,
-          searchField = "value"
         )
       ),
-      numericInput(
-        ns("spectrum_label_size"),
-        "Ion Label Size",
-        value = 3,
-        min = 1,
-        max = 8,
-        step = 0.5
+      colourpicker::colourInput(
+        ns("plot_color"),
+        "Plot color",
+        value = "#5499c7"
       ),
-      actionButton(
-        ns("run_spectrum"),
-        "Plot Spectrum",
-        class = "btn-primary btn-sm",
-        style = "width:90%;margin:4px auto 8px;display:block;"
-      ),
-      tags$hr(style = "border-color:#2d3741;margin:4px 0;"),
-
-      # ── Protein Viewer controls ────────────────────────────────────────────
-      tags$div(
-        style = "padding:8px 16px 4px;color:#adb5bd;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:1px;",
-        "Protein Viewer"
-      ),
+      tags$hr(style = "border-color:#2d3741;"),
       fileInput(
         ns("combined_protein"),
-        "Choose the combined_protein.tsv file",
+        "combined_protein.tsv",
         accept = ".tsv"
       ),
       fileInput(
         ns("fasta_file"),
-        "Choose the FASTA file",
+        "FASTA file",
         accept = c(".fasta", ".fa", ".fas")
       ),
-      selectInput(
-        ns("protein_sample_select"),
-        "Sample (Protein View)",
-        choices = c("All samples" = "all")
-      ),
-      selectInput(ns("xcol"), "X Sample", choices = NULL),
-      selectInput(ns("ycol"), "Y Sample", choices = NULL),
-      colourpicker::colourInput(
-        ns("plot_color"),
-        "Select plot color",
-        value = "#5499c7"
-      ),
-      tags$hr(style = "border-color:#2d3741;margin:4px 0;"),
-
-      # ── Modification Diagnostic controls ─────────────────────────────────
-      tags$div(
-        style = "padding:8px 16px 4px;color:#adb5bd;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:1px;",
-        "Mod. Diagnostic"
-      ),
-      sliderInput(
-        ns("rt_tolerance"),
-        "\u0394RT Artifact Threshold (min)",
-        min = 0.1,
-        max = 5,
-        value = 0.5,
-        step = 0.1
-      ),
-      tags$hr(style = "border-color:#2d3741;margin:4px 0;"),
-
-      # ── Downloads ──────────────────────────────────────────────────────────
-      tags$div(
-        style = "padding:0 8px;",
-        div(
-          style = "margin-bottom:8px;",
-          downloadButton(
-            ns("download_all_plots"),
-            "⬇ Download all plots",
-            class = "dl-btn",
-            style = "width:100%;text-align:left;"
-          )
-        ),
-        div(
-          downloadButton(
-            ns("download_spectrum_plot"),
-            "⬇ MS/MS Spectrum (.pdf)",
-            class = "dl-btn",
-            style = "width:100%;text-align:left;"
-          )
-        )
+      tags$hr(style = "border-color:#2d3741;"),
+      downloadButton(
+        ns("download_all_plots"),
+        tagList(icon("file-zipper"), " Download All Plots (.zip)"),
+        class = "dl-btn",
+        style = "width:100%;"
       )
-    ),
+    )
+  )
+}
 
-    # ── Body ──────────────────────────────────────────────────────────────────
+PSManalyst_ui <- function(id) {
+  ns <- NS(id)
+
+  tagList(
+    fluidRow(infoBoxOutput(ns("info_box1"), width = 12)),
     tabsetPanel(
       id = ns("tabs"),
       type = "tabs",
 
-      # ── Tab 1: PSM Viewer ─────────────────────────────────────────────────
+      # ── TAB 1: PSM Viewer (2-column layout) ──
       tabPanel(
         "PSM Viewer",
-        fluidRow(infoBoxOutput(ns("info_box1"), width = 12)),
         fluidRow(
-          box(
-            title = "Protease fingerprint",
-            status = "primary",
-            solidHeader = TRUE,
-            width = 12,
-            collapsible = TRUE,
-            div(
-              class = "plot-wrap",
-              tags$div(
-                class = "spinner-overlay",
-                id = ns("sp01"),
-                icon("spinner", class = "fa-spin")
+          # Left column — plot selector + controls
+          column(
+            4,
+            box(
+              title = "PSM Plot Controls",
+              status = "primary",
+              solidHeader = TRUE,
+              width = NULL,
+              selectInput(
+                ns("psm_plot_select"),
+                "Select PSM Plot",
+                choices = c(
+                  "Protease fingerprint" = "plot01",
+                  "N-termini SeqLogo" = "plot03",
+                  "C-termini SeqLogo" = "plot04",
+                  "m/z over RT" = "plot05",
+                  "Mass error (ppm)" = "plot06",
+                  "Peptide length" = "plot07",
+                  "GRAVY" = "plot08",
+                  "Isoelectric Point (pI)" = "plot09",
+                  "Charge state" = "plot10",
+                  "Missed cleavages" = "plot11",
+                  "Uniqueness" = "plot12",
+                  "Hyperscore" = "plot13",
+                  "Next Score" = "plot14",
+                  "PeptideProphet Probability" = "plot15",
+                  "Expectation" = "plot16",
+                  "Assigned Modifications" = "plot17",
+                  "Top 20 proteins" = "plot18",
+                  "N:C-terminus matrix" = "plot19",
+                  "Cysteine counts" = "plot20",
+                  "AA frequency vs FASTA" = "plot_aa_freq",
+                  "Peptide Yield vs. FDR" = "plot_fdr_curve"
+                )
               ),
-              uiOutput(ns("plot01_ui"))
+              actionButton(
+                ns("run_psm_plot"),
+                "Build Plot",
+                class = "btn-primary",
+                style = "width:100%;margin-bottom:8px;"
+              ),
+              downloadButton(
+                ns("download_psm_plot"),
+                tagList(icon("download"), " Download (.png)"),
+                class = "dl-btn",
+                style = "width:100%;"
+              )
             )
           ),
-          box(
-            title = "N-termini SeqLogo",
-            status = "primary",
-            solidHeader = TRUE,
-            width = 12,
-            collapsible = TRUE,
-            div(
-              class = "plot-wrap",
-              tags$div(
-                class = "spinner-overlay",
-                id = ns("sp03"),
-                icon("spinner", class = "fa-spin")
-              ),
-              uiOutput(ns("plot03_ui"))
+          # Right column — plot output
+          column(
+            8,
+            box(
+              title = "PSM Plot Output",
+              status = "primary",
+              solidHeader = TRUE,
+              width = NULL,
+              div(
+                class = "plot-wrap",
+                tags$div(
+                  class = "spinner-overlay",
+                  id = ns("sp_psm_main"),
+                  icon("spinner", class = "fa-spin")
+                ),
+                plotOutput(ns("psm_dynamic_plot_out"), height = "700px")
+              )
             )
-          ),
-          box(
-            title = "C-termini SeqLogo",
-            status = "primary",
-            solidHeader = TRUE,
-            width = 12,
-            collapsible = TRUE,
-            div(
-              class = "plot-wrap",
-              tags$div(
-                class = "spinner-overlay",
-                id = ns("sp04"),
-                icon("spinner", class = "fa-spin")
-              ),
-              uiOutput(ns("plot04_ui"))
-            )
-          ),
-          box(
-            title = "m/z over retention time",
-            status = "primary",
-            solidHeader = TRUE,
-            width = 12,
-            collapsible = TRUE,
-            div(
-              class = "plot-wrap",
-              tags$div(
-                class = "spinner-overlay",
-                id = ns("sp05"),
-                icon("spinner", class = "fa-spin")
-              ),
-              uiOutput(ns("plot05_ui"))
-            )
-          ),
-          box(
-            title = "Mass error (ppm)",
-            status = "primary",
-            solidHeader = TRUE,
-            width = 12,
-            collapsible = TRUE,
-            div(
-              class = "plot-wrap",
-              tags$div(
-                class = "spinner-overlay",
-                id = ns("sp06"),
-                icon("spinner", class = "fa-spin")
-              ),
-              uiOutput(ns("plot06_ui"))
-            )
-          ),
-          box(
-            title = "Peptide length",
-            status = "primary",
-            solidHeader = TRUE,
-            width = 12,
-            collapsible = TRUE,
-            div(
-              class = "plot-wrap",
-              tags$div(
-                class = "spinner-overlay",
-                id = ns("sp07"),
-                icon("spinner", class = "fa-spin")
-              ),
-              uiOutput(ns("plot07_ui"))
-            )
-          ),
-          box(
-            title = "GRAVY (Grand Average of Hydropathy)",
-            status = "primary",
-            solidHeader = TRUE,
-            width = 12,
-            collapsible = TRUE,
-            div(
-              class = "plot-wrap",
-              tags$div(
-                class = "spinner-overlay",
-                id = ns("sp08"),
-                icon("spinner", class = "fa-spin")
-              ),
-              uiOutput(ns("plot08_ui"))
-            )
-          ),
-          box(
-            title = "Isoelectric Point (pI)",
-            status = "primary",
-            solidHeader = TRUE,
-            width = 12,
-            collapsible = TRUE,
-            div(
-              class = "plot-wrap",
-              tags$div(
-                class = "spinner-overlay",
-                id = ns("sp09"),
-                icon("spinner", class = "fa-spin")
-              ),
-              uiOutput(ns("plot09_ui"))
-            )
-          ),
-          box(
-            title = "Charge state distribution",
-            status = "primary",
-            solidHeader = TRUE,
-            width = 12,
-            collapsible = TRUE,
-            div(
-              class = "plot-wrap",
-              tags$div(
-                class = "spinner-overlay",
-                id = ns("sp10"),
-                icon("spinner", class = "fa-spin")
-              ),
-              uiOutput(ns("plot10_ui"))
-            )
-          ),
-          box(
-            title = "Number of missed cleavages",
-            status = "primary",
-            solidHeader = TRUE,
-            width = 12,
-            collapsible = TRUE,
-            div(
-              class = "plot-wrap",
-              tags$div(
-                class = "spinner-overlay",
-                id = ns("sp11"),
-                icon("spinner", class = "fa-spin")
-              ),
-              uiOutput(ns("plot11_ui"))
-            )
-          ),
-          box(
-            title = "Uniqueness",
-            status = "primary",
-            solidHeader = TRUE,
-            width = 12,
-            collapsible = TRUE,
-            div(
-              class = "plot-wrap",
-              tags$div(
-                class = "spinner-overlay",
-                id = ns("sp12"),
-                icon("spinner", class = "fa-spin")
-              ),
-              uiOutput(ns("plot12_ui"))
-            )
-          ),
-          box(
-            title = "Hyperscore distribution",
-            status = "primary",
-            solidHeader = TRUE,
-            width = 12,
-            collapsible = TRUE,
-            div(
-              class = "plot-wrap",
-              tags$div(
-                class = "spinner-overlay",
-                id = ns("sp13"),
-                icon("spinner", class = "fa-spin")
-              ),
-              uiOutput(ns("plot13_ui"))
-            )
-          ),
-          box(
-            title = "Next Score distribution",
-            status = "primary",
-            solidHeader = TRUE,
-            width = 12,
-            collapsible = TRUE,
-            div(
-              class = "plot-wrap",
-              tags$div(
-                class = "spinner-overlay",
-                id = ns("sp14"),
-                icon("spinner", class = "fa-spin")
-              ),
-              uiOutput(ns("plot14_ui"))
-            )
-          ),
-          box(
-            title = "PeptideProphet probability",
-            status = "primary",
-            solidHeader = TRUE,
-            width = 12,
-            collapsible = TRUE,
-            div(
-              class = "plot-wrap",
-              tags$div(
-                class = "spinner-overlay",
-                id = ns("sp15"),
-                icon("spinner", class = "fa-spin")
-              ),
-              uiOutput(ns("plot15_ui"))
-            )
-          ),
-          box(
-            title = "Expectation (PeptideProphet)",
-            status = "primary",
-            solidHeader = TRUE,
-            width = 12,
-            collapsible = TRUE,
-            div(
-              class = "plot-wrap",
-              tags$div(
-                class = "spinner-overlay",
-                id = ns("sp16"),
-                icon("spinner", class = "fa-spin")
-              ),
-              uiOutput(ns("plot16_ui"))
-            )
-          ),
-          box(
-            title = "Assigned modifications",
-            status = "primary",
-            solidHeader = TRUE,
-            width = 12,
-            collapsible = TRUE,
-            div(
-              class = "plot-wrap",
-              tags$div(
-                class = "spinner-overlay",
-                id = ns("sp17"),
-                icon("spinner", class = "fa-spin")
-              ),
-              uiOutput(ns("plot17_ui"))
-            )
-          ),
-          box(
-            title = "Top 20 proteins with more PSMs",
-            status = "primary",
-            solidHeader = TRUE,
-            width = 12,
-            collapsible = TRUE,
-            div(
-              class = "plot-wrap",
-              tags$div(
-                class = "spinner-overlay",
-                id = ns("sp18"),
-                icon("spinner", class = "fa-spin")
-              ),
-              uiOutput(ns("plot18_ui"))
-            )
-          ),
-          box(
-            title = "Co-occurrence probability matrix of N- and C-terminus AA",
-            status = "primary",
-            solidHeader = TRUE,
-            width = 12,
-            collapsible = TRUE,
-            div(
-              class = "plot-wrap",
-              tags$div(
-                class = "spinner-overlay",
-                id = ns("sp19"),
-                icon("spinner", class = "fa-spin")
-              ),
-              uiOutput(ns("plot19_ui"))
-            )
-          ),
-          box(
-            title = "Cysteine counts in peptides",
-            status = "primary",
-            solidHeader = TRUE,
-            width = 12,
-            collapsible = TRUE,
-            div(
-              class = "plot-wrap",
-              tags$div(
-                class = "spinner-overlay",
-                id = ns("sp20"),
-                icon("spinner", class = "fa-spin")
-              ),
-              uiOutput(ns("plot20_ui"))
-            )
-          )
-        ),
-        box(
-          title = "Peptide Yield vs. FDR",
-          status = "primary",
-          solidHeader = TRUE,
-          width = 12,
-          collapsible = TRUE,
-          div(
-            class = "plot-wrap",
-            tags$div(
-              class = "spinner-overlay",
-              id = ns("sp_fdr"),
-              icon("spinner", class = "fa-spin")
-            ),
-            uiOutput(ns("plot_fdr_curve_ui"))
           )
         )
       ),
 
-      # ── Tab 2: MS/MS Spectrum Viewer ──────────────────────────────────────
+      # ── TAB 2: MS/MS Spectrum (2-column) ──
       tabPanel(
         title = tagList(icon("chart-bar"), "MS/MS Spectrum Viewer"),
         fluidRow(
-          box(
-            title = "Annotated MS/MS Fragmentation Spectrum (FragPipe PSMs)",
-            status = "primary",
-            solidHeader = TRUE,
-            width = 12,
-            div(
-              class = "plot-wrap",
-              tags$div(
-                class = "spinner-overlay",
-                id = ns("sp_spectrum"),
-                icon("spinner", class = "fa-spin")
+          column(
+            4,
+            box(
+              title = "Spectrum Controls",
+              status = "primary",
+              solidHeader = TRUE,
+              width = NULL,
+              selectizeInput(
+                ns("spectrum_peptide"),
+                "Peptide Sequence",
+                choices = NULL,
+                options = list(placeholder = "Load PSM files first…")
               ),
-              uiOutput(ns("spectrum_plot_ui"))
+              numericInput(
+                ns("spectrum_label_size"),
+                "Ion Label Size",
+                value = 3,
+                min = 1,
+                max = 8,
+                step = 0.5
+              ),
+              actionButton(
+                ns("run_spectrum"),
+                "Plot Spectrum",
+                class = "btn-primary",
+                style = "width:100%;margin-bottom:8px;"
+              ),
+              downloadButton(
+                ns("download_spectrum_plot"),
+                tagList(icon("download"), " Download (.pdf)"),
+                class = "dl-btn",
+                style = "width:100%;"
+              )
+            )
+          ),
+          column(
+            8,
+            box(
+              title = "Annotated MS/MS Fragmentation Spectrum",
+              status = "primary",
+              solidHeader = TRUE,
+              width = NULL,
+              div(
+                class = "plot-wrap",
+                tags$div(
+                  class = "spinner-overlay",
+                  id = ns("sp_spectrum"),
+                  icon("spinner", class = "fa-spin")
+                ),
+                uiOutput(ns("spectrum_plot_ui"))
+              )
             )
           )
         ),
         fluidRow(
           box(
-            title = "Tidy fragment ion data for selected peptide",
+            title = "Tidy fragment ion data",
             status = "primary",
             solidHeader = TRUE,
             width = 12,
@@ -970,20 +629,83 @@ PSManalyst_ui <- function(id) {
         )
       ),
 
-      # ── Tab 3: Protein Viewer ─────────────────────────────────────────────
+      # ── TAB 3: Protein Viewer (2-column) ──
       tabPanel(
         "Protein Viewer",
         fluidRow(infoBoxOutput(ns("info_box2"), width = 12)),
         fluidRow(
+          column(
+            4,
+            box(
+              title = "Protein Plot Controls",
+              status = "primary",
+              solidHeader = TRUE,
+              width = NULL,
+              selectInput(
+                ns("prot_plot_select"),
+                "Select Protein Plot",
+                choices = c(
+                  "Coverage" = "plot01p",
+                  "Organisms" = "plot02p",
+                  "Protein existence" = "plot03p",
+                  "Protein probability" = "plot04p",
+                  "Top peptide probability" = "plot05p",
+                  "Total peptides" = "plot06p",
+                  "Razor spectral count" = "plot07p",
+                  "Razor intensity" = "plot08p",
+                  "MaxLFQ distribution" = "plot10p",
+                  "Top 20 by MaxLFQ (log₂)" = "plot_rank_lfq",
+                  "Top 20 by spectral count" = "plot_rank_usc"
+                )
+              ),
+              selectInput(
+                ns("protein_sample_select"),
+                "Sample",
+                choices = c("All samples" = "all")
+              ),
+              actionButton(
+                ns("run_prot_plot"),
+                "Build Plot",
+                class = "btn-primary",
+                style = "width:100%;margin-bottom:8px;"
+              ),
+              downloadButton(
+                ns("download_prot_plot"),
+                tagList(icon("download"), " Download (.png)"),
+                class = "dl-btn",
+                style = "width:100%;"
+              )
+            )
+          ),
+          column(
+            8,
+            box(
+              title = "Protein Plot Output",
+              status = "primary",
+              solidHeader = TRUE,
+              width = NULL,
+              div(
+                class = "plot-wrap",
+                tags$div(
+                  class = "spinner-overlay",
+                  id = ns("sp_prot_main"),
+                  icon("spinner", class = "fa-spin")
+                ),
+                plotOutput(ns("prot_dynamic_plot_out"), height = "700px")
+              )
+            )
+          )
+        ),
+        fluidRow(
           box(
-            title = "Protein Sequence View",
+            title = "Sequence Coverage View",
             status = "primary",
             solidHeader = TRUE,
             width = 12,
             collapsible = TRUE,
             fluidRow(
               column(
-                4,
+                3,
                 selectizeInput(
                   ns("selected_protein"),
                   "Select Protein:",
@@ -991,285 +713,123 @@ PSManalyst_ui <- function(id) {
                 )
               ),
               column(
-                4,
+                3,
                 numericInput(
                   ns("aa_per_line"),
-                  "Amino Acids per Line:",
+                  "AAs per line",
                   value = 50,
                   min = 10,
-                  max = 200
+                  max = 200,
+                  step = 10
                 )
               ),
               column(
-                4,
+                3,
                 checkboxInput(
                   ns("show_sequence"),
-                  "Show Sequence Letters",
+                  "Show residues",
                   value = TRUE
+                )
+              ),
+              column(
+                3,
+                actionButton(
+                  ns("plot_seq"),
+                  "Update Coverage",
+                  style = "margin-top:25px;width:100%;"
                 )
               )
             ),
             uiOutput(ns("protein_coverage_plot_ui"))
-          ),
-          box(
-            title = "Amino Acid Frequencies (Expected vs Identified)",
-            status = "primary",
-            solidHeader = TRUE,
-            width = 12,
-            collapsible = TRUE,
-            uiOutput(ns("aa_freq_banner")),
-            div(
-              class = "plot-wrap",
-              tags$div(
-                class = "spinner-overlay",
-                id = ns("sp_aa_psm"),
-                icon("spinner", class = "fa-spin")
-              ),
-              uiOutput(ns("plot_aa_freq_ui"))
-            )
-          ),
-          box(
-            title = "Protein coverage summary",
-            status = "primary",
-            solidHeader = TRUE,
-            width = 12,
-            collapsible = TRUE,
-            div(
-              class = "plot-wrap",
-              tags$div(
-                class = "spinner-overlay",
-                id = ns("sp01p"),
-                icon("spinner", class = "fa-spin")
-              ),
-              uiOutput(ns("plot01p_ui"))
-            )
-          ),
-          box(
-            title = "Number of proteins by organism",
-            status = "primary",
-            solidHeader = TRUE,
-            width = 12,
-            collapsible = TRUE,
-            div(
-              class = "plot-wrap",
-              tags$div(
-                class = "spinner-overlay",
-                id = ns("sp02p"),
-                icon("spinner", class = "fa-spin")
-              ),
-              uiOutput(ns("plot02p_ui"))
-            )
-          ),
-          box(
-            title = "Protein existence evidence",
-            status = "primary",
-            solidHeader = TRUE,
-            width = 12,
-            collapsible = TRUE,
-            div(
-              class = "plot-wrap",
-              tags$div(
-                class = "spinner-overlay",
-                id = ns("sp03p"),
-                icon("spinner", class = "fa-spin")
-              ),
-              uiOutput(ns("plot03p_ui"))
-            )
-          ),
-          box(
-            title = "Protein probability (ProteinProphet)",
-            status = "primary",
-            solidHeader = TRUE,
-            width = 12,
-            collapsible = TRUE,
-            div(
-              class = "plot-wrap",
-              tags$div(
-                class = "spinner-overlay",
-                id = ns("sp04p"),
-                icon("spinner", class = "fa-spin")
-              ),
-              uiOutput(ns("plot04p_ui"))
-            )
-          ),
-          box(
-            title = "Top Peptide Probability",
-            status = "primary",
-            solidHeader = TRUE,
-            width = 12,
-            collapsible = TRUE,
-            div(
-              class = "plot-wrap",
-              tags$div(
-                class = "spinner-overlay",
-                id = ns("sp05p"),
-                icon("spinner", class = "fa-spin")
-              ),
-              uiOutput(ns("plot05p_ui"))
-            )
-          ),
-          box(
-            title = "Total peptides mapped to the proteins",
-            status = "primary",
-            solidHeader = TRUE,
-            width = 12,
-            collapsible = TRUE,
-            div(
-              class = "plot-wrap",
-              tags$div(
-                class = "spinner-overlay",
-                id = ns("sp06p"),
-                icon("spinner", class = "fa-spin")
-              ),
-              uiOutput(ns("plot06p_ui"))
-            )
-          ),
-          box(
-            title = "Razor spectral count",
-            status = "primary",
-            solidHeader = TRUE,
-            width = 12,
-            collapsible = TRUE,
-            div(
-              class = "plot-wrap",
-              tags$div(
-                class = "spinner-overlay",
-                id = ns("sp07p"),
-                icon("spinner", class = "fa-spin")
-              ),
-              uiOutput(ns("plot07p_ui"))
-            )
-          ),
-          box(
-            title = "Razor intensity",
-            status = "primary",
-            solidHeader = TRUE,
-            width = 12,
-            collapsible = TRUE,
-            div(
-              class = "plot-wrap",
-              tags$div(
-                class = "spinner-overlay",
-                id = ns("sp08p"),
-                icon("spinner", class = "fa-spin")
-              ),
-              uiOutput(ns("plot08p_ui"))
-            )
-          ),
-          box(
-            title = "MaxLFQ intensity distribution",
-            status = "primary",
-            solidHeader = TRUE,
-            width = 12,
-            collapsible = TRUE,
-            div(
-              class = "plot-wrap",
-              tags$div(
-                class = "spinner-overlay",
-                id = ns("sp10p"),
-                icon("spinner", class = "fa-spin")
-              ),
-              uiOutput(ns("plot10p_ui"))
-            )
-          ),
-          box(
-            title = "Abundance correlation (MaxLFQ)",
-            status = "primary",
-            solidHeader = TRUE,
-            width = 12,
-            collapsible = TRUE,
-            div(
-              class = "plot-wrap",
-              tags$div(
-                class = "spinner-overlay",
-                id = ns("spgg"),
-                icon("spinner", class = "fa-spin")
-              ),
-              uiOutput(ns("plot_ggpairs_ui"))
-            )
-          ),
-          box(
-            title = "Sample correlation — Non-normalized log2(Intensity)",
-            status = "primary",
-            solidHeader = TRUE,
-            height = 600,
-            collapsible = FALSE,
-            plotlyOutput(ns("plot11p"))
-          ),
-          tabBox(
-            title = "Similarity metrics",
-            side = "right",
-            height = 600,
-            tabPanel("Cosine similarity", uiOutput(ns("cosine_similarity_ui"))),
-            tabPanel(
-              "Euclidean distance",
-              uiOutput(ns("euclidean_distance_ui"))
-            ),
-            tabPanel("Jaccard similarity", uiOutput(ns("jaccard_similarity_ui")))
-          ),
-          box(
-            title = "Top 20 proteins — MaxLFQ intensity rank (log2)",
-            status = "primary",
-            solidHeader = TRUE,
-            width = 12,
-            collapsible = TRUE,
-            div(
-              class = "plot-wrap",
-              tags$div(
-                class = "spinner-overlay",
-                id = ns("sp_rank_lfq"),
-                icon("spinner", class = "fa-spin")
-              ),
-              plotOutput(ns("plot_rank_lfq"), height = "600px")
-            )
-          ),
-          box(
-            title = "Top 20 proteins — Unique spectral count rank",
-            status = "primary",
-            solidHeader = TRUE,
-            width = 12,
-            collapsible = TRUE,
-            div(
-              class = "plot-wrap",
-              tags$div(
-                class = "spinner-overlay",
-                id = ns("sp_rank_usc"),
-                icon("spinner", class = "fa-spin")
-              ),
-              plotOutput(ns("plot_rank_usc"), height = "600px")
-            )
           )
         )
       ),
 
-      # ── Tab 4: Modification Diagnostic ─────────────────────────────────
+      # ── TAB 4: Modification Diagnostic ──
       tabPanel(
         "Modification Diagnostic",
         fluidRow(
-          box(
-            title = "RT Shift Profile — Modified vs. Unmodified Peptides",
-            status = "primary",
-            solidHeader = TRUE,
-            width = 12,
-            div(
-              class = "plot-wrap",
-              tags$div(
-                class = "spinner-overlay",
-                id = ns("sp_moddiag"),
-                icon("spinner", class = "fa-spin")
+          column(
+            4,
+            box(
+              title = "Diagnostic Controls",
+              status = "primary",
+              solidHeader = TRUE,
+              width = NULL,
+              sliderInput(
+                ns("rt_tolerance"),
+                "ΔRT Artifact Threshold (min)",
+                min = 0.1,
+                max = 5,
+                value = 0.5,
+                step = 0.1
               ),
-              uiOutput(ns("mod_diag_plot_ui"))
+              helpText("Lower threshold → more strict artifact classification.")
+            )
+          ),
+          column(
+            8,
+            box(
+              title = "RT Shift Profile — Modified vs Unmodified",
+              status = "primary",
+              solidHeader = TRUE,
+              width = NULL,
+              div(
+                class = "plot-wrap",
+                tags$div(
+                  class = "spinner-overlay",
+                  id = ns("sp_moddiag"),
+                  icon("spinner", class = "fa-spin")
+                ),
+                uiOutput(ns("mod_diag_plot_ui"))
+              )
             )
           )
         ),
         fluidRow(
           box(
-            title = "RT Shift Table",
+            title = "Paired Peptide Data",
             status = "primary",
             solidHeader = TRUE,
             width = 12,
-            collapsible = TRUE,
             DT::dataTableOutput(ns("mod_diag_table"))
+          )
+        )
+      ),
+
+      # ── TAB 5: Similarity & Distance ──
+      tabPanel(
+        "Similarity & Distance",
+        fluidRow(
+          box(
+            title = "Scatterplot matrix",
+            status = "primary",
+            solidHeader = TRUE,
+            width = 6,
+            uiOutput(ns("plot_ggpairs_ui"))
+          ),
+          box(
+            title = "Cosine Similarity",
+            status = "primary",
+            solidHeader = TRUE,
+            width = 6,
+            uiOutput(ns("cosine_similarity_ui"))
+          )
+        ),
+        fluidRow(
+          box(
+            title = "Euclidean Distance",
+            status = "primary",
+            solidHeader = TRUE,
+            width = 6,
+            uiOutput(ns("euclidean_distance_ui"))
+          ),
+          box(
+            title = "Jaccard Similarity (Protein ID)",
+            status = "primary",
+            solidHeader = TRUE,
+            width = 6,
+            uiOutput(ns("jaccard_similarity_ui"))
           )
         )
       )
@@ -1277,129 +837,44 @@ PSManalyst_ui <- function(id) {
   )
 }
 
-
-# ── Server ────────────────────────────────────────────────────────────────────
+# ── Server ─────────────────────────────
 PSManalyst_server <- function(id) {
   moduleServer(id, function(input, output, session) {
     ns <- session$ns
 
-    # Dynamic height logic
+    psm_fns <- new.env()
+    prot_fns <- new.env()
+
+    # ── Spinner helpers ──
+    hide_spinner <- function(sid) shinyjs::hide(id = sid)
+    show_spinner <- function(sid) shinyjs::show(id = sid)
+
+    # ── Dynamic height logic ──
     psm_plot_h <- reactive({
       d <- data()
       req(d, "sample_name" %in% names(d))
       n <- length(unique(d$sample_name))
       max(400L, ceiling(n / 3) * 350L)
     })
-    
+
     make_psm_plot_ui <- function(plot_id) {
-      renderUI({ req(data()); plotOutput(ns(plot_id), height = paste0(psm_plot_h(), "px")) })
+      renderUI({
+        req(data())
+        plotOutput(ns(plot_id), height = paste0(psm_plot_h(), "px"))
+      })
     }
-    
-    output$plot01_ui <- make_psm_plot_ui("plot01")
-    output$plot03_ui <- make_psm_plot_ui("plot03")
-    output$plot04_ui <- make_psm_plot_ui("plot04")
-    output$plot05_ui <- make_psm_plot_ui("plot05")
-    output$plot06_ui <- make_psm_plot_ui("plot06")
-    output$plot07_ui <- make_psm_plot_ui("plot07")
-    output$plot08_ui <- make_psm_plot_ui("plot08")
-    output$plot09_ui <- make_psm_plot_ui("plot09")
-    output$plot10_ui <- make_psm_plot_ui("plot10")
-    output$plot11_ui <- make_psm_plot_ui("plot11")
-    output$plot12_ui <- make_psm_plot_ui("plot12")
-    output$plot13_ui <- make_psm_plot_ui("plot13")
-    output$plot14_ui <- make_psm_plot_ui("plot14")
-    output$plot15_ui <- make_psm_plot_ui("plot15")
-    output$plot16_ui <- make_psm_plot_ui("plot16")
-    output$plot17_ui <- make_psm_plot_ui("plot17")
-    output$plot18_ui <- make_psm_plot_ui("plot18")
-    output$plot19_ui <- make_psm_plot_ui("plot19")
-    output$plot20_ui <- make_psm_plot_ui("plot20")
-    
-    output$plot01p_ui <- make_psm_plot_ui("plot01p")
-    output$plot02p_ui <- make_psm_plot_ui("plot02p")
-    output$plot03p_ui <- make_psm_plot_ui("plot03p")
-    output$plot04p_ui <- make_psm_plot_ui("plot04p")
-    output$plot05p_ui <- make_psm_plot_ui("plot05p")
-    output$plot06p_ui <- make_psm_plot_ui("plot06p")
-    output$plot07p_ui <- make_psm_plot_ui("plot07p")
-    output$plot08p_ui <- make_psm_plot_ui("plot08p")
-    output$plot10p_ui <- make_psm_plot_ui("plot10p")
-    
-    output$plot_fdr_curve_ui <- make_psm_plot_ui("plot_fdr_curve")
-    output$plot_aa_freq_ui <- make_psm_plot_ui("plot_aa_freq")
+
     output$plot_ggpairs_ui <- make_psm_plot_ui("plot_ggpairs")
     output$cosine_similarity_ui <- make_psm_plot_ui("cosine_similarity")
     output$euclidean_distance_ui <- make_psm_plot_ui("euclidean_distance")
     output$jaccard_similarity_ui <- make_psm_plot_ui("jaccard_similarity")
 
-
-    # ── Spinner helpers ───────────────────────────────────────────────────────
-    spin_ids_psm <- paste0(
-      "sp",
-      c(
-        "01",
-        "03",
-        "04",
-        "05",
-        "06",
-        "07",
-        "08",
-        "09",
-        "10",
-        "11",
-        "12",
-        "13",
-        "14",
-        "15",
-        "16",
-        "17",
-        "18",
-        "19",
-        "20",
-        "_fdr"
-      )
-    )
-    spin_ids_prot <- c(
-      paste0(
-        "sp",
-        c(
-          "01p",
-          "02p",
-          "03p",
-          "04p",
-          "05p",
-          "06p",
-          "07p",
-          "08p",
-          "09p",
-          "10p",
-          "gg"
-        )
-      ),
-      "sp_aa_psm"
-    )
-
-    show_psm_spinners <- function() {
-      lapply(spin_ids_psm, function(s) shinyjs::show(id = s))
-    }
-    show_prot_spinners <- function() {
-      lapply(spin_ids_prot, function(s) shinyjs::show(id = s))
-    }
-    hide_spinner <- function(sid) shinyjs::hide(id = sid)
-    rh <- function(expr_fn, sid) {
-      on.exit(hide_spinner(sid), add = TRUE)
-      expr_fn()
-    }
-
     # ════════════════════════════════════════════════════════════════════════
     # A. MULTI-FILE PSM INGESTION
     # ════════════════════════════════════════════════════════════════════════
-
-    # Holds the raw combined data (before QC filters)
     raw_psm_data <- reactiveVal(NULL)
     loaded_psm_folder <- reactiveVal(NULL)
 
-    # Load files when the button is clicked
     observeEvent(input$load_psm_folder, {
       folder <- trimws(input$psm_folder)
       req(nchar(folder) > 0)
@@ -1439,17 +914,16 @@ PSManalyst_server <- function(id) {
       })
     })
 
-    # Feedback label below the folder input
     output$psm_folder_status <- renderUI({
       df <- raw_psm_data()
       if (is.null(df)) {
         return(NULL)
       }
       tags$div(
-        style = "padding:4px 16px 8px;font-size:12px;color:#1BB99A;font-weight:600;",
+        style = "padding:4px 0 8px;font-size:12px;color:#1BB99A;font-weight:600;",
         icon("circle-check", style = "margin-right:4px;"),
         sprintf(
-          "%d sample(s) loaded · %s PSMs",
+          "%d sample(s) · %s PSMs",
           dplyr::n_distinct(df$sample_name),
           format(nrow(df), big.mark = ",")
         )
@@ -1459,10 +933,8 @@ PSManalyst_server <- function(id) {
     # ════════════════════════════════════════════════════════════════════════
     # B. FILTERED PSM DATA
     # ════════════════════════════════════════════════════════════════════════
-
     data <- reactive({
       req(raw_psm_data())
-      show_psm_spinners()
 
       psm_file <- raw_psm_data() %>%
         dplyr::filter(
@@ -1527,6 +999,7 @@ PSManalyst_server <- function(id) {
       req(data())
       extract_matrix_per_sample(data())
     })
+
     cooccurrence_data <- reactive({
       req(data())
       analyze_terminus_cooccurrence(data(), "peptide", show_values = TRUE)
@@ -1535,8 +1008,6 @@ PSManalyst_server <- function(id) {
     # ════════════════════════════════════════════════════════════════════════
     # C. MS/MS SPECTRUM VIEWER
     # ════════════════════════════════════════════════════════════════════════
-
-    # Populate peptide selector once PSM data is loaded
     observeEvent(raw_psm_data(), {
       req(raw_psm_data())
       peptides <- sort(unique(raw_psm_data()$peptide))
@@ -1549,11 +1020,9 @@ PSManalyst_server <- function(id) {
       )
     })
 
-    # Tidy fragment data — recomputed only on button click
     tidy_spectrum_data <- eventReactive(input$run_spectrum, {
       req(raw_psm_data(), nchar(input$spectrum_peptide) > 0)
-      shinyjs::show(id = "sp_spectrum")
-
+      show_spinner("sp_spectrum")
       withProgress(message = "Building spectrum…", value = 0.5, {
         result <- tidy_psm_spectrum(raw_psm_data(), input$spectrum_peptide)
         incProgress(0.5, detail = "Done.")
@@ -1561,7 +1030,6 @@ PSManalyst_server <- function(id) {
       })
     })
 
-    # Number of facets → dynamic height
     n_spectrum_facets <- reactive({
       req(tidy_spectrum_data())
       tidy_spectrum_data() %>%
@@ -1574,7 +1042,6 @@ PSManalyst_server <- function(id) {
       max(400L, n_rows * 350L)
     })
 
-    # Dynamic-height plot container
     output$spectrum_plot_ui <- renderUI({
       plotOutput(
         ns("spectrum_plot"),
@@ -1591,7 +1058,6 @@ PSManalyst_server <- function(id) {
       )
     })
 
-    # Tidy data table beneath the spectrum
     output$spectrum_tidy_table <- DT::renderDataTable({
       req(tidy_spectrum_data())
       DT::datatable(
@@ -1626,7 +1092,6 @@ PSManalyst_server <- function(id) {
     # ════════════════════════════════════════════════════════════════════════
     # D. INFO BOXES
     # ════════════════════════════════════════════════════════════════════════
-
     output$info_box1 <- renderInfoBox({
       spec_labels <- c(
         fully_specific = "Fully specific",
@@ -1648,8 +1113,6 @@ PSManalyst_server <- function(id) {
           "peptides"
         )
       }
-
-      # Add sample count when data is available
       df <- raw_psm_data()
       if (!is.null(df)) {
         ft <- paste0(
@@ -1661,581 +1124,497 @@ PSManalyst_server <- function(id) {
           " PSMs after filtering"
         )
       }
-
       infoBox("Filter settings", ft, icon = icon("info"), color = "black")
     })
 
     output$info_box2 <- renderInfoBox({
       infoBox(
-        "protein.tsv files contain FDR-filtered protein results, where each row is an identified protein group",
+        "protein.tsv contain FDR-filtered protein results; each row is an identified protein group",
         icon = icon("info"),
         color = "black"
       )
     })
 
     # ════════════════════════════════════════════════════════════════════════
-    # E. PSM PLOTS
+    # E. PSM PLOT FUNCTIONS
     # ════════════════════════════════════════════════════════════════════════
-
     seqlogo_scale <- scale_x_continuous(
       breaks = 1:8,
       labels = c("P4", "P3", "P2", "P1", "P1'", "P2'", "P3'", "P4'")
     )
 
-    output$plot01 <- renderPlot({
-      rh(
-        function() {
-          mat_list <- frequency_matrix_of_aa()
-          purrr::imap_dfr(
-            mat_list,
-            ~ as.data.frame(.x) %>%
-              rownames_to_column(var = "residue") %>%
-              pivot_longer(
-                cols = -residue,
-                names_to = "position",
-                values_to = "frequency"
-              ) %>%
-              dplyr::mutate(sample_name = .y)
+    psm_fns$plot01 <- function() {
+      req(data())
+      mat_list <- frequency_matrix_of_aa()
+      purrr::imap_dfr(
+        mat_list,
+        ~ as.data.frame(.x) %>%
+          rownames_to_column(var = "residue") %>%
+          pivot_longer(
+            cols = -residue,
+            names_to = "position",
+            values_to = "frequency"
           ) %>%
-            dplyr::mutate(
-              position = factor(
-                position,
-                c("P4", "P3", "P2", "P1", "P1'", "P2'", "P3'", "P4'")
-              ),
-              residue = factor(
-                residue,
-                c(
-                  "A",
-                  "C",
-                  "D",
-                  "E",
-                  "F",
-                  "G",
-                  "H",
-                  "I",
-                  "K",
-                  "L",
-                  "M",
-                  "N",
-                  "P",
-                  "Q",
-                  "R",
-                  "S",
-                  "T",
-                  "V",
-                  "W",
-                  "Y"
-                )
-              )
-            ) %>%
-            ggplot(aes(x = position, y = residue, fill = frequency)) +
-            geom_tile(color = "black") +
-            scale_fill_gradient(low = "#d4e6f1", high = "#154360") +
-            geom_vline(xintercept = 4.5, color = "black", linetype = "dashed") +
-            theme_minimal() +
-            facet_wrap(~sample_name, ncol = 3) +
-            labs(
-              title = "Cleavage Site Specificity",
-              x = "Position",
-              y = "Amino acid residue",
-              fill = "Frequency (%)"
-            ) +
-            theme(
-              plot.title = element_text(size = 18, hjust = 0.5, face = "bold"),
-              axis.text.x = element_text(
-                size = 12,
-                face = "bold",
-                color = "black"
-              ),
-              axis.text.y = element_text(
-                size = 11,
-                face = "bold",
-                color = "black"
-              ),
-              axis.title = element_text(size = 13, face = "bold"),
-              strip.background = element_blank(),
-              strip.text = element_text(
-                size = 14,
-                face = "bold",
-                color = "black"
-              ),
-              legend.position = "bottom",
-              legend.key.width = unit(2, "cm"),
-              legend.key.height = unit(0.25, "cm"),
-              legend.title.position = "top",
-              panel.grid = element_blank()
+          dplyr::mutate(sample_name = .y)
+      ) %>%
+        dplyr::mutate(
+          position = factor(
+            position,
+            c("P4", "P3", "P2", "P1", "P1'", "P2'", "P3'", "P4'")
+          ),
+          residue = factor(
+            residue,
+            c(
+              "A",
+              "C",
+              "D",
+              "E",
+              "F",
+              "G",
+              "H",
+              "I",
+              "K",
+              "L",
+              "M",
+              "N",
+              "P",
+              "Q",
+              "R",
+              "S",
+              "T",
+              "V",
+              "W",
+              "Y"
             )
-        },
-        "sp01"
-      )
-    })
+          )
+        ) %>%
+        ggplot(aes(x = position, y = residue, fill = frequency)) +
+        geom_tile(color = "black") +
+        scale_fill_gradient(low = "#d4e6f1", high = "#154360") +
+        geom_vline(xintercept = 4.5, color = "black", linetype = "dashed") +
+        theme_minimal() +
+        facet_wrap(~sample_name, ncol = 3) +
+        labs(
+          title = "Cleavage Site Specificity",
+          x = "Position",
+          y = "Amino acid residue",
+          fill = "Frequency (%)"
+        ) +
+        theme(
+          plot.title = element_text(size = 18, hjust = 0.5, face = "bold"),
+          axis.text = element_text(face = "bold", color = "black"),
+          axis.title = element_text(size = 13, face = "bold"),
+          strip.background = element_blank(),
+          strip.text = element_text(size = 14, face = "bold", color = "black"),
+          legend.position = "bottom",
+          legend.key.width = unit(2, "cm"),
+          legend.key.height = unit(0.25, "cm"),
+          legend.title.position = "top",
+          panel.grid = element_blank()
+        )
+    }
 
-    output$plot03 <- renderPlot({
-      rh(
-        function() {
-          seq_lst <- data() %>%
-            as.data.frame() %>%
-            dplyr::filter(!is.na(fingerprint_Nterm)) %>%
-            dplyr::group_by(sample_name) %>%
-            dplyr::summarise(
-              seqs = list(fingerprint_Nterm),
-              .groups = "drop"
-            ) %>%
-            tibble::deframe()
-          ggseqlogo::ggseqlogo(seq_lst, method = "bits", seq_type = "AA") +
-            geom_hline(yintercept = 0, color = "black", linetype = "dashed") +
-            geom_vline(xintercept = 4.5, color = "black", linetype = "dashed") +
-            seqlogo_scale +
-            labs(
-              title = "SeqLogo of the N-termini fingerprint",
-              x = "Amino acid position",
-              y = "Bits"
-            ) +
-            theme_bw() +
-            theme(
-              plot.title = element_text(size = 18, hjust = 0.5, face = "bold"),
-              axis.text.x = element_text(
-                size = 12,
-                face = "bold",
-                color = "black"
-              ),
-              axis.text.y = element_text(
-                size = 11,
-                face = "bold",
-                color = "black"
-              ),
-              axis.title = element_text(size = 13, face = "bold"),
-              strip.background = element_blank(),
-              strip.text = element_text(
-                size = 14,
-                face = "bold",
-                color = "black"
-              )
-            )
-        },
-        "sp03"
-      )
-    })
+    psm_fns$plot03 <- function() {
+      req(data())
+      seq_lst <- data() %>%
+        dplyr::filter(!is.na(fingerprint_Nterm)) %>%
+        dplyr::group_by(sample_name) %>%
+        dplyr::summarise(seqs = list(fingerprint_Nterm), .groups = "drop") %>%
+        tibble::deframe()
+      ggseqlogo::ggseqlogo(seq_lst, method = "bits", seq_type = "AA") +
+        geom_hline(yintercept = 0, color = "black", linetype = "dashed") +
+        geom_vline(xintercept = 4.5, color = "black", linetype = "dashed") +
+        seqlogo_scale +
+        labs(
+          title = "SeqLogo of the N-termini fingerprint",
+          x = "Amino acid position",
+          y = "Bits"
+        ) +
+        theme_bw() +
+        theme(
+          plot.title = element_text(size = 18, hjust = 0.5, face = "bold"),
+          axis.text = element_text(face = "bold", color = "black"),
+          axis.title = element_text(size = 13, face = "bold"),
+          strip.background = element_blank(),
+          strip.text = element_text(size = 14, face = "bold", color = "black")
+        )
+    }
 
-    output$plot04 <- renderPlot({
-      rh(
-        function() {
-          seq_lst <- data() %>%
-            as.data.frame() %>%
-            dplyr::filter(!is.na(fingerprint_Cterm)) %>%
-            dplyr::group_by(sample_name) %>%
-            dplyr::summarise(
-              seqs = list(fingerprint_Cterm),
-              .groups = "drop"
-            ) %>%
-            tibble::deframe()
-          ggseqlogo::ggseqlogo(seq_lst, method = "bits", seq_type = "AA") +
-            geom_hline(yintercept = 0, color = "black", linetype = "dashed") +
-            geom_vline(xintercept = 4.5, color = "black", linetype = "dashed") +
-            seqlogo_scale +
-            labs(
-              title = "SeqLogo of the C-termini fingerprint",
-              x = "Amino acid position",
-              y = "Bits"
-            ) +
-            theme_bw() +
-            theme(
-              plot.title = element_text(size = 18, hjust = 0.5, face = "bold"),
-              axis.text.x = element_text(
-                size = 12,
-                face = "bold",
-                color = "black"
-              ),
-              axis.text.y = element_text(
-                size = 11,
-                face = "bold",
-                color = "black"
-              ),
-              axis.title = element_text(size = 13, face = "bold"),
-              strip.background = element_blank(),
-              strip.text = element_text(
-                size = 14,
-                face = "bold",
-                color = "black"
-              )
-            )
-        },
-        "sp04"
-      )
-    })
+    psm_fns$plot04 <- function() {
+      req(data())
+      seq_lst <- data() %>%
+        dplyr::filter(!is.na(fingerprint_Cterm)) %>%
+        dplyr::group_by(sample_name) %>%
+        dplyr::summarise(seqs = list(fingerprint_Cterm), .groups = "drop") %>%
+        tibble::deframe()
+      ggseqlogo::ggseqlogo(seq_lst, method = "bits", seq_type = "AA") +
+        geom_hline(yintercept = 0, color = "black", linetype = "dashed") +
+        geom_vline(xintercept = 4.5, color = "black", linetype = "dashed") +
+        seqlogo_scale +
+        labs(
+          title = "SeqLogo of the C-termini fingerprint",
+          x = "Amino acid position",
+          y = "Bits"
+        ) +
+        theme_bw() +
+        theme(
+          plot.title = element_text(size = 18, hjust = 0.5, face = "bold"),
+          axis.text = element_text(face = "bold", color = "black"),
+          axis.title = element_text(size = 13, face = "bold"),
+          strip.background = element_blank(),
+          strip.text = element_text(size = 14, face = "bold", color = "black")
+        )
+    }
 
-    output$plot05 <- renderPlot({
-      rh(
-        function() {
-          data() %>%
-            as.data.frame() %>%
-            ggplot(aes(x = retention / 60, y = observed_m_z)) +
-            ggpointdensity::geom_pointdensity(size = 0.25) +
-            viridis::scale_color_viridis(option = "plasma") +
-            labs(
-              x = "Retention time (min)",
-              y = "Scan range (m/z)",
-              color = "Number of Neighborhoods"
-            ) +
-            facet_wrap(~sample_name, ncol = 3) +
-            theme(
-              legend.position = "bottom",
-              legend.key.width = unit(2, "cm"),
-              legend.key.height = unit(0.25, "cm")
-            )
-        },
-        "sp05"
-      )
-    })
+    psm_fns$plot05 <- function() {
+      req(data())
+      data() %>%
+        ggplot(aes(x = retention / 60, y = observed_m_z)) +
+        ggpointdensity::geom_pointdensity(size = 0.25) +
+        viridis::scale_color_viridis(option = "plasma") +
+        labs(
+          x = "Retention time (min)",
+          y = "Scan range (m/z)",
+          color = "Number of Neighborhoods"
+        ) +
+        facet_wrap(~sample_name, ncol = 3) +
+        theme(
+          legend.position = "bottom",
+          legend.key.width = unit(2, "cm"),
+          legend.key.height = unit(0.25, "cm")
+        )
+    }
 
-    output$plot06 <- renderPlot({
-      rh(
-        function() {
-          data() %>%
-            as.data.frame() %>%
-            dplyr::filter(abs(delta_mass_ppm) < 100) %>%
-            ggplot(aes(x = retention / 60, y = delta_mass_ppm)) +
-            geom_point(alpha = 0.1, color = "black", size = 1) +
-            geom_hline(
-              yintercept = c(10, 0, -10),
-              color = "red",
-              linetype = "dashed",
-              linewidth = 0.2
-            ) +
-            labs(
-              x = "Retention time (min)",
-              y = "Mass error (ppm)",
-              caption = "ppm = delta m/z / theoretical m/z * 1e6"
-            ) +
-            facet_wrap(~sample_name, ncol = 3)
-        },
-        "sp06"
-      )
-    })
+    psm_fns$plot06 <- function() {
+      req(data())
+      data() %>%
+        dplyr::filter(abs(delta_mass_ppm) < 100) %>%
+        ggplot(aes(x = retention / 60, y = delta_mass_ppm)) +
+        geom_point(alpha = 0.1, color = "black", size = 1) +
+        geom_hline(
+          yintercept = c(10, 0, -10),
+          color = "red",
+          linetype = "dashed",
+          linewidth = 0.2
+        ) +
+        labs(
+          x = "Retention time (min)",
+          y = "Mass error (ppm)",
+          caption = "ppm = delta m/z / theoretical m/z * 1e6"
+        ) +
+        facet_wrap(~sample_name, ncol = 3)
+    }
 
-    output$plot07 <- renderPlot({
-      rh(
-        function() {
-          data() %>%
-            as.data.frame() %>%
-            ggplot() +
-            geom_density(aes(x = peptide_length), fill = input$plot_color) +
-            labs(x = "Peptide Length", y = "Frequency (%)") +
-            facet_wrap(~sample_name, ncol = 3)
-        },
-        "sp07"
-      )
-    })
+    psm_fns$plot07 <- function() {
+      req(data())
+      data() %>%
+        ggplot() +
+        geom_density(aes(x = peptide_length), fill = input$plot_color) +
+        labs(x = "Peptide Length", y = "Frequency (%)") +
+        facet_wrap(~sample_name, ncol = 3)
+    }
 
-    output$plot08 <- renderPlot({
-      rh(
-        function() {
-          data() %>%
-            as.data.frame() %>%
-            ggplot(aes(x = gravy, fill = after_stat(x))) +
-            geom_histogram(color = "black") +
-            scale_fill_viridis_c(name = "GRAVY index", option = "C") +
-            labs(
-              x = NULL,
-              y = "Count",
-              caption = "GRAVY: hydropathic character of the sequence"
-            ) +
-            facet_wrap(~sample_name, ncol = 3) +
-            theme(
-              legend.position = "bottom",
-              legend.key.width = unit(2.5, "cm"),
-              legend.key.height = unit(0.25, "cm")
-            )
-        },
-        "sp08"
-      )
-    })
+    psm_fns$plot08 <- function() {
+      req(data())
+      data() %>%
+        ggplot(aes(x = gravy, fill = after_stat(x))) +
+        geom_histogram(color = "black") +
+        scale_fill_viridis_c(name = "GRAVY index", option = "C") +
+        labs(
+          x = NULL,
+          y = "Count",
+          caption = "GRAVY: hydropathic character of the sequence"
+        ) +
+        facet_wrap(~sample_name, ncol = 3) +
+        theme(
+          legend.position = "bottom",
+          legend.key.width = unit(2.5, "cm"),
+          legend.key.height = unit(0.25, "cm")
+        )
+    }
 
-    output$plot09 <- renderPlot({
-      rh(
-        function() {
-          data() %>%
-            as.data.frame() %>%
-            ggplot(aes(x = isoelectric_point, fill = after_stat(x))) +
-            geom_histogram(color = "black") +
-            scale_fill_viridis_c(
-              name = "Isoelectric Point (pI)",
-              option = "C"
-            ) +
-            labs(x = NULL, y = "Count") +
-            facet_wrap(~sample_name, ncol = 3) +
-            theme(
-              legend.position = "bottom",
-              legend.key.width = unit(2.5, "cm"),
-              legend.key.height = unit(0.25, "cm")
-            )
-        },
-        "sp09"
-      )
-    })
+    psm_fns$plot09 <- function() {
+      req(data())
+      data() %>%
+        ggplot(aes(x = isoelectric_point, fill = after_stat(x))) +
+        geom_histogram(color = "black") +
+        scale_fill_viridis_c(name = "Isoelectric Point (pI)", option = "C") +
+        labs(x = NULL, y = "Count") +
+        facet_wrap(~sample_name, ncol = 3) +
+        theme(
+          legend.position = "bottom",
+          legend.key.width = unit(2.5, "cm"),
+          legend.key.height = unit(0.25, "cm")
+        )
+    }
 
-    output$plot10 <- renderPlot({
-      rh(
-        function() {
-          data() %>%
-            as.data.frame() %>%
-            ggplot() +
-            geom_bar(
-              aes(x = charge),
-              fill = input$plot_color,
-              color = "black"
-            ) +
-            labs(x = "Charge state", y = "Count") +
-            facet_wrap(~sample_name, ncol = 3)
-        },
-        "sp10"
-      )
-    })
+    psm_fns$plot10 <- function() {
+      req(data())
+      data() %>%
+        ggplot() +
+        geom_bar(aes(x = charge), fill = input$plot_color, color = "black") +
+        labs(x = "Charge state", y = "Count") +
+        facet_wrap(~sample_name, ncol = 3)
+    }
 
-    output$plot11 <- renderPlot({
-      rh(
-        function() {
-          data() %>%
-            as.data.frame() %>%
-            group_by(sample_name, number_of_missed_cleavages) %>%
-            summarise(n = n()) %>%
-            ggplot(aes(x = number_of_missed_cleavages, y = n)) +
-            geom_bar(
-              stat = "identity",
-              position = "dodge",
-              fill = input$plot_color,
-              color = "black"
-            ) +
-            geom_text(aes(label = n), vjust = -0.5, size = 5) +
-            labs(x = "Number of Missed Cleavages", y = "Count") +
-            facet_wrap(~sample_name, ncol = 3)
-        },
-        "sp11"
-      )
-    })
+    psm_fns$plot11 <- function() {
+      req(data())
+      data() %>%
+        group_by(sample_name, number_of_missed_cleavages) %>%
+        summarise(n = n(), .groups = "drop") %>%
+        ggplot(aes(x = number_of_missed_cleavages, y = n)) +
+        geom_bar(stat = "identity", fill = input$plot_color, color = "black") +
+        geom_text(aes(label = n), vjust = -0.5, size = 5) +
+        labs(x = "Number of Missed Cleavages", y = "Count") +
+        facet_wrap(~sample_name, ncol = 3)
+    }
 
-    output$plot12 <- renderPlot({
-      rh(
-        function() {
-          data() %>%
-            as.data.frame() %>%
-            dplyr::mutate(
-              uniqueness = ifelse(is_unique == TRUE, "Unique", "Shared")
-            ) %>%
-            group_by(sample_name, uniqueness) %>%
-            summarise(n = n()) %>%
-            ggplot(aes(x = uniqueness, y = n)) +
-            geom_bar(
-              stat = "identity",
-              fill = input$plot_color,
-              color = "black"
-            ) +
-            geom_text(aes(label = n), vjust = -0.5, size = 5) +
-            labs(x = "Unique peptides", y = "Count") +
-            facet_wrap(~sample_name, ncol = 3)
-        },
-        "sp12"
-      )
-    })
+    psm_fns$plot12 <- function() {
+      req(data())
+      data() %>%
+        dplyr::mutate(
+          uniqueness = ifelse(is_unique == TRUE, "Unique", "Shared")
+        ) %>%
+        group_by(sample_name, uniqueness) %>%
+        summarise(n = n(), .groups = "drop") %>%
+        ggplot(aes(x = uniqueness, y = n)) +
+        geom_bar(stat = "identity", fill = input$plot_color, color = "black") +
+        geom_text(aes(label = n), vjust = -0.5, size = 5) +
+        labs(x = "Unique peptides", y = "Count") +
+        facet_wrap(~sample_name, ncol = 3)
+    }
 
-    output$plot13 <- renderPlot({
-      rh(
-        function() {
-          data() %>%
-            as.data.frame() %>%
-            ggplot() +
-            geom_histogram(
-              aes(x = hyperscore),
-              fill = input$plot_color,
-              color = "black"
-            ) +
-            labs(
-              x = "Hyperscore",
-              y = "Count",
-              caption = "Higher values indicate greater similarity to theoretical spectra"
-            ) +
-            facet_wrap(~sample_name, ncol = 3)
-        },
-        "sp13"
-      )
-    })
+    psm_fns$plot13 <- function() {
+      req(data())
+      data() %>%
+        ggplot() +
+        geom_histogram(
+          aes(x = hyperscore),
+          fill = input$plot_color,
+          color = "black"
+        ) +
+        labs(x = "Hyperscore", y = "Count") +
+        facet_wrap(~sample_name, ncol = 3)
+    }
 
-    output$plot14 <- renderPlot({
-      rh(
-        function() {
-          data() %>%
-            as.data.frame() %>%
-            ggplot() +
-            geom_histogram(
-              aes(x = nextscore),
-              fill = input$plot_color,
-              color = "black"
-            ) +
-            labs(
-              x = "Nextscore",
-              y = "Count",
-              caption = "Second-highest scoring match for the spectrum"
-            ) +
-            facet_wrap(~sample_name, ncol = 3)
-        },
-        "sp14"
-      )
-    })
+    psm_fns$plot14 <- function() {
+      req(data())
+      data() %>%
+        ggplot() +
+        geom_histogram(
+          aes(x = nextscore),
+          fill = input$plot_color,
+          color = "black"
+        ) +
+        labs(x = "Nextscore", y = "Count") +
+        facet_wrap(~sample_name, ncol = 3)
+    }
 
-    output$plot15 <- renderPlot({
-      rh(
-        function() {
-          data() %>%
-            as.data.frame() %>%
-            ggplot() +
-            geom_histogram(
-              aes(x = probability),
-              fill = input$plot_color,
-              color = "black"
-            ) +
-            labs(x = "PeptideProphet Probability", y = "Count") +
-            facet_wrap(~sample_name, ncol = 3)
-        },
-        "sp15"
-      )
-    })
+    psm_fns$plot15 <- function() {
+      req(data())
+      data() %>%
+        ggplot() +
+        geom_histogram(
+          aes(x = probability),
+          fill = input$plot_color,
+          color = "black"
+        ) +
+        labs(x = "PeptideProphet Probability", y = "Count") +
+        facet_wrap(~sample_name, ncol = 3)
+    }
 
-    output$plot16 <- renderPlot({
-      rh(
-        function() {
-          data() %>%
-            as.data.frame() %>%
-            ggplot() +
-            geom_histogram(
-              aes(x = expectation),
-              fill = input$plot_color,
-              color = "black"
-            ) +
-            labs(x = "Expectation value", y = "Count") +
-            facet_wrap(~sample_name, ncol = 3)
-        },
-        "sp16"
-      )
-    })
+    psm_fns$plot16 <- function() {
+      req(data())
+      data() %>%
+        ggplot() +
+        geom_histogram(
+          aes(x = expectation),
+          fill = input$plot_color,
+          color = "black"
+        ) +
+        labs(x = "Expectation value", y = "Count") +
+        facet_wrap(~sample_name, ncol = 3)
+    }
 
-    output$plot17 <- renderPlot({
-      rh(
-        function() {
-          data() %>%
-            as.data.frame() %>%
-            tidyr::separate_rows(assigned_modifications, sep = ",") %>%
-            dplyr::mutate(
-              assigned_modifications = stringr::str_remove_all(
-                assigned_modifications,
-                ".*\\(|\\)"
-              ),
-              assigned_modifications = ifelse(
-                is.na(assigned_modifications),
-                "Unassigned",
-                assigned_modifications
-              )
-            ) %>%
-            group_by(sample_name, assigned_modifications) %>%
-            summarise(n = n()) %>%
-            ggplot(aes(y = assigned_modifications, x = n)) +
-            geom_col(fill = input$plot_color, color = "black") +
-            geom_text(aes(label = n), hjust = -0.1, size = 5) +
-            scale_x_continuous(expand = expansion(mult = c(0, 0.15))) +
-            labs(y = "Assigned Modifications", x = "Count") +
-            facet_wrap(~sample_name, ncol = 3)
-        },
-        "sp17"
-      )
-    })
+    psm_fns$plot17 <- function() {
+      req(data())
+      data() %>%
+        tidyr::separate_rows(assigned_modifications, sep = ",") %>%
+        dplyr::mutate(
+          assigned_modifications = stringr::str_remove_all(
+            assigned_modifications,
+            ".*\\(|\\)"
+          ),
+          assigned_modifications = ifelse(
+            is.na(assigned_modifications),
+            "Unassigned",
+            assigned_modifications
+          )
+        ) %>%
+        group_by(sample_name, assigned_modifications) %>%
+        summarise(n = n(), .groups = "drop") %>%
+        ggplot(aes(y = assigned_modifications, x = n)) +
+        geom_col(fill = input$plot_color, color = "black") +
+        geom_text(aes(label = n), hjust = -0.1, size = 5) +
+        scale_x_continuous(expand = expansion(mult = c(0, 0.15))) +
+        labs(y = "Assigned Modifications", x = "Count") +
+        facet_wrap(~sample_name, ncol = 3)
+    }
 
-    output$plot18 <- renderPlot({
-      rh(
-        function() {
-          data() %>%
-            as.data.frame() %>%
-            dplyr::group_by(sample_name, entry_name) %>%
-            dplyr::summarise(n_psm = n(), .groups = "drop") %>%
-            dplyr::group_by(sample_name) %>%
-            dplyr::slice_max(n_psm, n = 20, with_ties = FALSE) %>%
-            dplyr::ungroup() %>%
-            dplyr::mutate(
-              entry_name = tidytext::reorder_within(
-                entry_name,
-                n_psm,
-                sample_name
-              )
-            ) %>%
-            ggplot(aes(x = n_psm, y = entry_name)) +
-            geom_col(fill = input$plot_color, color = "black") +
-            tidytext::scale_y_reordered() +
-            labs(x = "Number of PSMs", y = "Protein") +
-            facet_wrap(~sample_name, ncol = 3, scales = "free_y")
-        },
-        "sp18"
-      )
-    })
+    psm_fns$plot18 <- function() {
+      req(data())
+      data() %>%
+        dplyr::group_by(sample_name, entry_name) %>%
+        dplyr::summarise(n_psm = n(), .groups = "drop") %>%
+        dplyr::group_by(sample_name) %>%
+        dplyr::slice_max(n_psm, n = 20, with_ties = FALSE) %>%
+        dplyr::ungroup() %>%
+        dplyr::mutate(
+          entry_name = tidytext::reorder_within(entry_name, n_psm, sample_name)
+        ) %>%
+        ggplot(aes(x = n_psm, y = entry_name)) +
+        geom_col(fill = input$plot_color, color = "black") +
+        tidytext::scale_y_reordered() +
+        labs(x = "Number of PSMs", y = "Protein") +
+        facet_wrap(~sample_name, ncol = 3, scales = "free_y")
+    }
 
-    output$plot19 <- renderPlot({
-      rh(
-        function() {
-          cooccurrence_data()[["plot"]]
-        },
-        "sp19"
-      )
-    })
+    psm_fns$plot19 <- function() {
+      req(data())
+      cooccurrence_data()[["plot"]]
+    }
 
-    output$plot20 <- renderPlot({
-      rh(
-        function() {
-          data() %>%
-            as.data.frame() %>%
-            dplyr::mutate(cysteine_count = stringr::str_count(peptide, "C")) %>%
-            dplyr::group_by(sample_name, cysteine_count) %>%
-            summarise(n = n()) %>%
-            ggplot(aes(x = cysteine_count, y = n)) +
-            geom_bar(
-              stat = "identity",
-              fill = input$plot_color,
-              color = "black"
-            ) +
-            geom_text(aes(label = n), vjust = -0.5, size = 5) +
-            labs(x = "Cysteine counts in peptides", y = "Count") +
-            facet_wrap(~sample_name, ncol = 3)
-        },
-        "sp20"
+    psm_fns$plot20 <- function() {
+      req(data())
+      data() %>%
+        dplyr::mutate(cysteine_count = stringr::str_count(peptide, "C")) %>%
+        dplyr::group_by(sample_name, cysteine_count) %>%
+        summarise(n = n(), .groups = "drop") %>%
+        ggplot(aes(x = cysteine_count, y = n)) +
+        geom_bar(stat = "identity", fill = input$plot_color, color = "black") +
+        geom_text(aes(label = n), vjust = -0.5, size = 5) +
+        labs(x = "Cysteine counts in peptides", y = "Count") +
+        facet_wrap(~sample_name, ncol = 3)
+    }
+
+    psm_fns$plot_aa_freq <- function() {
+      req(input$fasta_file, fasta_data(), data())
+      base_aas <- c(
+        "A",
+        "C",
+        "D",
+        "E",
+        "F",
+        "G",
+        "H",
+        "I",
+        "K",
+        "L",
+        "M",
+        "N",
+        "P",
+        "Q",
+        "R",
+        "S",
+        "T",
+        "V",
+        "W",
+        "Y"
       )
-    })
+      seqs <- sapply(fasta_data(), function(x) as.character(x)[1])
+      all_fasta_aa <- toupper(gsub(
+        "[^A-Za-z]",
+        "",
+        paste0(seqs, collapse = "")
+      ))
+      aa_counts_fasta <- table(strsplit(all_fasta_aa, "")[[1]])
+      aa_counts_fasta <- aa_counts_fasta[names(aa_counts_fasta) %in% base_aas]
+      exp_freq <- as.data.frame(
+        aa_counts_fasta / sum(aa_counts_fasta, na.rm = TRUE) * 100
+      )
+      colnames(exp_freq) <- c("AA", "Frequency")
+      exp_freq$Type <- "Expected (FASTA)"
+
+      d <- data() %>%
+        dplyr::filter(!is.na(peptide), nchar(peptide) > 0) %>%
+        dplyr::mutate(clean_peptide = gsub("\\[.*?\\]", "", peptide))
+
+      obs_freq <- d %>%
+        dplyr::group_by(sample_name) %>%
+        dplyr::summarise(
+          all_aas = list(strsplit(paste0(clean_peptide, collapse = ""), "")[[
+            1
+          ]]),
+          .groups = "drop"
+        ) %>%
+        tidyr::unnest(all_aas) %>%
+        dplyr::filter(all_aas %in% base_aas) %>%
+        dplyr::count(sample_name, AA = all_aas) %>%
+        dplyr::group_by(sample_name) %>%
+        dplyr::mutate(Frequency = n / sum(n) * 100) %>%
+        dplyr::ungroup() %>%
+        dplyr::select(sample_name, AA, Frequency) %>%
+        dplyr::mutate(Type = "Identified (Peptides)")
+
+      samples <- unique(obs_freq$sample_name)
+      exp_all <- purrr::map_dfr(
+        samples,
+        ~ dplyr::mutate(exp_freq, sample_name = .x)
+      )
+
+      comb_df <- dplyr::bind_rows(exp_all, obs_freq) %>%
+        dplyr::mutate(
+          Type = factor(
+            Type,
+            levels = c("Expected (FASTA)", "Identified (Peptides)")
+          )
+        )
+
+      ggplot(comb_df, aes(x = AA, y = Frequency, fill = Type)) +
+        geom_bar(
+          stat = "identity",
+          position = "dodge",
+          color = "black",
+          alpha = 0.85
+        ) +
+        scale_fill_manual(
+          values = c(
+            "Expected (FASTA)" = "#ADB5BD",
+            "Identified (Peptides)" = input$plot_color
+          )
+        ) +
+        labs(
+          title = "Amino acid frequencies (expected vs identified)",
+          x = "Amino acid",
+          y = "Frequency (%)",
+          fill = ""
+        ) +
+        facet_wrap(~sample_name, ncol = 3) +
+        theme_bw() +
+        theme(
+          legend.position = "top",
+          plot.title = element_text(size = 14, face = "bold", hjust = 0.5),
+          axis.text = element_text(size = 10, face = "bold", color = "black"),
+          axis.title = element_text(size = 11, face = "bold"),
+          strip.background = element_blank(),
+          strip.text = element_text(face = "bold", color = "black")
+        )
+    }
 
     # ════════════════════════════════════════════════════════════════════════
-    # E2. SAMPLE SELECTOR FOR PROTEIN VIEW
+    # E3. FDR CURVE
     # ════════════════════════════════════════════════════════════════════════
-
-    observeEvent(raw_psm_data(), {
-      d <- raw_psm_data()
-      req(d)
-      samples <- unique(d$sample_name)
-      updateSelectInput(
-        session,
-        "protein_sample_select",
-        choices = c("All samples" = "all", setNames(samples, samples))
-      )
-    })
-
-    # ════════════════════════════════════════════════════════════════════════
-    # E3. FDR CURVE PLOT
-    # ════════════════════════════════════════════════════════════════════════
-
     fdr_curve_obj <- reactive({
       d <- data()
       req(d, nrow(d) > 0, "probability" %in% names(d))
 
-      q_sorted <- d |>
-        dplyr::group_by(sample_name) |>
-        dplyr::arrange(probability) |>
+      q_sorted <- d %>%
+        dplyr::group_by(sample_name) %>%
+        dplyr::arrange(probability) %>%
         dplyr::mutate(
           qvalue = 1 - probability,
           cumulative_peptides = dplyr::row_number()
-        ) |>
+        ) %>%
         dplyr::ungroup()
 
       ggplot(q_sorted, aes(x = qvalue, y = cumulative_peptides)) +
@@ -2292,50 +1671,40 @@ PSManalyst_server <- function(id) {
         )
     })
 
-    output$plot_fdr_curve <- renderPlot({
-      on.exit(hide_spinner("sp_fdr"), add = TRUE)
-      fdr_curve_obj()
-    })
-
     # ════════════════════════════════════════════════════════════════════════
     # E4. MODIFICATION DIAGNOSTIC
     # ════════════════════════════════════════════════════════════════════════
-
     mod_diag_data <- reactive({
       d <- data()
       req(d, nrow(d) > 0)
       req("assigned_modifications" %in% names(d), "retention" %in% names(d))
 
-      d_mod <- d |>
+      d_mod <- d %>%
         dplyr::filter(
           !is.na(assigned_modifications),
           assigned_modifications != ""
-        ) |>
+        ) %>%
         dplyr::select(
           peptide,
           retention,
           assigned_modifications,
           sample_name,
           gene
-        ) |>
-        dplyr::mutate(retention = retention / 60) |>
+        ) %>%
+        dplyr::mutate(retention = retention / 60) %>%
         dplyr::rename(rt_mod = retention)
 
-      d_unmod <- d |>
+      d_unmod <- d %>%
         dplyr::filter(
           is.na(assigned_modifications) | assigned_modifications == ""
-        ) |>
-        dplyr::group_by(peptide, sample_name) |>
+        ) %>%
+        dplyr::group_by(peptide, sample_name) %>%
         dplyr::summarise(
           rt_unmod = median(retention / 60, na.rm = TRUE),
           .groups = "drop"
         )
 
-      paired <- dplyr::inner_join(
-        d_mod,
-        d_unmod,
-        by = c("peptide", "sample_name")
-      ) |>
+      dplyr::inner_join(d_mod, d_unmod, by = c("peptide", "sample_name")) %>%
         dplyr::mutate(
           delta_rt = abs(rt_mod - rt_unmod),
           classification = dplyr::if_else(
@@ -2344,25 +1713,24 @@ PSManalyst_server <- function(id) {
             "Sample-Derived"
           )
         )
-      paired
     })
 
     mod_diag_plot_obj <- reactive({
       paired <- mod_diag_data()
       req(paired, nrow(paired) > 0)
 
-      top_peptides <- paired |>
-        dplyr::group_by(sample_name, peptide) |>
+      top_peptides <- paired %>%
+        dplyr::group_by(sample_name, peptide) %>%
         dplyr::summarise(
           max_delta = max(delta_rt, na.rm = TRUE),
           .groups = "drop"
-        ) |>
-        dplyr::group_by(sample_name) |>
-        dplyr::slice_max(order_by = max_delta, n = 30) |>
-        dplyr::pull(peptide) |>
+        ) %>%
+        dplyr::group_by(sample_name) %>%
+        dplyr::slice_max(order_by = max_delta, n = 30) %>%
+        dplyr::pull(peptide) %>%
         unique()
 
-      plot_data <- paired |> dplyr::filter(peptide %in% top_peptides)
+      plot_data <- paired %>% dplyr::filter(peptide %in% top_peptides)
       req(nrow(plot_data) > 0)
 
       ggplot(plot_data, aes(y = reorder(peptide, delta_rt))) +
@@ -2389,12 +1757,12 @@ PSManalyst_server <- function(id) {
           x = "Retention time (min)",
           y = "Peptide sequence",
           caption = paste0(
-            "\u0394RT threshold = ",
+            "ΔRT threshold = ",
             input$rt_tolerance,
             " min | Grey = unmodified, Colored = modified"
           )
         ) +
-        facet_wrap(~sample_name, ncol = 2, scales = "free_y") +
+        facet_wrap(~sample_name, ncol = 2, scales = "free") +
         theme_bw() +
         theme(
           plot.title = element_text(size = 14, face = "bold", hjust = 0.5),
@@ -2404,7 +1772,10 @@ PSManalyst_server <- function(id) {
           strip.background = element_blank(),
           strip.text = element_text(color = "black", face = "bold"),
           panel.border = element_rect(color = "black", fill = NA),
-          legend.position = "bottom"
+          legend.position = "bottom",
+          legend.text = element_text(size = 12, face = "bold"),
+          legend.title = element_text(size = 12, face = "bold"),
+          plot.caption = element_text(size = 12, face = "bold")
         )
     })
 
@@ -2414,7 +1785,7 @@ PSManalyst_server <- function(id) {
       if (is.null(paired) || nrow(paired) == 0) {
         return(tags$p(
           style = "color:#adb5bd;text-align:center;padding:20px;",
-          "No paired modified/unmodified peptides found. Ensure PSM data contains \"assigned_modifications\" and \"retention\" columns."
+          "No paired modified/unmodified peptides found. Load PSM data first and ensure it contains 'assigned_modifications' and 'retention' columns."
         ))
       }
       n_samples <- dplyr::n_distinct(paired$sample_name)
@@ -2429,7 +1800,7 @@ PSManalyst_server <- function(id) {
     output$mod_diag_table <- DT::renderDataTable({
       paired <- mod_diag_data()
       req(paired, nrow(paired) > 0)
-      tbl <- paired |>
+      tbl <- paired %>%
         dplyr::select(
           sample_name,
           peptide,
@@ -2439,14 +1810,14 @@ PSManalyst_server <- function(id) {
           rt_mod,
           delta_rt,
           classification
-        ) |>
+        ) %>%
         dplyr::arrange(dplyr::desc(delta_rt))
       DT::datatable(
         tbl,
         rownames = FALSE,
         filter = "top",
         options = list(pageLength = 20, scrollX = TRUE)
-      ) |>
+      ) %>%
         DT::formatRound(
           columns = c("rt_unmod", "rt_mod", "delta_rt"),
           digits = 3
@@ -2456,11 +1827,9 @@ PSManalyst_server <- function(id) {
     # ════════════════════════════════════════════════════════════════════════
     # F. PROTEIN DATA & PLOTS
     # ════════════════════════════════════════════════════════════════════════
-
     protein_data <- reactive({
       folder <- loaded_psm_folder()
       req(folder)
-      # Auto-discover protein.tsv from the loaded PSM folder
       prot_file <- list.files(
         folder,
         pattern = "^protein\\.tsv$",
@@ -2468,9 +1837,7 @@ PSManalyst_server <- function(id) {
         recursive = TRUE
       )
       req(length(prot_file) > 0)
-      show_prot_spinners()
-      readr::read_tsv(prot_file[1]) %>%
-        janitor::clean_names()
+      readr::read_tsv(prot_file[1]) %>% janitor::clean_names()
     })
 
     combined_protein_data <- reactive({
@@ -2517,13 +1884,19 @@ PSManalyst_server <- function(id) {
       )
     })
 
-    observe({
-      req(combined_protein_data())
-      cn <- colnames(combined_protein_data())
-      updateSelectInput(session, "xcol", choices = cn)
-      updateSelectInput(session, "ycol", choices = cn)
+    # Sample selector for protein view
+    observeEvent(raw_psm_data(), {
+      d <- raw_psm_data()
+      req(d)
+      samples <- unique(d$sample_name)
+      updateSelectInput(
+        session,
+        "protein_sample_select",
+        choices = c("All samples" = "all", setNames(samples, samples))
+      )
     })
 
+    # Protein selector from protein_data
     observe({
       req(protein_data())
       proteins_in_data <- NULL
@@ -2546,72 +1919,85 @@ PSManalyst_server <- function(id) {
       }
     })
 
-    coverage_plot_data <- reactive({
-      req(input$selected_protein)
-      if (input$selected_protein == "") {
-        return(list(protein_sequence = NULL))
-      }
-      if (is.null(input$fasta_file)) {
-        return(list(error = "Please upload a FASTA file."))
-      }
-      if (is.null(raw_psm_data())) {
-        return(list(error = "Please load PSM files in the PSM Viewer tab."))
-      }
-      req(data(), fasta_data())
-      tp <- input$selected_protein
-      tix <- grep(tp, names(fasta_data()), fixed = TRUE)[1]
-      if (is.na(tix)) {
-        tix <- grep(tp, names(fasta_data()), ignore.case = TRUE)[1]
-      }
-      if (is.na(tix)) {
-        return(list(error = paste("Protein", tp, "not found in FASTA.")))
-      }
-      pr_seq <- as.character(fasta_data()[[tix]])
-      pd <- data()
-      pep_df <- if ("entry_name" %in% colnames(pd)) {
-        pd[pd$entry_name == tp, ]
-      } else if ("protein_id" %in% colnames(pd)) {
-        pd[pd$protein_id == tp, ]
-      } else if ("protein" %in% colnames(pd)) {
-        pd[pd$protein == tp, ]
-      } else {
-        return(list(error = "No suitable protein column in PSM data."))
-      }
-      if (nrow(pep_df) == 0) {
-        return(list(error = paste("No peptides for", tp, ".")))
-      }
-      sc <- if ("peptide" %in% colnames(pep_df)) {
-        "peptide"
-      } else if ("peptide_sequence" %in% colnames(pep_df)) {
-        "peptide_sequence"
-      } else {
-        "sequence"
-      }
-      agg <- pep_df %>%
-        dplyr::group_by(!!sym(sc)) %>%
-        dplyr::summarise(psm_count = n(), .groups = "drop") %>%
-        dplyr::rename(sequence = !!sym(sc)) %>%
-        dplyr::mutate(
-          start = NA_integer_,
-          end = NA_integer_,
-          sequence = stringr::str_remove_all(
-            stringr::str_remove_all(sequence, "\\[.*?\\]"),
-            "[^A-Z]"
+    # ── Sequence coverage ──
+    coverage_plot_data <- eventReactive(
+      input$plot_seq,
+      {
+        req(input$selected_protein)
+        if (input$selected_protein == "") {
+          return(list(protein_sequence = NULL))
+        }
+        if (is.null(input$fasta_file)) {
+          return(list(error = "Please upload a FASTA file."))
+        }
+        if (is.null(raw_psm_data())) {
+          return(list(error = "Please load PSM files first."))
+        }
+
+        req(data(), fasta_data())
+        tp <- input$selected_protein
+        tix <- grep(tp, names(fasta_data()), fixed = TRUE)[1]
+        if (is.na(tix)) {
+          tix <- grep(tp, names(fasta_data()), ignore.case = TRUE)[1]
+        }
+        if (is.na(tix)) {
+          return(list(error = paste("Protein", tp, "not found in FASTA.")))
+        }
+
+        pr_seq <- as.character(fasta_data()[[tix]])
+        pd <- data()
+        pep_df <- if ("entry_name" %in% colnames(pd)) {
+          pd[pd$entry_name == tp, ]
+        } else if ("protein_id" %in% colnames(pd)) {
+          pd[pd$protein_id == tp, ]
+        } else if ("protein" %in% colnames(pd)) {
+          pd[pd$protein == tp, ]
+        } else {
+          return(list(error = "No suitable protein column in PSM data."))
+        }
+
+        if (nrow(pep_df) == 0) {
+          return(list(error = paste("No peptides for", tp, ".")))
+        }
+
+        sc <- if ("peptide" %in% colnames(pep_df)) {
+          "peptide"
+        } else if ("peptide_sequence" %in% colnames(pep_df)) {
+          "peptide_sequence"
+        } else {
+          "sequence"
+        }
+
+        agg <- pep_df %>%
+          dplyr::group_by(!!sym(sc)) %>%
+          dplyr::summarise(psm_count = n(), .groups = "drop") %>%
+          dplyr::rename(sequence = !!sym(sc)) %>%
+          dplyr::mutate(
+            start = NA_integer_,
+            end = NA_integer_,
+            sequence = stringr::str_remove_all(
+              stringr::str_remove_all(sequence, "\\[.*?\\]"),
+              "[^A-Z]"
+            )
           )
-        )
-      list(protein_sequence = pr_seq, peptides_data = agg)
-    })
+        list(protein_sequence = pr_seq, peptides_data = agg)
+      },
+      ignoreNULL = FALSE
+    )
 
     output$protein_coverage_plot_ui <- renderUI({
       pd <- coverage_plot_data()
+      if (is.null(pd) || (is.null(pd$error) && is.null(pd$protein_sequence))) {
+        return(div(
+          style = "color:#6c757d;padding:15px;text-align:center;",
+          "Select a protein and click 'Update Coverage'."
+        ))
+      }
       if (!is.null(pd$error)) {
         return(div(
           style = "color:red;padding:15px;font-weight:bold;",
           pd$error
         ))
-      }
-      if (is.null(pd$protein_sequence)) {
-        return(NULL)
       }
       apl <- max(
         10,
@@ -2631,6 +2017,7 @@ PSManalyst_server <- function(id) {
       pl <- nchar(pd$protein_sequence)
       cov <- rep(0, pl)
       mask <- rep(FALSE, pl)
+
       for (i in seq_len(nrow(pd$peptides_data))) {
         pep <- pd$peptides_data[i, ]
         pos <- regexpr(pep$sequence, pd$protein_sequence, fixed = TRUE)
@@ -2647,6 +2034,7 @@ PSManalyst_server <- function(id) {
       if (!is.finite(mc) || mc == 0) {
         mc <- 1
       }
+
       nl <- max(1, ceiling(pl / apl))
       plots <- list()
       for (li in seq_len(nl)) {
@@ -2684,7 +2072,7 @@ PSManalyst_server <- function(id) {
               height = 0.9,
               fill = "lightgray",
               color = "black",
-              size = 0.2,
+              linewidth = 0.2,
               alpha = 0.7
             )
         }
@@ -2696,7 +2084,7 @@ PSManalyst_server <- function(id) {
               width = 0.9,
               height = 0.9,
               color = "black",
-              size = 0.2
+              linewidth = 0.2
             ) +
             scale_fill_gradient(
               low = "#e1f5fe",
@@ -2705,7 +2093,7 @@ PSManalyst_server <- function(id) {
               na.value = "lightgray"
             )
         }
-        if (input$show_sequence) {
+        if (isTRUE(input$show_sequence)) {
           p <- p +
             geom_text(
               data = ad,
@@ -2735,374 +2123,287 @@ PSManalyst_server <- function(id) {
       grid.arrange(tg, combined, heights = c(0.5, 8))
     })
 
-    output$aa_freq_banner <- renderUI({
-      if (is.null(input$fasta_file)) {
-        div(
-          style = "display:flex;align-items:center;justify-content:center;height:150px;color:#6c757d;font-size:16px;border:2px dashed #dee2e6;border-radius:8px;margin:20px;",
-          icon("circle-info", style = "margin-right:10px;"),
-          "Upload a Protein FASTA file in the sidebar to enable amino acid frequencies comparison."
-        )
-      }
-    })
-
-    output$plot_aa_freq <- renderPlot({
-      rh(
-        function() {
-          req(input$fasta_file, fasta_data(), data())
-          base_aas <- c(
-            "A",
-            "C",
-            "D",
-            "E",
-            "F",
-            "G",
-            "H",
-            "I",
-            "K",
-            "L",
-            "M",
-            "N",
-            "P",
-            "Q",
-            "R",
-            "S",
-            "T",
-            "V",
-            "W",
-            "Y"
-          )
-
-          # ── Expected frequencies from FASTA ──────────────────────────────
-          seqs <- sapply(fasta_data(), function(x) as.character(x)[1])
-          all_fasta_aa <- toupper(gsub(
-            "[^A-Za-z]",
-            "",
-            paste0(seqs, collapse = "")
-          ))
-          aa_counts_fasta <- table(strsplit(all_fasta_aa, "")[[1]])
-          aa_counts_fasta <- aa_counts_fasta[
-            names(aa_counts_fasta) %in% base_aas
-          ]
-          exp_freq <- as.data.frame(
-            aa_counts_fasta / sum(aa_counts_fasta, na.rm = TRUE) * 100
-          )
-          colnames(exp_freq) <- c("AA", "Frequency")
-          exp_freq$Type <- "Expected (FASTA)"
-
-          # ── Observed frequencies per sample ──────────────────────────────
-          d <- data() %>%
-            dplyr::filter(!is.na(peptide), nchar(peptide) > 0) %>%
-            dplyr::mutate(
-              clean_peptide = gsub("\\[.*?\\]", "", peptide)
-            )
-
-          obs_freq <- d %>%
-            dplyr::group_by(sample_name) %>%
-            dplyr::summarise(
-              all_aas = list(
-                strsplit(paste0(clean_peptide, collapse = ""), "")[[1]]
-              ),
-              .groups = "drop"
-            ) %>%
-            tidyr::unnest(all_aas) %>%
-            dplyr::filter(all_aas %in% base_aas) %>%
-            dplyr::count(sample_name, AA = all_aas) %>%
-            dplyr::group_by(sample_name) %>%
-            dplyr::mutate(Frequency = n / sum(n) * 100) %>%
-            dplyr::ungroup() %>%
-            dplyr::select(sample_name, AA, Frequency) %>%
-            dplyr::mutate(Type = "Identified (Peptides)")
-
-          # ── Replicate expected frequencies for every sample ───────────────
-          samples <- unique(obs_freq$sample_name)
-          exp_all <- purrr::map_dfr(
-            samples,
-            ~ dplyr::mutate(exp_freq, sample_name = .x)
-          )
-
-          comb_df <- dplyr::bind_rows(exp_all, obs_freq) %>%
-            dplyr::mutate(
-              Type = factor(
-                Type,
-                levels = c("Expected (FASTA)", "Identified (Peptides)")
-              )
-            )
-
-          ggplot(comb_df, aes(x = AA, y = Frequency, fill = Type)) +
-            geom_bar(
-              stat = "identity",
-              position = "dodge",
-              color = "black",
-              alpha = 0.85
-            ) +
-            scale_fill_manual(
-              values = c(
-                "Expected (FASTA)" = "#ADB5BD",
-                "Identified (Peptides)" = input$plot_color
-              )
-            ) +
-            labs(
-              title = "Amino acid frequencies (expected vs identified)",
-              x = "Amino acid",
-              y = "Frequency (%)",
-              fill = ""
-            ) +
-            facet_wrap(~sample_name, ncol = 3) +
-            theme_bw() +
-            theme(
-              legend.position = "top",
-              plot.title = element_text(size = 14, face = "bold", hjust = 0.5),
-              axis.text = element_text(
-                size = 10,
-                face = "bold",
-                color = "black"
-              ),
-              axis.title = element_text(size = 11, face = "bold"),
-              strip.background = element_blank(),
-              strip.text = element_text(face = "bold", color = "black")
-            )
-        },
-        "sp_aa_psm"
-      )
-    })
-
-    output$plot01p <- renderPlot({
-      rh(
-        function() {
-          protein_data() %>%
-            as.data.frame() %>%
-            ggplot() +
-            geom_histogram(
-              aes(x = coverage),
-              fill = input$plot_color,
-              color = "black"
-            ) +
-            labs(x = "Protein coverage (%)", y = "Count")
-        },
-        "sp01p"
-      )
-    })
-
-    output$plot02p <- renderPlot({
-      rh(
-        function() {
-          protein_data() %>%
-            as.data.frame() %>%
-            dplyr::count(organism) %>%
-            ggplot() +
-            geom_bar(
-              aes(x = n, y = reorder(organism, n)),
-              fill = input$plot_color,
-              color = "black",
-              stat = "identity"
-            ) +
-            geom_text(
-              aes(x = n, y = reorder(organism, n), label = n),
-              hjust = -0.1,
-              size = 5
-            ) +
-            labs(x = "Number of proteins", y = NULL) +
-            theme(axis.text.y = element_text(face = "italic"))
-        },
-        "sp02p"
-      )
-    })
-
-    output$plot03p <- renderPlot({
-      rh(
-        function() {
-          protein_data() %>%
-            as.data.frame() %>%
-            dplyr::mutate(
-              protein_existence = stringr::str_remove(
-                protein_existence,
-                ".*\\:"
-              ),
-              protein_existence = factor(
-                protein_existence,
-                levels = c(
-                  "Experimental evidence at protein level",
-                  "Experimental evidence at transcript level",
-                  "Protein inferred from homology",
-                  "Protein predicted"
-                )
-              )
-            ) %>%
-            ggplot() +
-            geom_bar(
-              aes(y = protein_existence, fill = protein_existence),
-              color = "black",
-              show.legend = FALSE
-            ) +
-            scale_fill_manual(
-              values = c("#5499c7", "#7fb3d5", "#a9cce3", "#d4e6f1")
-            ) +
-            geom_text(
-              aes(y = protein_existence, label = after_stat(count)),
-              stat = "count",
-              vjust = -0.5,
-              size = 7,
-              fontface = "bold"
-            ) +
-            labs(y = NULL, x = "Count")
-        },
-        "sp03p"
-      )
-    })
-
-    output$plot04p <- renderPlot({
-      rh(
-        function() {
-          protein_data() %>%
-            as.data.frame() %>%
-            ggplot() +
-            geom_histogram(
-              aes(x = protein_probability),
-              fill = input$plot_color,
-              color = "black"
-            ) +
-            labs(x = "Protein Probability", y = "Count")
-        },
-        "sp04p"
-      )
-    })
-
-    output$plot05p <- renderPlot({
-      rh(
-        function() {
-          protein_data() %>%
-            as.data.frame() %>%
-            ggplot() +
-            geom_histogram(
-              aes(x = top_peptide_probability),
-              fill = input$plot_color,
-              color = "black"
-            ) +
-            labs(x = "Peptide Probability", y = "Count")
-        },
-        "sp05p"
-      )
-    })
-
-    output$plot06p <- renderPlot({
-      rh(
-        function() {
-          protein_data() %>%
-            as.data.frame() %>%
-            ggplot() +
-            geom_histogram(
-              aes(x = total_peptides),
-              fill = input$plot_color,
-              color = "black"
-            ) +
-            labs(x = "Total peptides mapped to proteins", y = "Count")
-        },
-        "sp06p"
-      )
-    })
-
-    output$plot07p <- renderPlot({
-      rh(
-        function() {
-          protein_data() %>%
-            as.data.frame() %>%
-            ggplot() +
-            geom_histogram(
-              aes(x = razor_spectral_count),
-              fill = input$plot_color,
-              color = "black"
-            ) +
-            labs(x = "Razor Spectral Count", y = "Count")
-        },
-        "sp07p"
-      )
-    })
-
-    output$plot08p <- renderPlot({
-      rh(
-        function() {
-          protein_data() %>%
-            as.data.frame() %>%
-            ggplot() +
-            geom_histogram(
-              aes(x = razor_intensity),
-              fill = input$plot_color,
-              color = "black"
-            ) +
-            labs(x = "Razor Intensity", y = "Count")
-        },
-        "sp08p"
-      )
-    })
-
-    output$plot10p <- renderPlot({
-      rh(
-        function() {
-          combined_protein_data() %>%
-            as.data.frame() %>%
-            rownames_to_column(var = "protein_id") %>%
-            tidyr::pivot_longer(
-              cols = -protein_id,
-              names_to = "sample",
-              values_to = "maxlfq_intensity"
-            ) %>%
-            ggplot() +
-            geom_violin(
-              aes(x = sample, y = maxlfq_intensity),
-              fill = input$plot_color,
-              alpha = 0.7,
-              color = "black"
-            ) +
-            geom_boxplot(
-              aes(x = sample, y = maxlfq_intensity),
-              fill = "white",
-              outliers = FALSE,
-              color = "black",
-              width = 0.1,
-              show.legend = FALSE
-            ) +
-            labs(x = NULL, y = "log₂(MaxLFQ intensity)") +
-            theme(
-              axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5)
-            )
-        },
-        "sp10p"
-      )
-    })
-
-    output$plot_ggpairs <- renderPlot({
-      rh(
-        function() {
-          combined_protein_data() %>%
-            as.data.frame() %>%
-            GGally::ggpairs(
-              lower = list(continuous = wrap("points", alpha = 0.4)),
-              diag = list(continuous = "barDiag"),
-              upper = list(continuous = "density")
-            ) +
-            theme_bw() +
-            theme(
-              strip.background = element_blank(),
-              strip.text = element_text(face = "bold")
-            )
-        },
-        "spgg"
-      )
-    })
-
-    output$plot11p <- renderPlotly({
-      p <- combined_protein_data() %>%
-        as.data.frame() %>%
-        ggplot(aes(x = !!sym(input$xcol), y = !!sym(input$ycol))) +
-        geom_point(alpha = 0.7, show.legend = FALSE) +
-        geom_smooth(method = "lm", se = FALSE, color = input$plot_color) +
-        labs(
-          x = paste0("log₂(", input$xcol, ")"),
-          y = paste0("log₂(", input$ycol, ")")
+    # ════════════════════════════════════════════════════════════════════════
+    # F2. PROTEIN PLOTS
+    # ════════════════════════════════════════════════════════════════════════
+    prot_fns$plot01p <- function() {
+      req(protein_data())
+      protein_data() %>%
+        ggplot() +
+        geom_histogram(
+          aes(x = coverage),
+          fill = input$plot_color,
+          color = "black"
         ) +
-        theme_bw()
-      ggplotly(p)
-    })
+        labs(x = "Protein coverage (%)", y = "Count")
+    }
+
+    prot_fns$plot02p <- function() {
+      req(protein_data())
+      protein_data() %>%
+        dplyr::count(organism) %>%
+        ggplot() +
+        geom_bar(
+          aes(x = n, y = reorder(organism, n)),
+          fill = input$plot_color,
+          color = "black",
+          stat = "identity"
+        ) +
+        geom_text(
+          aes(x = n, y = reorder(organism, n), label = n),
+          hjust = -0.1,
+          size = 5
+        ) +
+        labs(x = "Number of proteins", y = NULL) +
+        theme(axis.text.y = element_text(face = "italic"))
+    }
+
+    prot_fns$plot03p <- function() {
+      req(protein_data())
+      protein_data() %>%
+        dplyr::mutate(
+          protein_existence = stringr::str_remove(protein_existence, ".*\\:"),
+          protein_existence = factor(
+            protein_existence,
+            levels = c(
+              "Experimental evidence at protein level",
+              "Experimental evidence at transcript level",
+              "Protein inferred from homology",
+              "Protein predicted"
+            )
+          )
+        ) %>%
+        ggplot() +
+        geom_bar(
+          aes(y = protein_existence, fill = protein_existence),
+          color = "black",
+          show.legend = FALSE
+        ) +
+        scale_fill_manual(
+          values = c("#5499c7", "#7fb3d5", "#a9cce3", "#d4e6f1")
+        ) +
+        geom_text(
+          aes(y = protein_existence, label = after_stat(count)),
+          stat = "count",
+          vjust = -0.5,
+          size = 7,
+          fontface = "bold"
+        ) +
+        labs(y = NULL, x = "Count")
+    }
+
+    prot_fns$plot04p <- function() {
+      req(protein_data())
+      protein_data() %>%
+        ggplot() +
+        geom_histogram(
+          aes(x = protein_probability),
+          fill = input$plot_color,
+          color = "black"
+        ) +
+        labs(x = "Protein Probability", y = "Count")
+    }
+
+    prot_fns$plot05p <- function() {
+      req(protein_data())
+      protein_data() %>%
+        ggplot() +
+        geom_histogram(
+          aes(x = top_peptide_probability),
+          fill = input$plot_color,
+          color = "black"
+        ) +
+        labs(x = "Peptide Probability", y = "Count")
+    }
+
+    prot_fns$plot06p <- function() {
+      req(protein_data())
+      protein_data() %>%
+        ggplot() +
+        geom_histogram(
+          aes(x = total_peptides),
+          fill = input$plot_color,
+          color = "black"
+        ) +
+        labs(x = "Total peptides mapped to proteins", y = "Count")
+    }
+
+    prot_fns$plot07p <- function() {
+      req(protein_data())
+      protein_data() %>%
+        ggplot() +
+        geom_histogram(
+          aes(x = razor_spectral_count),
+          fill = input$plot_color,
+          color = "black"
+        ) +
+        labs(x = "Razor Spectral Count", y = "Count")
+    }
+
+    prot_fns$plot08p <- function() {
+      req(protein_data())
+      protein_data() %>%
+        ggplot() +
+        geom_histogram(
+          aes(x = razor_intensity),
+          fill = input$plot_color,
+          color = "black"
+        ) +
+        labs(x = "Razor Intensity", y = "Count")
+    }
+
+    prot_fns$plot10p <- function() {
+      req(combined_protein_data())
+      combined_protein_data() %>%
+        rownames_to_column(var = "protein_id") %>%
+        tidyr::pivot_longer(
+          cols = -protein_id,
+          names_to = "sample",
+          values_to = "maxlfq_intensity"
+        ) %>%
+        ggplot() +
+        geom_violin(
+          aes(x = sample, y = maxlfq_intensity),
+          fill = input$plot_color,
+          alpha = 0.7,
+          color = "black"
+        ) +
+        geom_boxplot(
+          aes(x = sample, y = maxlfq_intensity),
+          fill = "white",
+          outliers = FALSE,
+          color = "black",
+          width = 0.1,
+          show.legend = FALSE
+        ) +
+        labs(x = NULL, y = "log₂(MaxLFQ intensity)") +
+        theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5))
+    }
+
+    prot_fns$plot_rank_lfq <- function() {
+      req(combined_protein_raw())
+      raw <- combined_protein_raw()
+      lfq_cols <- grep(
+        "max_lfq_intensity$",
+        colnames(raw),
+        value = TRUE,
+        ignore.case = TRUE
+      )
+      df <- raw %>%
+        dplyr::select(entry_name, dplyr::all_of(lfq_cols)) %>%
+        tidyr::pivot_longer(
+          cols = -entry_name,
+          names_to = "sample_name",
+          values_to = "log2_lfq"
+        ) %>%
+        dplyr::mutate(
+          sample_name = stringr::str_remove(sample_name, "_max_lfq_intensity$"),
+          log2_lfq = log2(as.numeric(log2_lfq))
+        ) %>%
+        dplyr::filter(!is.na(log2_lfq) & is.finite(log2_lfq))
+
+      plots <- lapply(sort(unique(df$sample_name)), function(s) {
+        d <- df %>%
+          dplyr::filter(sample_name == s) %>%
+          dplyr::slice_max(log2_lfq, n = 20, with_ties = FALSE) %>%
+          dplyr::mutate(
+            entry_name = tidytext::reorder_within(
+              entry_name,
+              log2_lfq,
+              sample_name
+            )
+          )
+        ggplot(d, aes(x = log2_lfq, y = entry_name)) +
+          geom_col(fill = input$plot_color, color = "black", linewidth = 0.3) +
+          tidytext::scale_y_reordered() +
+          labs(title = s, x = "log₂(MaxLFQ intensity)", y = NULL) +
+          theme_bw() +
+          theme(
+            axis.title = element_text(size = 10, face = "bold"),
+            axis.text = element_text(size = 8, face = "bold", color = "black"),
+            plot.title = element_text(face = "bold", hjust = 0.5)
+          )
+      })
+      patchwork::wrap_plots(plots, ncol = min(3L, length(plots))) +
+        patchwork::plot_annotation(
+          title = "Top 20 proteins by MaxLFQ intensity (log₂)",
+          theme = theme(
+            plot.title = element_text(size = 14, face = "bold", hjust = 0.5)
+          )
+        )
+    }
+
+    prot_fns$plot_rank_usc <- function() {
+      req(combined_protein_raw())
+      raw <- combined_protein_raw()
+      usc_cols <- grep(
+        "unique_spectral_count$",
+        colnames(raw),
+        value = TRUE,
+        ignore.case = TRUE
+      )
+      df <- raw %>%
+        dplyr::select(entry_name, dplyr::all_of(usc_cols)) %>%
+        tidyr::pivot_longer(
+          cols = -entry_name,
+          names_to = "sample_name",
+          values_to = "unique_spectral_count"
+        ) %>%
+        dplyr::mutate(
+          sample_name = stringr::str_remove(
+            sample_name,
+            "_unique_spectral_count$"
+          ),
+          unique_spectral_count = as.numeric(unique_spectral_count)
+        ) %>%
+        dplyr::filter(!is.na(unique_spectral_count) & unique_spectral_count > 0)
+
+      plots <- lapply(sort(unique(df$sample_name)), function(s) {
+        d <- df %>%
+          dplyr::filter(sample_name == s) %>%
+          dplyr::slice_max(unique_spectral_count, n = 20, with_ties = FALSE) %>%
+          dplyr::mutate(
+            entry_name = tidytext::reorder_within(
+              entry_name,
+              unique_spectral_count,
+              sample_name
+            )
+          )
+        ggplot(d, aes(x = unique_spectral_count, y = entry_name)) +
+          geom_col(fill = input$plot_color, color = "black", linewidth = 0.3) +
+          tidytext::scale_y_reordered() +
+          labs(title = s, x = "Unique spectral count", y = NULL) +
+          theme_bw() +
+          theme(
+            axis.text = element_text(size = 8, face = "bold", color = "black"),
+            axis.title = element_text(size = 10, face = "bold"),
+            plot.title = element_text(face = "bold", hjust = 0.5)
+          )
+      })
+      patchwork::wrap_plots(plots, ncol = min(3L, length(plots))) +
+        patchwork::plot_annotation(
+          title = "Top 20 proteins by unique spectral count",
+          theme = theme(
+            plot.title = element_text(size = 14, face = "bold", hjust = 0.5)
+          )
+        )
+    }
+
+    # ── Similarity / distance plots (require combined_protein upload) ──
+    prot_fns$plot_ggpairs <- function() {
+      req(combined_protein_data())
+      combined_protein_data() %>%
+        GGally::ggpairs(
+          lower = list(continuous = wrap("points", alpha = 0.4)),
+          diag = list(continuous = "barDiag"),
+          upper = list(continuous = "density")
+        ) +
+        theme_bw() +
+        theme(
+          strip.background = element_blank(),
+          strip.text = element_text(face = "bold")
+        )
+    }
 
     ht <- theme(
       text = element_text(size = 15),
@@ -3113,7 +2414,8 @@ PSManalyst_server <- function(id) {
       legend.key.height = unit(0.25, "cm")
     )
 
-    output$cosine_similarity <- renderPlot({
+    prot_fns$cosine_similarity <- function() {
+      req(combined_protein_data())
       combined_protein_data() %>%
         as.matrix() %>%
         na.omit() %>%
@@ -3126,8 +2428,10 @@ PSManalyst_server <- function(id) {
         viridis::scale_fill_viridis(option = "E") +
         ht +
         labs(x = NULL, y = NULL, fill = "Cosine similarity")
-    })
-    output$euclidean_distance <- renderPlot({
+    }
+
+    prot_fns$euclidean_distance <- function() {
+      req(combined_protein_data())
       combined_protein_data() %>%
         t() %>%
         dist(method = "euclidean") %>%
@@ -3140,8 +2444,10 @@ PSManalyst_server <- function(id) {
         viridis::scale_fill_viridis(option = "E") +
         ht +
         labs(x = NULL, y = NULL, fill = "Euclidean distance")
-    })
-    output$jaccard_similarity <- renderPlot({
+    }
+
+    prot_fns$jaccard_similarity <- function() {
+      req(combined_protein_data())
       combined_protein_data() %>%
         t() %>%
         vegan::vegdist(method = "jaccard", na.rm = TRUE) %>%
@@ -3154,165 +2460,111 @@ PSManalyst_server <- function(id) {
         viridis::scale_fill_viridis(option = "E") +
         ht +
         labs(x = NULL, y = NULL, fill = "Jaccard similarity")
+    }
+
+    # Render similarity plots (always visible in their tab)
+    output$plot_ggpairs <- renderPlot({
+      prot_fns$plot_ggpairs()
+    })
+    output$cosine_similarity <- renderPlot({
+      prot_fns$cosine_similarity()
+    })
+    output$euclidean_distance <- renderPlot({
+      prot_fns$euclidean_distance()
+    })
+    output$jaccard_similarity <- renderPlot({
+      prot_fns$jaccard_similarity()
     })
 
-    output$plot_rank_lfq <- renderPlot({
-      rh(
-        function() {
-          raw <- combined_protein_raw()
-          lfq_cols <- grep(
-            "max_lfq_intensity$",
-            colnames(raw),
-            value = TRUE,
-            ignore.case = TRUE
-          )
-          df <- raw %>%
-            dplyr::select(entry_name, dplyr::all_of(lfq_cols)) %>%
-            tidyr::pivot_longer(
-              cols = -entry_name,
-              names_to = "sample_name",
-              values_to = "log2_lfq"
-            ) %>%
-            dplyr::mutate(
-              sample_name = stringr::str_remove(
-                sample_name,
-                "_max_lfq_intensity$"
-              ),
-              log2_lfq = log2(as.numeric(log2_lfq))
-            ) %>%
-            dplyr::filter(!is.na(log2_lfq) & is.finite(log2_lfq))
-
-          samples <- sort(unique(df$sample_name))
-          plots <- lapply(samples, function(s) {
-            d <- df %>%
-              dplyr::filter(sample_name == s) %>%
-              dplyr::slice_max(log2_lfq, n = 20, with_ties = FALSE) %>%
-              dplyr::mutate(
-                entry_name = tidytext::reorder_within(
-                  entry_name,
-                  log2_lfq,
-                  sample_name
-                )
-              )
-            ggplot(d, aes(x = log2_lfq, y = entry_name)) +
-              geom_col(
-                fill = input$plot_color,
-                color = "black",
-                linewidth = 0.3
-              ) +
-              tidytext::scale_y_reordered() +
-              labs(title = s, x = "log2(MaxLFQ intensity)", y = NULL) +
-              theme_bw() +
-              theme(
-                axis.title = element_text(size = 10, face = "bold"),
-                axis.text = element_text(
-                  size = 8,
-                  face = "bold",
-                  color = "black"
-                ),
-                plot.title = element_text(face = "bold", hjust = 0.5)
-              )
-          })
-          patchwork::wrap_plots(plots, ncol = min(3L, length(plots))) +
-            patchwork::plot_annotation(
-              title = "Top 20 proteins by MaxLFQ intensity (log2)",
-              theme = theme(
-                plot.title = element_text(
-                  size = 14,
-                  face = "bold",
-                  hjust = 0.5
-                )
-              )
-            )
-        },
-        "sp_rank_lfq"
-      )
-    })
-
-    output$plot_rank_usc <- renderPlot({
-      rh(
-        function() {
-          raw <- combined_protein_raw()
-          usc_cols <- grep(
-            "unique_spectral_count$",
-            colnames(raw),
-            value = TRUE,
-            ignore.case = TRUE
-          )
-          df <- raw %>%
-            dplyr::select(entry_name, dplyr::all_of(usc_cols)) %>%
-            tidyr::pivot_longer(
-              cols = -entry_name,
-              names_to = "sample_name",
-              values_to = "unique_spectral_count"
-            ) %>%
-            dplyr::mutate(
-              sample_name = stringr::str_remove(
-                sample_name,
-                "_unique_spectral_count$"
-              ),
-              unique_spectral_count = as.numeric(unique_spectral_count)
-            ) %>%
-            dplyr::filter(
-              !is.na(unique_spectral_count) & unique_spectral_count > 0
-            )
-
-          samples <- sort(unique(df$sample_name))
-          plots <- lapply(samples, function(s) {
-            d <- df %>%
-              dplyr::filter(sample_name == s) %>%
-              dplyr::slice_max(
-                unique_spectral_count,
-                n = 20,
-                with_ties = FALSE
-              ) %>%
-              dplyr::mutate(
-                entry_name = tidytext::reorder_within(
-                  entry_name,
-                  unique_spectral_count,
-                  sample_name
-                )
-              )
-            ggplot(d, aes(x = unique_spectral_count, y = entry_name)) +
-              geom_col(
-                fill = input$plot_color,
-                color = "black",
-                linewidth = 0.3
-              ) +
-              tidytext::scale_y_reordered() +
-              labs(title = s, x = "Unique spectral count", y = NULL) +
-              theme_bw() +
-              theme(
-                axis.text = element_text(
-                  size = 8,
-                  face = "bold",
-                  color = "black"
-                ),
-                axis.title = element_text(size = 10, face = "bold"),
-                plot.title = element_text(face = "bold", hjust = 0.5)
-              )
-          })
-          patchwork::wrap_plots(plots, ncol = min(3L, length(plots))) +
-            patchwork::plot_annotation(
-              title = "Top 20 proteins by unique spectral count",
-              theme = theme(
-                plot.title = element_text(
-                  size = 14,
-                  face = "bold",
-                  hjust = 0.5
-                )
-              )
-            )
-        },
-        "sp_rank_usc"
-      )
-    })
-
-    # ── Download ──────────────────────────────────────────────────────────────
-    output$download_all_plots <- downloadHandler(
-      filename = function() {
-        paste0("PSM_and_Protein_plots_", Sys.Date(), ".zip")
+    # ════════════════════════════════════════════════════════════════════════
+    # G. DISPATCHERS
+    # ════════════════════════════════════════════════════════════════════════
+    current_psm_plot <- eventReactive(
+      input$run_psm_plot,
+      {
+        req(input$psm_plot_select)
+        show_spinner("sp_psm_main")
+        p <- NULL
+        if (input$psm_plot_select == "plot_fdr_curve") {
+          p <- fdr_curve_obj()
+        } else if (exists(input$psm_plot_select, envir = psm_fns)) {
+          p <- get(input$psm_plot_select, envir = psm_fns)()
+        }
+        p
       },
+      ignoreNULL = FALSE
+    )
+
+    output$psm_dynamic_plot_out <- renderPlot({
+      on.exit(hide_spinner("sp_psm_main"), add = TRUE)
+      req(current_psm_plot())
+      current_psm_plot()
+    })
+
+    current_prot_plot <- eventReactive(
+      input$run_prot_plot,
+      {
+        req(input$prot_plot_select)
+        show_spinner("sp_prot_main")
+        p <- NULL
+        if (exists(input$prot_plot_select, envir = prot_fns)) {
+          p <- get(input$prot_plot_select, envir = prot_fns)()
+        }
+        p
+      },
+      ignoreNULL = FALSE
+    )
+
+    output$prot_dynamic_plot_out <- renderPlot({
+      on.exit(hide_spinner("sp_prot_main"), add = TRUE)
+      req(current_prot_plot())
+      current_prot_plot()
+    })
+
+    # ════════════════════════════════════════════════════════════════════════
+    # H. DOWNLOADS
+    # ════════════════════════════════════════════════════════════════════════
+    output$download_psm_plot <- downloadHandler(
+      filename = function() {
+        paste0("PSM_", input$psm_plot_select, "_", Sys.Date(), ".png")
+      },
+      content = function(file) {
+        p <- current_psm_plot()
+        req(p)
+        ggsave(
+          file,
+          p,
+          width = 12,
+          height = 8,
+          bg = "white",
+          device = "png",
+          dpi = 300
+        )
+      }
+    )
+
+    output$download_prot_plot <- downloadHandler(
+      filename = function() {
+        paste0("Protein_", input$prot_plot_select, "_", Sys.Date(), ".png")
+      },
+      content = function(file) {
+        p <- current_prot_plot()
+        req(p)
+        ggsave(
+          file,
+          p,
+          width = 12,
+          height = 8,
+          bg = "white",
+          device = "png",
+          dpi = 300
+        )
+      }
+    )
+
+    # ── Download all plots as ZIP ──
+    output$download_all_plots <- downloadHandler(
+      filename = function() paste0("PSManalyst_all_plots_", Sys.Date(), ".zip"),
       content = function(file) {
         td <- tempdir()
         fps <- character()
@@ -3329,953 +2581,140 @@ PSManalyst_server <- function(id) {
             error = function(e) message("Skip ", nm, ": ", conditionMessage(e))
           )
         }
+
         withProgress(message = "Saving plots...", value = 0, {
-          # ── PSM plots ────────────────────────────────────────────────────
+          # PSM plots
           if (!is.null(tryCatch(data(), error = function(e) NULL))) {
-            d_psm <- data()
-            try({
-              # plot01 — Protease fingerprint heatmap
-              save_p(
-                "PSM_plot01_protease_fingerprint.png",
-                function() {
-                  purrr::imap_dfr(
-                    frequency_matrix_of_aa(),
-                    ~ as.data.frame(.x) %>%
-                      rownames_to_column(var = "residue") %>%
-                      pivot_longer(
-                        -residue,
-                        names_to = "position",
-                        values_to = "frequency"
-                      ) %>%
-                      dplyr::mutate(sample_name = .y)
-                  ) %>%
-                    dplyr::mutate(
-                      position = factor(
-                        position,
-                        c("P4", "P3", "P2", "P1", "P1'", "P2'", "P3'", "P4'")
-                      ),
-                      residue = factor(
-                        residue,
-                        c(
-                          "A",
-                          "C",
-                          "D",
-                          "E",
-                          "F",
-                          "G",
-                          "H",
-                          "I",
-                          "K",
-                          "L",
-                          "M",
-                          "N",
-                          "P",
-                          "Q",
-                          "R",
-                          "S",
-                          "T",
-                          "V",
-                          "W",
-                          "Y"
-                        )
-                      )
-                    ) %>%
-                    ggplot(aes(x = position, y = residue, fill = frequency)) +
-                    geom_tile(color = "black") +
-                    scale_fill_gradient(low = "#d4e6f1", high = "#154360") +
-                    geom_vline(
-                      xintercept = 4.5,
-                      color = "black",
-                      linetype = "dashed"
-                    ) +
-                    theme_minimal() +
-                    facet_wrap(~sample_name, ncol = 3) +
-                    labs(
-                      title = "Cleavage Site Specificity",
-                      x = "Position",
-                      y = "Amino acid residue",
-                      fill = "Frequency (%)"
-                    )
-                },
-                w = 14,
-                h = 8
-              )
-
-              # plot03 — N-term seqLogo
-              save_p(
-                "PSM_plot03_nterm_seqlogo.png",
-                function() {
-                  seq_lst <- d_psm %>%
-                    dplyr::filter(!is.na(fingerprint_Nterm)) %>%
-                    dplyr::group_by(sample_name) %>%
-                    dplyr::summarise(
-                      seqs = list(fingerprint_Nterm),
-                      .groups = "drop"
-                    ) %>%
-                    tibble::deframe()
-                  ggseqlogo::ggseqlogo(
-                    seq_lst,
-                    method = "bits",
-                    seq_type = "AA"
-                  ) +
-                    seqlogo_scale +
-                    theme_bw() +
-                    labs(
-                      title = "SeqLogo of the N-termini fingerprint",
-                      x = "Amino acid position",
-                      y = "Bits"
-                    )
-                },
-                w = 12,
-                h = 5
-              )
-
-              # plot04 — C-term seqLogo
-              save_p(
-                "PSM_plot04_cterm_seqlogo.png",
-                function() {
-                  seq_lst <- d_psm %>%
-                    dplyr::filter(!is.na(fingerprint_Cterm)) %>%
-                    dplyr::group_by(sample_name) %>%
-                    dplyr::summarise(
-                      seqs = list(fingerprint_Cterm),
-                      .groups = "drop"
-                    ) %>%
-                    tibble::deframe()
-                  ggseqlogo::ggseqlogo(
-                    seq_lst,
-                    method = "bits",
-                    seq_type = "AA"
-                  ) +
-                    seqlogo_scale +
-                    theme_bw() +
-                    labs(
-                      title = "SeqLogo of the C-termini fingerprint",
-                      x = "Amino acid position",
-                      y = "Bits"
-                    )
-                },
-                w = 12,
-                h = 5
-              )
-
-              # plot05 — m/z vs retention time
-              save_p(
-                "PSM_plot05_mz_rt.png",
-                function() {
-                  d_psm %>%
-                    as.data.frame() %>%
-                    ggplot(aes(x = retention / 60, y = observed_m_z)) +
-                    ggpointdensity::geom_pointdensity(size = 0.25) +
-                    viridis::scale_color_viridis(option = "plasma") +
-                    labs(
-                      x = "Retention time (min)",
-                      y = "Scan range (m/z)",
-                      color = "Neighborhoods"
-                    ) +
-                    facet_wrap(~sample_name, ncol = 3)
-                },
-                w = 12,
-                h = 7
-              )
-
-              # plot06 — mass error
-              save_p(
-                "PSM_plot06_mass_error.png",
-                function() {
-                  d_psm %>%
-                    as.data.frame() %>%
-                    dplyr::filter(abs(delta_mass_ppm) < 100) %>%
-                    ggplot(aes(x = retention / 60, y = delta_mass_ppm)) +
-                    geom_point(alpha = 0.1, color = "black", size = 1) +
-                    geom_hline(
-                      yintercept = c(10, 0, -10),
-                      color = "red",
-                      linetype = "dashed",
-                      linewidth = 0.2
-                    ) +
-                    labs(x = "Retention time (min)", y = "Mass error (ppm)") +
-                    facet_wrap(~sample_name, ncol = 3)
-                },
-                w = 12,
-                h = 7
-              )
-
-              # plot07 — peptide length
-              save_p(
-                "PSM_plot07_peptide_length.png",
-                function() {
-                  d_psm %>%
-                    as.data.frame() %>%
-                    ggplot() +
-                    geom_density(
-                      aes(x = peptide_length),
-                      fill = input$plot_color,
-                      color = "black"
-                    ) +
-                    labs(x = "Peptide Length", y = "Frequency (%)") +
-                    facet_wrap(~sample_name, ncol = 3)
-                },
-                w = 12,
-                h = 7
-              )
-
-              # plot08 — GRAVY
-              save_p(
-                "PSM_plot08_gravy.png",
-                function() {
-                  d_psm %>%
-                    as.data.frame() %>%
-                    ggplot(aes(x = gravy)) +
-                    geom_histogram(fill = input$plot_color, color = "black") +
-                    labs(x = "GRAVY index", y = "Count") +
-                    facet_wrap(~sample_name, ncol = 3)
-                },
-                w = 12,
-                h = 7
-              )
-
-              # plot09 — isoelectric point
-              save_p(
-                "PSM_plot09_isoelectric_point.png",
-                function() {
-                  d_psm %>%
-                    as.data.frame() %>%
-                    ggplot(aes(x = isoelectric_point)) +
-                    geom_histogram(fill = input$plot_color, color = "black") +
-                    labs(x = NULL, y = "Count") +
-                    facet_wrap(~sample_name, ncol = 3)
-                },
-                w = 12,
-                h = 7
-              )
-
-              # plot10 — charge state
-              save_p(
-                "PSM_plot10_charge_state.png",
-                function() {
-                  d_psm %>%
-                    as.data.frame() %>%
-                    ggplot() +
-                    geom_bar(
-                      aes(x = charge),
-                      fill = input$plot_color,
-                      color = "black"
-                    ) +
-                    labs(x = "Charge state", y = "Count") +
-                    facet_wrap(~sample_name, ncol = 3)
-                },
-                w = 12,
-                h = 7
-              )
-
-              # plot11 — missed cleavages
-              save_p(
-                "PSM_plot11_missed_cleavages.png",
-                function() {
-                  d_psm %>%
-                    as.data.frame() %>%
-                    dplyr::count(sample_name, number_of_missed_cleavages) %>%
-                    dplyr::mutate(
-                      number_of_missed_cleavages = factor(
-                        number_of_missed_cleavages
-                      )
-                    ) %>%
-                    ggplot(aes(x = number_of_missed_cleavages, y = n)) +
-                    geom_col(fill = input$plot_color, color = "black") +
-                    labs(x = "Number of Missed Cleavages", y = "Count") +
-                    facet_wrap(~sample_name, ncol = 3)
-                },
-                w = 12,
-                h = 7
-              )
-
-              # plot12 — unique peptides
-              save_p(
-                "PSM_plot12_uniqueness.png",
-                function() {
-                  d_psm %>%
-                    as.data.frame() %>%
-                    dplyr::count(sample_name, is_unique) %>%
-                    dplyr::mutate(
-                      uniqueness = ifelse(is_unique, "Unique", "Shared")
-                    ) %>%
-                    ggplot(aes(x = uniqueness, y = n)) +
-                    geom_col(fill = input$plot_color, color = "black") +
-                    labs(x = "Unique peptides", y = "Count") +
-                    facet_wrap(~sample_name, ncol = 3)
-                },
-                w = 12,
-                h = 7
-              )
-
-              # plot13 — hyperscore
-              save_p(
-                "PSM_plot13_hyperscore.png",
-                function() {
-                  d_psm %>%
-                    as.data.frame() %>%
-                    ggplot() +
-                    geom_histogram(
-                      aes(x = hyperscore),
-                      fill = input$plot_color,
-                      color = "black"
-                    ) +
-                    labs(x = "Hyperscore", y = "Count") +
-                    facet_wrap(~sample_name, ncol = 3)
-                },
-                w = 12,
-                h = 7
-              )
-
-              # plot14 — nextscore
-              save_p(
-                "PSM_plot14_nextscore.png",
-                function() {
-                  d_psm %>%
-                    as.data.frame() %>%
-                    ggplot() +
-                    geom_histogram(
-                      aes(x = nextscore),
-                      fill = input$plot_color,
-                      color = "black"
-                    ) +
-                    labs(x = "Nextscore", y = "Count") +
-                    facet_wrap(~sample_name, ncol = 3)
-                },
-                w = 12,
-                h = 7
-              )
-
-              # plot15 — PeptideProphet probability
-              save_p(
-                "PSM_plot15_probability.png",
-                function() {
-                  d_psm %>%
-                    as.data.frame() %>%
-                    ggplot() +
-                    geom_histogram(
-                      aes(x = probability),
-                      fill = input$plot_color,
-                      color = "black"
-                    ) +
-                    labs(x = "PeptideProphet Probability", y = "Count") +
-                    facet_wrap(~sample_name, ncol = 3)
-                },
-                w = 12,
-                h = 7
-              )
-
-              # plot16 — expectation value
-              save_p(
-                "PSM_plot16_expectation.png",
-                function() {
-                  d_psm %>%
-                    as.data.frame() %>%
-                    ggplot() +
-                    geom_histogram(
-                      aes(x = expectation),
-                      fill = input$plot_color,
-                      color = "black"
-                    ) +
-                    labs(x = "Expectation value", y = "Count") +
-                    facet_wrap(~sample_name, ncol = 3)
-                },
-                w = 12,
-                h = 7
-              )
-
-              # plot17 — assigned modifications
-              save_p(
-                "PSM_plot17_assigned_mods.png",
-                function() {
-                  d_psm %>%
-                    as.data.frame() %>%
-                    tidyr::separate_rows(assigned_modifications, sep = ",") %>%
-                    dplyr::mutate(
-                      assigned_modifications = stringr::str_remove_all(
-                        assigned_modifications,
-                        ".*\\(|\\)"
-                      ),
-                      assigned_modifications = ifelse(
-                        is.na(assigned_modifications),
-                        "Unassigned",
-                        assigned_modifications
-                      )
-                    ) %>%
-                    dplyr::count(sample_name, assigned_modifications) %>%
-                    ggplot(aes(y = assigned_modifications, x = n)) +
-                    geom_col(fill = input$plot_color, color = "black") +
-                    labs(y = "Assigned Modifications", x = "Count") +
-                    facet_wrap(~sample_name, ncol = 3, scales = "free_y")
-                },
-                w = 12,
-                h = 8
-              )
-
-              # plot18 — top proteins by PSM count
-              save_p(
-                "PSM_plot18_top_proteins.png",
-                function() {
-                  d_psm %>%
-                    as.data.frame() %>%
-                    dplyr::group_by(sample_name, entry_name) %>%
-                    dplyr::summarise(n_psm = n(), .groups = "drop") %>%
-                    dplyr::group_by(sample_name) %>%
-                    dplyr::slice_max(n_psm, n = 20, with_ties = FALSE) %>%
-                    dplyr::mutate(
-                      entry_name = tidytext::reorder_within(
-                        entry_name,
-                        n_psm,
-                        sample_name
-                      )
-                    ) %>%
-                    ggplot(aes(x = n_psm, y = entry_name)) +
-                    geom_col(fill = input$plot_color, color = "black") +
-                    tidytext::scale_y_reordered() +
-                    labs(x = "Number of PSMs", y = "Protein") +
-                    facet_wrap(~sample_name, ncol = 3, scales = "free_y")
-                },
-                w = 14,
-                h = 8
-              )
-
-              # plot19 — co-occurrence matrix
-              save_p(
-                "PSM_plot19_cooccurrence.png",
-                function() {
-                  cooccurrence_data()[["plot"]]
-                },
-                w = 12,
-                h = 10
-              )
-
-              # plot20 — cysteine counts
-              save_p(
-                "PSM_plot20_cysteine.png",
-                function() {
-                  d_psm %>%
-                    as.data.frame() %>%
-                    dplyr::mutate(
-                      cysteine_count = stringr::str_count(peptide, "C")
-                    ) %>%
-                    dplyr::group_by(sample_name, cysteine_count) %>%
-                    summarise(n = n()) %>%
-                    ggplot(aes(x = cysteine_count, y = n)) +
-                    geom_bar(
-                      stat = "identity",
-                      fill = input$plot_color,
-                      color = "black"
-                    ) +
-                    geom_text(aes(label = n), vjust = -0.5, size = 5) +
-                    labs(x = "Cysteine counts in peptides", y = "Count") +
-                    facet_wrap(~sample_name, ncol = 3)
-                },
-                w = 12,
-                h = 7
-              )
-
-              # plot_aa_freq — amino acid frequency vs FASTA background
-              if (
-                !is.null(input$fasta_file) &&
-                  !is.null(tryCatch(fasta_data(), error = function(e) NULL))
-              ) {
-                save_p(
-                  "PSM_plot_aa_frequency.png",
-                  function() {
-                    fd <- tryCatch(fasta_data(), error = function(e) NULL)
-                    if (is.null(fd)) {
-                      return(NULL)
-                    }
-                    base_aas <- c(
-                      "A",
-                      "C",
-                      "D",
-                      "E",
-                      "F",
-                      "G",
-                      "H",
-                      "I",
-                      "K",
-                      "L",
-                      "M",
-                      "N",
-                      "P",
-                      "Q",
-                      "R",
-                      "S",
-                      "T",
-                      "V",
-                      "W",
-                      "Y"
-                    )
-                    seqs <- sapply(fd, function(x) as.character(x)[1])
-                    all_fasta_aa <- toupper(gsub(
-                      "[^A-Za-z]",
-                      "",
-                      paste0(seqs, collapse = "")
-                    ))
-                    aa_counts_fasta <- table(strsplit(all_fasta_aa, "")[[1]])
-                    aa_counts_fasta <- aa_counts_fasta[
-                      names(aa_counts_fasta) %in% base_aas
-                    ]
-                    exp_freq <- as.data.frame(
-                      aa_counts_fasta / sum(aa_counts_fasta, na.rm = TRUE) * 100
-                    )
-                    colnames(exp_freq) <- c("AA", "Frequency")
-                    exp_freq$Type <- "Expected (FASTA)"
-                    d_aa <- d_psm %>%
-                      dplyr::filter(!is.na(peptide), nchar(peptide) > 0) %>%
-                      dplyr::mutate(
-                        clean_peptide = gsub("\\[.*?\\]", "", peptide)
-                      )
-                    obs_freq <- d_aa %>%
-                      dplyr::group_by(sample_name) %>%
-                      dplyr::summarise(
-                        all_aas = list(
-                          strsplit(paste0(clean_peptide, collapse = ""), "")[[
-                            1
-                          ]]
-                        ),
-                        .groups = "drop"
-                      ) %>%
-                      tidyr::unnest(all_aas) %>%
-                      dplyr::filter(all_aas %in% base_aas) %>%
-                      dplyr::count(sample_name, AA = all_aas) %>%
-                      dplyr::group_by(sample_name) %>%
-                      dplyr::mutate(Frequency = n / sum(n) * 100) %>%
-                      dplyr::ungroup() %>%
-                      dplyr::select(sample_name, AA, Frequency) %>%
-                      dplyr::mutate(Type = "Identified (Peptides)")
-                    samples_aa <- unique(obs_freq$sample_name)
-                    exp_all <- purrr::map_dfr(
-                      samples_aa,
-                      ~ dplyr::mutate(exp_freq, sample_name = .x)
-                    )
-                    comb_df <- dplyr::bind_rows(exp_all, obs_freq) %>%
-                      dplyr::mutate(
-                        Type = factor(
-                          Type,
-                          levels = c(
-                            "Expected (FASTA)",
-                            "Identified (Peptides)"
-                          )
-                        )
-                      )
-                    ggplot(comb_df, aes(x = AA, y = Frequency, fill = Type)) +
-                      geom_bar(
-                        stat = "identity",
-                        position = "dodge",
-                        color = "black",
-                        alpha = 0.85
-                      ) +
-                      scale_fill_manual(
-                        values = c(
-                          "Expected (FASTA)" = "#ADB5BD",
-                          "Identified (Peptides)" = input$plot_color
-                        )
-                      ) +
-                      labs(
-                        title = "Amino acid frequencies (expected vs identified)",
-                        x = "Amino acid",
-                        y = "Frequency (%)",
-                        fill = ""
-                      ) +
-                      facet_wrap(~sample_name, ncol = 3) +
-                      theme_bw() +
-                      theme(
-                        legend.position = "top",
-                        plot.title = element_text(
-                          size = 14,
-                          face = "bold",
-                          hjust = 0.5
-                        ),
-                        axis.text = element_text(
-                          size = 10,
-                          face = "bold",
-                          color = "black"
-                        ),
-                        axis.title = element_text(size = 11, face = "bold"),
-                        strip.background = element_blank(),
-                        strip.text = element_text(
-                          face = "bold",
-                          color = "black"
-                        )
-                      )
-                  },
-                  w = 12,
-                  h = 7
-                )
+            psm_plot_ids <- c(
+              "plot01",
+              "plot03",
+              "plot04",
+              "plot05",
+              "plot06",
+              "plot07",
+              "plot08",
+              "plot09",
+              "plot10",
+              "plot11",
+              "plot12",
+              "plot13",
+              "plot14",
+              "plot15",
+              "plot16",
+              "plot17",
+              "plot18",
+              "plot19",
+              "plot20"
+            )
+            for (pid in psm_plot_ids) {
+              if (exists(pid, envir = psm_fns)) {
+                fn <- get(pid, envir = psm_fns)
+                save_p(paste0("PSM_", pid, ".png"), fn, w = 12, h = 8)
               }
-
-              # FDR curve
-              tryCatch(
-                {
-                  save_p(
-                    "PSM_FDR_curve.png",
-                    function() fdr_curve_obj(),
-                    w = 11,
-                    h = 8
-                  )
-                },
-                error = function(e) NULL
-              )
-            })
-          }
-          incProgress(1 / 3)
-
-          # ── Protein plots ─────────────────────────────────────────────────
-          if (!is.null(tryCatch(protein_data(), error = function(e) NULL))) {
-            d_prot <- protein_data()
-            try({
-              save_p("Protein_plot01_coverage.png", function() {
-                d_prot %>%
-                  as.data.frame() %>%
-                  ggplot() +
-                  geom_histogram(
-                    aes(x = coverage),
-                    fill = input$plot_color,
-                    color = "black"
-                  ) +
-                  labs(x = "Protein coverage (%)", y = "Count")
-              })
-              save_p("Protein_plot02_organisms.png", function() {
-                d_prot %>%
-                  as.data.frame() %>%
-                  dplyr::count(organism) %>%
-                  ggplot() +
-                  geom_bar(
-                    aes(x = n, y = reorder(organism, n)),
-                    fill = input$plot_color,
-                    color = "black",
-                    stat = "identity"
-                  ) +
-                  geom_text(
-                    aes(x = n, y = reorder(organism, n), label = n),
-                    hjust = -0.1,
-                    size = 5
-                  ) +
-                  labs(x = "Number of proteins", y = NULL)
-              })
-              save_p("Protein_plot03_existence.png", function() {
-                d_prot %>%
-                  as.data.frame() %>%
-                  dplyr::mutate(
-                    protein_existence = stringr::str_remove(
-                      protein_existence,
-                      ".*\\:"
-                    )
-                  ) %>%
-                  ggplot() +
-                  geom_bar(
-                    aes(y = protein_existence, fill = input$plot_color),
-                    color = "black",
-                    show.legend = FALSE
-                  ) +
-                  labs(x = "Count", y = "Protein existence")
-              })
-              save_p("Protein_plot04_probability.png", function() {
-                d_prot %>%
-                  as.data.frame() %>%
-                  ggplot() +
-                  geom_histogram(
-                    aes(x = protein_probability),
-                    fill = input$plot_color,
-                    color = "black"
-                  ) +
-                  labs(x = "Protein probability", y = "Count")
-              })
-              save_p("Protein_plot05_peptide_prob.png", function() {
-                d_prot %>%
-                  as.data.frame() %>%
-                  ggplot() +
-                  geom_histogram(
-                    aes(x = top_peptide_probability),
-                    fill = input$plot_color,
-                    color = "black"
-                  ) +
-                  labs(x = "Top peptide probability", y = "Count")
-              })
-              save_p("Protein_plot06_total_peptides.png", function() {
-                d_prot %>%
-                  as.data.frame() %>%
-                  ggplot() +
-                  geom_histogram(
-                    aes(x = total_peptides),
-                    fill = input$plot_color,
-                    color = "black"
-                  ) +
-                  labs(x = "Total peptides", y = "Count")
-              })
-              save_p("Protein_plot07_spectral_count.png", function() {
-                d_prot %>%
-                  as.data.frame() %>%
-                  ggplot() +
-                  geom_histogram(
-                    aes(x = razor_spectral_count),
-                    fill = input$plot_color,
-                    color = "black"
-                  ) +
-                  labs(x = "Razor Spectral Count", y = "Count")
-              })
-              save_p("Protein_plot08_razor_intensity.png", function() {
-                d_prot %>%
-                  as.data.frame() %>%
-                  ggplot() +
-                  geom_histogram(
-                    aes(x = razor_intensity),
-                    fill = input$plot_color,
-                    color = "black"
-                  ) +
-                  labs(x = "Razor Intensity", y = "Count")
-              })
-            })
-          }
-          incProgress(1 / 3)
-
-          # ── Combined protein plots ────────────────────────────────────────
-          if (!is.null(input$combined_protein)) {
-            d_comb <- combined_protein_data()
-            raw <- combined_protein_raw()
-            try({
-              save_p(
-                "Protein_plot10_maxlfq_distribution.png",
-                function() {
-                  d_comb %>%
-                    as.data.frame() %>%
-                    rownames_to_column(var = "protein_id") %>%
-                    tidyr::pivot_longer(
-                      -protein_id,
-                      names_to = "sample",
-                      values_to = "log2_lfq"
-                    ) %>%
-                    ggplot() +
-                    geom_violin(
-                      aes(x = sample, y = log2_lfq),
-                      fill = input$plot_color,
-                      color = "black"
-                    ) +
-                    labs(x = "Sample", y = "log2(MaxLFQ intensity)") +
-                    theme_bw() +
-                    theme(axis.text.x = element_text(angle = 45, hjust = 1))
-                },
-                w = 10,
-                h = 6
-              )
-
-              save_p(
-                "Protein_plot_ggpairs.png",
-                function() {
-                  d_comb %>%
-                    GGally::ggpairs(
-                      lower = list(continuous = wrap("points", alpha = 0.4)),
-                      diag = list(continuous = "barDiag"),
-                      upper = list(continuous = "density")
-                    ) +
-                    theme_bw()
-                },
+            }
+            # FDR
+            try(save_p(
+              "PSM_FDR_curve.png",
+              function() fdr_curve_obj(),
+              w = 11,
+              h = 8
+            ))
+            # AA freq (requires fasta)
+            if (!is.null(input$fasta_file)) {
+              try(save_p(
+                "PSM_plot_aa_frequency.png",
+                function() psm_fns$plot_aa_freq(),
                 w = 12,
-                h = 12
-              )
-
-              ht_dl <- theme(
-                text = element_text(size = 15),
-                axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5),
-                legend.position = "bottom",
-                legend.key.width = unit(2.5, "cm"),
-                legend.key.height = unit(0.25, "cm")
-              )
-              save_p("Protein_cosine_similarity.png", function() {
-                d_comb %>%
-                  as.matrix() %>%
-                  na.omit() %>%
-                  lsa::cosine() %>%
-                  as.data.frame() %>%
-                  rownames_to_column("Sample") %>%
-                  pivot_longer(
-                    -Sample,
-                    names_to = "Match",
-                    values_to = "value"
-                  ) %>%
-                  ggplot() +
-                  geom_tile(aes(x = Sample, y = Match, fill = value)) +
-                  viridis::scale_fill_viridis(option = "E") +
-                  ht_dl +
-                  labs(x = NULL, y = NULL, fill = "Cosine similarity")
-              })
-              save_p("Protein_euclidean_distance.png", function() {
-                d_comb %>%
-                  t() %>%
-                  dist(method = "euclidean") %>%
-                  as.matrix() %>%
-                  as.data.frame() %>%
-                  rownames_to_column("Sample") %>%
-                  pivot_longer(
-                    -Sample,
-                    names_to = "Match",
-                    values_to = "value"
-                  ) %>%
-                  ggplot() +
-                  geom_tile(aes(x = Sample, y = Match, fill = value)) +
-                  viridis::scale_fill_viridis(option = "E") +
-                  ht_dl +
-                  labs(x = NULL, y = NULL, fill = "Euclidean distance")
-              })
-              save_p("Protein_jaccard_similarity.png", function() {
-                d_comb %>%
-                  t() %>%
-                  vegan::vegdist(method = "jaccard", na.rm = TRUE) %>%
-                  as.matrix() %>%
-                  as.data.frame() %>%
-                  rownames_to_column("Sample") %>%
-                  pivot_longer(
-                    -Sample,
-                    names_to = "Match",
-                    values_to = "value"
-                  ) %>%
-                  ggplot() +
-                  geom_tile(aes(x = Sample, y = Match, fill = value)) +
-                  viridis::scale_fill_viridis(option = "E") +
-                  ht_dl +
-                  labs(x = NULL, y = NULL, fill = "Jaccard similarity")
-              })
-
-              # Rank plots — reuse same logic as renderPlot
-              save_p(
-                "Protein_rank_lfq.png",
-                function() {
-                  lfq_cols <- grep(
-                    "max_lfq_intensity$",
-                    colnames(raw),
-                    value = TRUE,
-                    ignore.case = TRUE
-                  )
-                  df <- raw %>%
-                    dplyr::select(entry_name, dplyr::all_of(lfq_cols)) %>%
-                    tidyr::pivot_longer(
-                      -entry_name,
-                      names_to = "sample_name",
-                      values_to = "log2_lfq"
-                    ) %>%
-                    dplyr::mutate(
-                      sample_name = stringr::str_remove(
-                        sample_name,
-                        "_max_lfq_intensity$"
-                      ),
-                      log2_lfq = log2(as.numeric(log2_lfq))
-                    ) %>%
-                    dplyr::filter(!is.na(log2_lfq) & is.finite(log2_lfq))
-                  plots <- lapply(sort(unique(df$sample_name)), function(s) {
-                    d <- df %>%
-                      dplyr::filter(sample_name == s) %>%
-                      dplyr::slice_max(log2_lfq, n = 20, with_ties = FALSE) %>%
-                      dplyr::mutate(
-                        entry_name = tidytext::reorder_within(
-                          entry_name,
-                          log2_lfq,
-                          sample_name
-                        )
-                      )
-                    ggplot(d, aes(x = log2_lfq, y = entry_name)) +
-                      geom_col(
-                        fill = input$plot_color,
-                        color = "black",
-                        linewidth = 0.3
-                      ) +
-                      tidytext::scale_y_reordered() +
-                      labs(title = s, x = "log2(MaxLFQ intensity)", y = NULL) +
-                      theme_bw()
-                  })
-                  patchwork::wrap_plots(plots, ncol = min(3L, length(plots))) +
-                    patchwork::plot_annotation(
-                      title = "Top 20 proteins by MaxLFQ intensity (log2)"
-                    )
-                },
-                w = 14,
-                h = 8
-              )
-
-              save_p(
-                "Protein_rank_usc.png",
-                function() {
-                  usc_cols <- grep(
-                    "unique_spectral_count$",
-                    colnames(raw),
-                    value = TRUE,
-                    ignore.case = TRUE
-                  )
-                  df <- raw %>%
-                    dplyr::select(entry_name, dplyr::all_of(usc_cols)) %>%
-                    tidyr::pivot_longer(
-                      -entry_name,
-                      names_to = "sample_name",
-                      values_to = "unique_spectral_count"
-                    ) %>%
-                    dplyr::mutate(
-                      sample_name = stringr::str_remove(
-                        sample_name,
-                        "_unique_spectral_count$"
-                      ),
-                      unique_spectral_count = as.numeric(unique_spectral_count)
-                    ) %>%
-                    dplyr::filter(
-                      !is.na(unique_spectral_count) & unique_spectral_count > 0
-                    )
-                  plots <- lapply(sort(unique(df$sample_name)), function(s) {
-                    d <- df %>%
-                      dplyr::filter(sample_name == s) %>%
-                      dplyr::slice_max(
-                        unique_spectral_count,
-                        n = 20,
-                        with_ties = FALSE
-                      ) %>%
-                      dplyr::mutate(
-                        entry_name = tidytext::reorder_within(
-                          entry_name,
-                          unique_spectral_count,
-                          sample_name
-                        )
-                      )
-                    ggplot(d, aes(x = unique_spectral_count, y = entry_name)) +
-                      geom_col(
-                        fill = input$plot_color,
-                        color = "black",
-                        linewidth = 0.3
-                      ) +
-                      tidytext::scale_y_reordered() +
-                      labs(title = s, x = "Unique spectral count", y = NULL) +
-                      theme_bw()
-                  })
-                  patchwork::wrap_plots(plots, ncol = min(3L, length(plots))) +
-                    patchwork::plot_annotation(
-                      title = "Top 20 proteins by unique spectral count"
-                    )
-                },
-                w = 14,
-                h = 8
-              )
-            })
-          }
-
-          # ── Modification Diagnostic ───────────────────────────────────────
-          try({
-            save_p(
-              "PSM_Mod_Diagnostic_Dumbbell.png",
+                h = 7
+              ))
+            }
+            # Mod diagnostic
+            try(save_p(
+              "PSM_Mod_Diagnostic.png",
               function() mod_diag_plot_obj(),
               w = 14,
               h = 10
+            ))
+            try({
+              paired <- mod_diag_data()
+              if (!is.null(paired) && nrow(paired) > 0) {
+                rt_csv <- file.path(td, "PSM_RT_Shift_Table.csv")
+                readr::write_csv(paired, rt_csv)
+                fps <<- c(fps, rt_csv)
+              }
+            })
+          }
+          incProgress(1 / 3)
+
+          # Protein plots (from protein.tsv)
+          if (!is.null(tryCatch(protein_data(), error = function(e) NULL))) {
+            prot_ids <- c(
+              "plot01p",
+              "plot02p",
+              "plot03p",
+              "plot04p",
+              "plot05p",
+              "plot06p",
+              "plot07p",
+              "plot08p"
             )
-          })
-          try({
-            paired <- mod_diag_data()
-            if (!is.null(paired) && nrow(paired) > 0) {
-              rt_csv_path <- file.path(td, "PSM_RT_Shift_Table.csv")
-              readr::write_csv(paired, rt_csv_path)
-              fps <<- c(fps, rt_csv_path)
+            for (pid in prot_ids) {
+              if (exists(pid, envir = prot_fns)) {
+                fn <- get(pid, envir = prot_fns)
+                save_p(paste0("Protein_", pid, ".png"), fn, w = 10, h = 6)
+              }
             }
-          })
+          }
+          incProgress(1 / 3)
+
+          # Combined protein plots (from combined_protein.tsv)
+          if (!is.null(input$combined_protein)) {
+            try(save_p(
+              "Protein_plot10p_maxlfq.png",
+              function() prot_fns$plot10p(),
+              w = 10,
+              h = 6
+            ))
+            try(save_p(
+              "Protein_ggpairs.png",
+              function() prot_fns$plot_ggpairs(),
+              w = 12,
+              h = 12
+            ))
+            try(save_p(
+              "Protein_cosine_similarity.png",
+              function() prot_fns$cosine_similarity(),
+              w = 10,
+              h = 8
+            ))
+            try(save_p(
+              "Protein_euclidean_distance.png",
+              function() prot_fns$euclidean_distance(),
+              w = 10,
+              h = 8
+            ))
+            try(save_p(
+              "Protein_jaccard_similarity.png",
+              function() prot_fns$jaccard_similarity(),
+              w = 10,
+              h = 8
+            ))
+            try(save_p(
+              "Protein_rank_lfq.png",
+              function() prot_fns$plot_rank_lfq(),
+              w = 14,
+              h = 8
+            ))
+            try(save_p(
+              "Protein_rank_usc.png",
+              function() prot_fns$plot_rank_usc(),
+              w = 14,
+              h = 8
+            ))
+          }
           incProgress(1 / 3)
         })
+
         utils::zip(file, files = fps, flags = "-j")
       },
       contentType = "application/zip"
