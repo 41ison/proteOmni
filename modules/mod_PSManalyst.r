@@ -2631,8 +2631,8 @@ PSManalyst_server <- function(id) {
             try(save_p(
               "PSM_Mod_Diagnostic.png",
               function() mod_diag_plot_obj(),
-              w = 16,
-              h = 16
+              w = 14,
+              h = 10
             ))
             try({
               paired <- mod_diag_data()
