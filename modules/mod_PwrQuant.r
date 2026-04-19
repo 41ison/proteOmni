@@ -551,7 +551,7 @@ PwrQuant_server <- function(id) {
     raw_matrix <- reactive({
       req(input$matrix_file)
       show_spinners()
-      df <- data.table::fread(input$matrix_file$datapath, sep = "\t", header = TRUE)
+      df <- data.table::fread(input$matrix_file$datapath, header = TRUE, quote = "")
 
       # Drop rows where the first column (representing IDs) is NA
       df <- df[!is.na(df[[1]]), ]
