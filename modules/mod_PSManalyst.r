@@ -2615,7 +2615,7 @@ PSManalyst_server <- function(id) {
             try(save_p(
               "PSM_FDR_curve.png",
               function() fdr_curve_obj(),
-              w = 11,
+              w = 12,
               h = 8
             ))
             # AA freq (requires fasta)
@@ -2624,15 +2624,15 @@ PSManalyst_server <- function(id) {
                 "PSM_plot_aa_frequency.png",
                 function() psm_fns$plot_aa_freq(),
                 w = 12,
-                h = 7
+                h = 8
               ))
             }
             # Mod diagnostic
             try(save_p(
               "PSM_Mod_Diagnostic.png",
               function() mod_diag_plot_obj(),
-              w = 14,
-              h = 10
+              w = 16,
+              h = 16
             ))
             try({
               paired <- mod_diag_data()
@@ -2660,7 +2660,7 @@ PSManalyst_server <- function(id) {
             for (pid in prot_ids) {
               if (exists(pid, envir = prot_fns)) {
                 fn <- get(pid, envir = prot_fns)
-                save_p(paste0("Protein_", pid, ".png"), fn, w = 10, h = 6)
+                save_p(paste0("Protein_", pid, ".png"), fn, w = 10, h = 8)
               }
             }
           }
@@ -2672,43 +2672,43 @@ PSManalyst_server <- function(id) {
               "Protein_plot10p_maxlfq.png",
               function() prot_fns$plot10p(),
               w = 10,
-              h = 6
+              h = 8
             ))
             try(save_p(
               "Protein_ggpairs.png",
               function() prot_fns$plot_ggpairs(),
-              w = 12,
-              h = 12
+              w = 14,
+              h = 14
             ))
             try(save_p(
               "Protein_cosine_similarity.png",
               function() prot_fns$cosine_similarity(),
               w = 10,
-              h = 8
+              h = 10
             ))
             try(save_p(
               "Protein_euclidean_distance.png",
               function() prot_fns$euclidean_distance(),
               w = 10,
-              h = 8
+              h = 10
             ))
             try(save_p(
               "Protein_jaccard_similarity.png",
               function() prot_fns$jaccard_similarity(),
               w = 10,
-              h = 8
+              h = 10
             ))
             try(save_p(
               "Protein_rank_lfq.png",
               function() prot_fns$plot_rank_lfq(),
               w = 14,
-              h = 8
+              h = 10
             ))
             try(save_p(
               "Protein_rank_usc.png",
               function() prot_fns$plot_rank_usc(),
               w = 14,
-              h = 8
+              h = 10
             ))
           }
           incProgress(1 / 3)
