@@ -15,6 +15,11 @@ compute_cv_mtx <- function(protein_matrix, group_labels) {
 }
 
 groupwise_imputation <- function(data, group_labels) {
+  #If the dataset has zero NAs, don't waste time trying to impute
+  if (sum(is.na(data)) == 0) {
+    return(data)
+  }
+
   imputed_data <- data
   for (group in unique(group_labels)) {
     group_cols <- which(group_labels == group)
