@@ -600,7 +600,7 @@ PwrQuant_server <- function(id) {
               disable = list(columns = c(0)) # Disable editing of the Sample (original ID) column
             ),
             rownames = FALSE,
-            options = list(dom = "t", paging = FALSE, ordering = FALSE),
+            options = list(dom = "t", paging = FALSE, ordering = FALSE, autoWidth = FALSE, scrollX = TRUE),
             class = "display compact"
           )
         },
