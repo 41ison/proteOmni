@@ -565,24 +565,14 @@ QC4DIANN_server <- function(id) {
 
     QuantUMS_scores <- reactive({
       req(input$report)
-      data_parquet <- arrow::read_parquet(input$report$datapath) %>%
-        data.table::as.data.table() # Dataset must be a data.table from data.table package
-      
-      # Filters
-      data_parquet <- data_parquet[
-        Lib.PG.Q.Value <= 0.01 &
-        Lib.Q.Value <= 0.01 &
-        PG.Q.Value <= 0.01 
-      ]
-      
-      # TODO: input$cRAP was not implemented yet #######
-      # # If the user select to remove the cRAP, remove it
-      # if(input$cRAP) {
-      #   data_parquet <- data_parquet[!grepl("cRAP", Protein.Ids)]
-      # }
-      
-      # Select columns
-      data_parquet[, .(
+      arrow::read_parquet(input$report$datapath) %>%
+        dplyr::filter(
+          Lib.PG.Q.Value <= 0.01,
+          Lib.Q.Value <= 0.01,
+          PG.Q.Value <= 0.01,
+          !stringr::str_detect(Protein.Ids, "cRAP")
+        ) %>%
+        dplyr::select(
           Run,
           Precursor.Id,
           PG.MaxLFQ.Quality,
