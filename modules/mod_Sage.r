@@ -97,6 +97,14 @@ Sage_sidebar_ui <- function(id) {
       value = 0.01,
       step = 0.005
     ),
+    sliderInput(
+      ns("rt_tolerance"),
+      "ΔRT artifact threshold (min)",
+      min = 0,
+      max = 5,
+      value = 0.5,
+      step = 0.1
+    ),
     checkboxInput(
       ns("filter_decoy"),
       "Filter out decoys for plots",
@@ -177,6 +185,42 @@ Sage_body_ui <- function(id) {
             width = 12,
             collapsible = TRUE,
             sp_wrap_sage(ns("spi_main"), uiOutput(ns("dynamic_plot_ui")))
+          )
+        )
+      ),
+
+      # ── Modification Diagnostic ─────────────────────────────────────────
+      tabPanel(
+        "Modification Diagnostic",
+        fluidRow(
+          box(
+            title = "RT Shift Profile — Modified vs Unmodified Peptides",
+            status = "primary",
+            solidHeader = TRUE,
+            width = 12,
+            fluidRow(
+              column(4, selectInput(ns("mod_diag_sample"), "Select Sample", choices = NULL)),
+              column(4, numericInput(ns("mod_diag_top_n"), "Top N Peptides", value = 30, min = 5, max = 100, step = 5))
+            ),
+            div(
+              class = "plot-wrap",
+              tags$div(
+                class = "spinner-overlay",
+                id = ns("sp_moddiag"),
+                icon("spinner", class = "fa-spin")
+              ),
+              uiOutput(ns("mod_diag_plot_ui"))
+            )
+          )
+        ),
+        fluidRow(
+          box(
+            title = "Modification Diagnostic Table",
+            status = "primary",
+            solidHeader = TRUE,
+            width = 12,
+            collapsible = TRUE,
+            DT::dataTableOutput(ns("mod_diag_table"))
           )
         )
       )
@@ -800,5 +844,157 @@ Sage_server <- function(id, fasta_digest) {
         )
       }
     )
+
+    # ════════════════════════════════════════════════════════════════════════
+    # MODIFICATION DIAGNOSTIC
+    # ════════════════════════════════════════════════════════════════════════
+    mod_diag_data <- reactive({
+      d <- filtered_data()
+      req(d, nrow(d) > 0)
+      req(all(c("peptide", "stripped_peptide", "rt", "filename") %in% names(d)))
+
+      d_mod <- d |>
+        dplyr::filter(
+          !is.na(peptide),
+          !is.na(stripped_peptide),
+          peptide != stripped_peptide,
+          !is.na(rt)
+        ) |>
+        dplyr::select(stripped_peptide, peptide, rt, filename) |>
+        dplyr::rename(
+          peptide_seq = stripped_peptide,
+          mod_seq = peptide,
+          rt_mod = rt,
+          sample_name = filename
+        )
+
+      d_unmod <- d |>
+        dplyr::filter(!is.na(peptide), peptide == stripped_peptide) |>
+        dplyr::group_by(stripped_peptide, filename) |>
+        dplyr::summarise(
+          rt_unmod = median(rt, na.rm = TRUE),
+          .groups = "drop"
+        ) |>
+        dplyr::rename(peptide_seq = stripped_peptide, sample_name = filename)
+
+      dplyr::inner_join(d_mod, d_unmod, by = c("peptide_seq", "sample_name")) |>
+        dplyr::mutate(
+          delta_rt = abs(rt_mod - rt_unmod),
+          classification = dplyr::if_else(
+            delta_rt <= input$rt_tolerance,
+            "Suspected Artifact",
+            "Sample-Derived"
+          )
+        )
+    })
+
+    mod_diag_plot_obj <- reactive({
+      paired <- mod_diag_data()
+      req(paired, nrow(paired) > 0)
+
+      top_peptides <- paired |>
+        dplyr::group_by(sample_name, peptide_seq) |>
+        dplyr::summarise(
+          max_delta = max(delta_rt, na.rm = TRUE),
+          .groups = "drop"
+        ) |>
+        dplyr::group_by(sample_name) |>
+        dplyr::slice_max(order_by = max_delta, n = 30) |>
+        dplyr::pull(peptide_seq) |>
+        unique()
+
+      plot_data <- paired |> dplyr::filter(peptide_seq %in% top_peptides)
+      req(nrow(plot_data) > 0)
+
+      ggplot(plot_data, aes(y = reorder(peptide_seq, delta_rt))) +
+        geom_segment(
+          aes(
+            x = rt_unmod,
+            xend = rt_mod,
+            yend = reorder(peptide_seq, delta_rt),
+            color = classification
+          ),
+          linewidth = 0.7
+        ) +
+        geom_point(aes(x = rt_unmod), color = "grey50", size = 2) +
+        geom_point(aes(x = rt_mod, color = classification), size = 2.5) +
+        scale_color_manual(
+          values = c(
+            "Suspected Artifact" = "#e74c3c",
+            "Sample-Derived" = "#2ecc71"
+          ),
+          name = "Classification"
+        ) +
+        labs(
+          title = "RT shift profile \u2014 modified vs unmodified (Sage)",
+          x = "Retention time (min)",
+          y = "Peptide sequence (stripped)",
+          caption = paste0(
+            "\u0394RT threshold: ",
+            input$rt_tolerance,
+            " min | Artifact if |\u0394RT| \u2264 threshold"
+          )
+        ) +
+        facet_wrap(~sample_name, ncol = 2, scales = "free") +
+        theme_bw() +
+        theme(
+          plot.title = element_text(size = 14, face = "bold", hjust = 0.5),
+          axis.text.y = element_text(size = 7, face = "bold", color = "black"),
+          axis.text.x = element_text(face = "bold", color = "black"),
+          axis.title = element_text(size = 12, face = "bold"),
+          strip.background = element_blank(),
+          strip.text = element_text(color = "black", face = "bold"),
+          panel.border = element_rect(color = "black", fill = NA),
+          legend.position = "bottom",
+          legend.text = element_text(size = 12, face = "bold"),
+          legend.title = element_text(size = 12, face = "bold"),
+          plot.caption = element_text(size = 12, face = "bold")
+        )
+    })
+
+    output$mod_diag_plot_ui <- renderUI({
+      paired <- tryCatch(mod_diag_data(), error = function(e) NULL)
+      hide_sp("sp_moddiag")
+      if (is.null(paired) || nrow(paired) == 0) {
+        return(tags$p(
+          style = "color:#adb5bd;text-align:center;padding:20px;",
+          "No paired modified/unmodified peptides found. Load a Sage results file and ensure it contains 'peptide', 'stripped_peptide', 'rt', and 'filename' columns."
+        ))
+      }
+      n_samples <- dplyr::n_distinct(paired$sample_name)
+      dynamic_h <- max(400L, min(n_samples * 500L, 2000L))
+      plotOutput(ns("mod_diag_plot"), height = paste0(dynamic_h, "px"))
+    })
+
+    output$mod_diag_plot <- renderPlot({
+      mod_diag_plot_obj()
+    })
+
+    output$mod_diag_table <- DT::renderDataTable({
+      paired <- mod_diag_data()
+      req(paired, nrow(paired) > 0)
+      tbl <- paired |>
+        dplyr::select(
+          sample_name,
+          peptide_seq,
+          mod_seq,
+          rt_unmod,
+          rt_mod,
+          delta_rt,
+          classification
+        ) |>
+        dplyr::rename(peptide = peptide_seq, modified_peptide = mod_seq) |>
+        dplyr::arrange(dplyr::desc(delta_rt))
+      DT::datatable(
+        tbl,
+        rownames = FALSE,
+        filter = "top",
+        options = list(pageLength = 20, scrollX = TRUE)
+      ) |>
+        DT::formatRound(
+          columns = c("rt_unmod", "rt_mod", "delta_rt"),
+          digits = 3
+        )
+    })
   })
 }

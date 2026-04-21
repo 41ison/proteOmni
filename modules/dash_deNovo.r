@@ -225,6 +225,14 @@ deNovo_sidebar_ui <- function(id) {
       value = 0,
       step = 0.01
     ),
+    sliderInput(
+      ns("rt_tolerance"),
+      "ΔRT artifact threshold (min)",
+      min = 0,
+      max = 5,
+      value = 0.5,
+      step = 0.1
+    ),
     colourpicker::colourInput(
       ns("plot_color"),
       "Plot colour",
@@ -2049,6 +2057,150 @@ deNovo_server <- function(id) {
       },
       contentType = "application/zip"
     )
+
+    # ══════════════════════════════════════════════════════════════════════
+    # MODIFICATION DIAGNOSTIC
+    # ══════════════════════════════════════════════════════════════════════
+    mod_diag_data <- reactive({
+      d <- data()
+      req(d, nrow(d) > 0)
+      req(all(
+        c("sequence", "stripped_sequence", "retention_time", "filename") %in%
+          names(d)
+      ))
+
+      d_mod <- d |>
+        dplyr::filter(
+          !is.na(is_modified) & is_modified == TRUE,
+          !is.na(retention_time)
+        ) |>
+        dplyr::select(stripped_sequence, sequence, retention_time, filename) |>
+        dplyr::rename(
+          peptide = stripped_sequence,
+          mod_seq = sequence,
+          rt_mod = retention_time,
+          sample_name = filename
+        )
+
+      d_unmod <- d |>
+        dplyr::filter(is.na(is_modified) | is_modified == FALSE) |>
+        dplyr::group_by(stripped_sequence, filename) |>
+        dplyr::summarise(
+          rt_unmod = median(retention_time, na.rm = TRUE),
+          .groups = "drop"
+        ) |>
+        dplyr::rename(peptide = stripped_sequence, sample_name = filename)
+
+      dplyr::inner_join(d_mod, d_unmod, by = c("peptide", "sample_name")) |>
+        dplyr::mutate(
+          delta_rt = abs(rt_mod - rt_unmod),
+          classification = dplyr::if_else(
+            delta_rt <= input$rt_tolerance,
+            "Suspected Artifact",
+            "Sample-Derived"
+          )
+        )
+    })
+
+    mod_diag_plot_obj <- reactive({
+      paired <- mod_diag_data()
+      req(paired, nrow(paired) > 0)
+
+      top_peptides <- paired |>
+        dplyr::group_by(sample_name, peptide) |>
+        dplyr::summarise(
+          max_delta = max(delta_rt, na.rm = TRUE),
+          .groups = "drop"
+        ) |>
+        dplyr::group_by(sample_name) |>
+        dplyr::slice_max(order_by = max_delta, n = 30) |>
+        dplyr::pull(peptide) |>
+        unique()
+
+      plot_data <- paired |> dplyr::filter(peptide %in% top_peptides)
+      req(nrow(plot_data) > 0)
+
+      ggplot(plot_data, aes(y = reorder(peptide, delta_rt))) +
+        geom_segment(
+          aes(
+            x = rt_unmod,
+            xend = rt_mod,
+            yend = reorder(peptide, delta_rt),
+            color = classification
+          ),
+          linewidth = 0.7
+        ) +
+        geom_point(aes(x = rt_unmod), color = "grey50", size = 2) +
+        geom_point(aes(x = rt_mod, color = classification), size = 2.5) +
+        scale_color_manual(
+          values = c(
+            "Suspected Artifact" = "#e74c3c",
+            "Sample-Derived" = "#2ecc71"
+          ),
+          name = "Classification"
+        ) +
+        labs(
+          title = "RT shift profile — modified vs unmodified (Casanovo)",
+          x = "Retention time (min)",
+          y = "Peptide sequence (stripped)",
+          caption = paste0(
+            "ΔRT threshold: ",
+            input$rt_tolerance,
+            " min | Artifact if |ΔRT| ≤ threshold"
+          )
+        ) +
+        facet_wrap(~sample_name, ncol = 2, scales = "free") +
+        theme_dn() +
+        theme(
+          axis.text.y = element_text(size = 7),
+          legend.position = "bottom",
+          plot.caption = element_text(size = 12, face = "bold")
+        )
+    })
+
+    output$mod_diag_plot_ui <- renderUI({
+      paired <- tryCatch(mod_diag_data(), error = function(e) NULL)
+      hide_sp("sp_moddiag")
+      if (is.null(paired) || nrow(paired) == 0) {
+        return(tags$p(
+          style = "color:#adb5bd;text-align:center;padding:20px;",
+          "No paired modified/unmodified peptides found. Load mzTab files and ensure they contain 'retention_time' and modification data."
+        ))
+      }
+      n_samples <- dplyr::n_distinct(paired$sample_name)
+      dynamic_h <- max(400L, min(n_samples * 500L, 2000L))
+      plotOutput(ns("mod_diag_plot"), height = paste0(dynamic_h, "px"))
+    })
+
+    output$mod_diag_plot <- renderPlot({
+      mod_diag_plot_obj()
+    })
+
+    output$mod_diag_table <- DT::renderDataTable({
+      paired <- mod_diag_data()
+      req(paired, nrow(paired) > 0)
+      tbl <- paired |>
+        dplyr::select(
+          sample_name,
+          peptide,
+          mod_seq,
+          rt_unmod,
+          rt_mod,
+          delta_rt,
+          classification
+        ) |>
+        dplyr::arrange(dplyr::desc(delta_rt))
+      DT::datatable(
+        tbl,
+        rownames = FALSE,
+        filter = "top",
+        options = list(pageLength = 20, scrollX = TRUE)
+      ) |>
+        DT::formatRound(
+          columns = c("rt_unmod", "rt_mod", "delta_rt"),
+          digits = 3
+        )
+    })
   })
 }
 
