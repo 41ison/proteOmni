@@ -535,10 +535,10 @@ ui <- dashboardPage(
               tags$ul(
                 style = "padding-left:20px;line-height:1.6;",
                 tags$li(
-                  "Chaves AFA. PSManalyst: A Dashboard for Visual Quality Control of FragPipe Results. J Proteome Res. 2025 Sep 5;24(9):4344-4346. doi: 10.1021/acs.jproteome.5c00557. Epub 2025 Aug 15. PMID: 40815682."
+                  "Chaves AFA. PSManalyst: A Dashboard for Visual Quality Control of FragPipe Results. J Proteome Res. 2025;24(9):4344-4346. doi: 10.1021/acs.jproteome.5c00557."
                 ),
                 tags$li(
-                  "Moschem JDC, de Barros BCSC, Serrano SMT, Chaves AFA. Decoding the Impact of Isolation Window Selection and QuantUMS Filtering in DIA-NN for DIA Quantification of Peptides and Proteins. J Proteome Res. 2025 Aug 1;24(8):3860-3873. doi: 10.1021/acs.jproteome.5c00009. Epub 2025 Jul 8. PMID: 40629671."
+                  "Moschem JDC, de Barros BCSC, Serrano SMT, Chaves AFA. Decoding the Impact of Isolation Window Selection and QuantUMS Filtering in DIA-NN for DIA Quantification of Peptides and Proteins. J Proteome Res. 2025;24(8):3860-3873. doi: 10.1021/acs.jproteome.5c00009."
                 )
               )
             )

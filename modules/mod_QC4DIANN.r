@@ -89,6 +89,20 @@ QC4DIANN_sidebar_ui <- function(id) {
         max = 5,
         value = 0.5,
         step = 0.1
+      ),
+      numericInput(
+        ns("n_peptides_plot"),
+        "Peptides to plot (top N)",
+        value = 30,
+        min = 5,
+        max = 500,
+        step = 5
+      ),
+      downloadButton(
+        ns("download_mod_diag_plot"),
+        tagList(icon("download"), " Download Plot (.png)"),
+        class = "dl-btn",
+        style = "width:90%;margin-top:8px;"
       )
     )
   )
@@ -489,12 +503,18 @@ QC4DIANN_server <- function(id) {
       # Filters
       data_parquet <- data_parquet[
         Lib.PG.Q.Value <= 0.01 &
-        Lib.Q.Value <= 0.01 &
-        PG.Q.Value <= 0.01 &
-        # If input is null, use zero else use the user input
-        PG.MaxLFQ.Quality >= ifelse(is.null(input$PG.MaxLFQ.Quality), 0, input$PG.MaxLFQ.Quality) &
-        # If input is null, use zero else use the user input
-        Empirical.Quality >= ifelse(is.null(input$Empirical.Quality), 0, input$Empirical.Quality)
+          Lib.Q.Value <= 0.01 &
+          PG.Q.Value <= 0.01 &
+          # If input is null, use zero else use the user input
+          PG.MaxLFQ.Quality >=
+            ifelse(
+              is.null(input$PG.MaxLFQ.Quality),
+              0,
+              input$PG.MaxLFQ.Quality
+            ) &
+          # If input is null, use zero else use the user input
+          Empirical.Quality >=
+            ifelse(is.null(input$Empirical.Quality), 0, input$Empirical.Quality)
       ]
 
       # TODO: input$cRAP was not implemented yet #######
@@ -628,14 +648,14 @@ QC4DIANN_server <- function(id) {
       req(input$report)
       data_parquet <- arrow::read_parquet(input$report$datapath) %>%
         data.table::as.data.table() # Dataset must be a data.table from data.table package
-      
+
       # Filters
       data_parquet <- data_parquet[
         Lib.PG.Q.Value <= 0.01 &
-        Lib.Q.Value <= 0.01 &
-        PG.Q.Value <= 0.01 
-      ]    
-    
+          Lib.Q.Value <= 0.01 &
+          PG.Q.Value <= 0.01
+      ]
+
       # Mutate
       data_parquet <- data_parquet[, File.Name := Run]
     })
@@ -1887,11 +1907,13 @@ QC4DIANN_server <- function(id) {
         paste0("filtered_protein_matrix_", Sys.Date(), ".tsv")
       },
       content = function(file) {
-        data.table::fwrite(as.data.frame(unique_genes()) %>%
+        data.table::fwrite(
+          as.data.frame(unique_genes()) %>%
             tibble::rownames_to_column("protein_id"),
-        file = file,
-        sep = ",",
-        na = "NA")
+          file = file,
+          sep = ",",
+          na = "NA"
+        )
       }
     )
 
@@ -1917,6 +1939,29 @@ QC4DIANN_server <- function(id) {
             dpi = 300
           )
         }
+      }
+    )
+
+    output$download_mod_diag_plot <- downloadHandler(
+      filename = function() {
+        paste0("mod_diagnostic_", Sys.Date(), ".png")
+      },
+      content = function(file) {
+        obj <- mod_diag_plot_obj()
+        req(obj)
+        paired <- mod_diag_data()
+        n_samp <- dplyr::n_distinct(paired$sample_name)
+        n_pepts <- length(mod_diag_visible_peptides())
+        h_in <- max(6, n_samp * 3 + n_pepts * 0.18)
+        ggsave(
+          file,
+          obj,
+          width = 14,
+          height = min(h_in, 30),
+          bg = "white",
+          device = "png",
+          dpi = 300
+        )
       }
     )
 
@@ -1960,30 +2005,56 @@ QC4DIANN_server <- function(id) {
         )
     })
 
+    # ── Shared table data for DT + plot ──────────────────────────────────────
+    mod_diag_table_data <- reactive({
+      paired <- mod_diag_data()
+      req(paired, nrow(paired) > 0)
+      paired |>
+        dplyr::select(
+          sample_name,
+          peptide,
+          mod_seq,
+          rt_unmod,
+          rt_mod,
+          delta_rt,
+          classification
+        ) |>
+        dplyr::arrange(dplyr::desc(delta_rt))
+    })
+
+    # ── Peptides visible in the DT (respects user filter + sort) ─────────────
+    mod_diag_visible_peptides <- reactive({
+      tbl <- mod_diag_table_data()
+      n_plot <- max(1L, as.integer(input$n_peptides_plot %||% 30L))
+      row_idx <- input$mod_diag_table_rows_all # NULL until DT renders
+      if (is.null(row_idx)) {
+        idx <- seq_len(min(n_plot, nrow(tbl)))
+      } else {
+        idx <- row_idx[seq_len(min(n_plot, length(row_idx)))]
+      }
+      unique(tbl$peptide[idx])
+    })
+
     mod_diag_plot_obj <- reactive({
       paired <- mod_diag_data()
       req(paired, nrow(paired) > 0)
 
-      top_peptides <- paired |>
-        dplyr::group_by(sample_name, peptide) |>
-        dplyr::summarise(
-          max_delta = max(delta_rt, na.rm = TRUE),
-          .groups = "drop"
-        ) |>
-        dplyr::group_by(sample_name) |>
-        dplyr::slice_max(order_by = max_delta, n = 30) |>
-        dplyr::pull(peptide) |>
-        unique()
+      vis_peptides <- mod_diag_visible_peptides()
+      req(length(vis_peptides) > 0)
 
-      plot_data <- paired |> dplyr::filter(peptide %in% top_peptides)
+      plot_data <- paired |>
+        dplyr::filter(peptide %in% vis_peptides) |>
+        dplyr::mutate(
+          peptide = factor(peptide, levels = rev(vis_peptides))
+        )
       req(nrow(plot_data) > 0)
 
-      ggplot(plot_data, aes(y = reorder(peptide, delta_rt))) +
+      ggplot(plot_data, aes(y = peptide)) +
         geom_segment(
           aes(
             x = rt_unmod,
             xend = rt_mod,
-            yend = reorder(peptide, delta_rt),
+            yend = peptide,
             color = classification
           ),
           linewidth = 0.7
@@ -2042,30 +2113,21 @@ QC4DIANN_server <- function(id) {
       mod_diag_plot_obj()
     })
 
-    output$mod_diag_table <- DT::renderDataTable({
-      paired <- mod_diag_data()
-      req(paired, nrow(paired) > 0)
-      tbl <- paired |>
-        dplyr::select(
-          sample_name,
-          peptide,
-          mod_seq,
-          rt_unmod,
-          rt_mod,
-          delta_rt,
-          classification
+    output$mod_diag_table <- DT::renderDT(
+      {
+        tbl <- mod_diag_table_data()
+        DT::datatable(
+          tbl,
+          rownames = FALSE,
+          filter = "top",
+          options = list(pageLength = 20, scrollX = TRUE)
         ) |>
-        dplyr::arrange(dplyr::desc(delta_rt))
-      DT::datatable(
-        tbl,
-        rownames = FALSE,
-        filter = "top",
-        options = list(pageLength = 20, scrollX = TRUE)
-      ) |>
-        DT::formatRound(
-          columns = c("rt_unmod", "rt_mod", "delta_rt"),
-          digits = 3
-        )
-    })
+          DT::formatRound(
+            columns = c("rt_unmod", "rt_mod", "delta_rt"),
+            digits = 3
+          )
+      },
+      server = TRUE
+    )
   })
 }
