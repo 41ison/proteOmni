@@ -14,7 +14,7 @@ compute_cv_mtx <- function(protein_matrix, group_labels) {
   return(cv_results)
 }
 
-groupwise_imputation <- function(data, group_labels) {
+groupwise_imputation <- function(data, group_labels, verbose = TRUE) {
   #If the dataset has zero NAs, don't waste time trying to impute
   if (sum(is.na(data)) == 0) {
     return(data)
@@ -29,10 +29,16 @@ groupwise_imputation <- function(data, group_labels) {
     if (nrow(group_data_filtered) > 0) {
       imputed_group <- missForest::missForest(
         as.data.frame(t(group_data_filtered)),
-        verbose = FALSE
+        verbose = TRUE
       )$ximp
       imputed_data[keep_rows, group_cols] <- t(imputed_group)
+  
+    if (verbose) message(sprintf("         Done."))
+  }
     }
+  }
+    if (verbose) {
+    message("Group-wise imputation complete.")
   }
   return(imputed_data)
 }
