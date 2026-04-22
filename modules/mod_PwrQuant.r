@@ -26,18 +26,19 @@ groupwise_imputation <- function(data, group_labels, verbose = TRUE) {
     group_data <- data[, group_cols, drop = FALSE]
     keep_rows <- !apply(group_data, 1, function(x) all(is.na(x)))
     group_data_filtered <- group_data[keep_rows, , drop = FALSE]
+
     if (nrow(group_data_filtered) > 0) {
       imputed_group <- missForest::missForest(
         as.data.frame(t(group_data_filtered)),
-        verbose = TRUE
+        verbose = verbose
       )$ximp
       imputed_data[keep_rows, group_cols] <- t(imputed_group)
-  
-    if (verbose) message(sprintf("         Done."))
-  }
+
+      if (verbose) message(sprintf("         Done."))
     }
   }
-    if (verbose) {
+
+  if (verbose) {
     message("Group-wise imputation complete.")
   }
   return(imputed_data)
@@ -562,7 +563,11 @@ PwrQuant_server <- function(id) {
     raw_matrix <- reactive({
       req(input$matrix_file)
       show_spinners()
-      df <- data.table::fread(input$matrix_file$datapath, header = TRUE, quote = "")
+      df <- data.table::fread(
+        input$matrix_file$datapath,
+        header = TRUE,
+        quote = ""
+      )
 
       # Drop rows where the first column (representing IDs) is NA
       df <- df[!is.na(df[[1]]), ]
@@ -606,7 +611,13 @@ PwrQuant_server <- function(id) {
               disable = list(columns = c(0)) # Disable editing of the Sample (original ID) column
             ),
             rownames = FALSE,
-            options = list(dom = "t", paging = FALSE, ordering = FALSE, autoWidth = FALSE, scrollX = TRUE),
+            options = list(
+              dom = "t",
+              paging = FALSE,
+              ordering = FALSE,
+              autoWidth = FALSE,
+              scrollX = TRUE
+            ),
             class = "display compact"
           )
         },
@@ -1754,7 +1765,12 @@ PwrQuant_server <- function(id) {
         paste0("limma_results_", Sys.Date(), ".tsv")
       },
       content = function(file) {
-        data.table::fwrite(limma_results_ev()$limma_results, file = file, sep = "\t", na = "NA")
+        data.table::fwrite(
+          limma_results_ev()$limma_results,
+          file = file,
+          sep = "\t",
+          na = "NA"
+        )
       }
     )
 
