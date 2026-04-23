@@ -1,7 +1,7 @@
 ## proteOmni — Unified Proteomics QC Dashboard
 ## Modules: PSManalyst (FragPipe - DDA QC), QC4DIANN (DIA-NN - DIA QC),
-##          deNovo (Casanovo - de novo MS/MS), PwrQuant (limma + ORA),
-##          MaxQuant (MaxQuant - DDA QC), InstaNovo (InstaNovo - de novo MS/MS),
+##          deNovo (Casanovo - de novo analysis), PwrQuant (limma + ORA),
+##          MaxQuant (MaxQuant - DDA QC), InstaNovo (InstaNovo - de novo analysis),
 ##          EncyclopeDIA (EncyclopeDIA - DIA), Sage (Sage - DDA/DIA QC)
 
 # ── Package installation ─────────────────────────────────────────────────────
@@ -9,7 +9,6 @@ options(repos = c(CRAN = "https://cran.rstudio.com/"))
 CRAN_packages <- c(
   "shiny",
   "shinydashboard",
-  "shinydashboardPlus",
   "shinyjs",
   "fresh",
   "devtools",
@@ -34,17 +33,12 @@ CRAN_packages <- c(
   "gridExtra",
   "scales",
   "lavaan",
-  "rhandsontable",
   "naniar",
   "patchwork",
   "pwr",
   "missForest",
   "data.table",
-  "GGally",
-  "ape",
-  "ggiraph",
-  "ggforce",
-  "ggridges"
+  "GGally"
 )
 
 not_inst <- CRAN_packages[
@@ -357,6 +351,7 @@ omni_css <- "
 
 # ── UI ────────────────────────────────────────────────────────────────────────
 ui <- dashboardPage(
+  title = "proteOmni",
   skin = "blue",
   dashboardHeader(
     title = tags$span(
@@ -368,7 +363,6 @@ ui <- dashboardPage(
   dashboardSidebar(
     width = 290,
     useShinyjs(),
-    tags$head(tags$style(HTML(omni_css))),
     use_theme(omni_theme),
     sidebarMenu(
       id = "main_menu",
@@ -403,6 +397,11 @@ ui <- dashboardPage(
     Fasta_sidebar_ui("global_fasta")
   ),
   dashboardBody(
+    tags$head(
+      tags$title("proteOmni"),
+      tags$link(rel = "icon", type = "image/svg+xml", href = "favicon.svg"),
+      tags$style(HTML(omni_css))
+    ),
     tabItems(
       # ── Home ──────────────────────────────────────────────────────────────
       tabItem(

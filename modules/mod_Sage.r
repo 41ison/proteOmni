@@ -14,7 +14,6 @@ suppressPackageStartupMessages({
   library(data.table)
   library(arrow)
   library(ggpointdensity)
-  library(ggridges)
   library(ggtext)
   library(DT)
 })
@@ -199,8 +198,25 @@ Sage_body_ui <- function(id) {
             solidHeader = TRUE,
             width = 12,
             fluidRow(
-              column(4, selectInput(ns("mod_diag_sample"), "Select Sample", choices = NULL)),
-              column(4, numericInput(ns("mod_diag_top_n"), "Top N Peptides", value = 30, min = 5, max = 100, step = 5))
+              column(
+                4,
+                selectInput(
+                  ns("mod_diag_sample"),
+                  "Select Sample",
+                  choices = NULL
+                )
+              ),
+              column(
+                4,
+                numericInput(
+                  ns("mod_diag_top_n"),
+                  "Top N Peptides",
+                  value = 30,
+                  min = 5,
+                  max = 100,
+                  step = 5
+                )
+              )
             ),
             div(
               class = "plot-wrap",
@@ -268,7 +284,11 @@ Sage_server <- function(id, fasta_digest) {
             if (ext == "parquet") {
               df <- arrow::read_parquet(input$sage_file$datapath)
             } else {
-              df <- data.table::fread(input$sage_file$datapath, sep = "\t", header = TRUE)
+              df <- data.table::fread(
+                input$sage_file$datapath,
+                sep = "\t",
+                header = TRUE
+              )
             }
 
             if (
