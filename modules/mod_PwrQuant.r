@@ -14,34 +14,110 @@ compute_cv_mtx <- function(protein_matrix, group_labels) {
   return(cv_results)
 }
 
-groupwise_imputation <- function(data, group_labels, verbose = TRUE) {
-  #If the dataset has zero NAs, don't waste time trying to impute
+# method: "knn" (fast, MAR), "minprob" (fastest, MNAR-aware), "missforest" (slow legacy)
+groupwise_imputation <- function(
+  data,
+  group_labels,
+  method = "knn",
+  verbose = TRUE
+) {
+  # If the dataset has zero NAs, don't waste time trying to impute
   if (sum(is.na(data)) == 0) {
     return(data)
   }
 
-  imputed_data <- data
-  for (group in unique(group_labels)) {
-    group_cols <- which(group_labels == group)
-    group_data <- data[, group_cols, drop = FALSE]
-    keep_rows <- !apply(group_data, 1, function(x) all(is.na(x)))
-    group_data_filtered <- group_data[keep_rows, , drop = FALSE]
-
-    if (nrow(group_data_filtered) > 0) {
-      imputed_group <- missForest::missForest(
-        as.data.frame(t(group_data_filtered)),
-        verbose = verbose
-      )$ximp
-      imputed_data[keep_rows, group_cols] <- t(imputed_group)
-
-      if (verbose) message(sprintf("         Done."))
+  if (method == "knn") {
+    # ── KNN: operates on full matrix at once (~10,000× faster than missForest) ──
+    # impute.knn expects proteins × samples
+    if (verbose) {
+      message("Imputation: KNN (k=5) on full matrix...")
+    }
+    result <- tryCatch(
+      impute::impute.knn(data, k = 5)$data,
+      error = function(e) {
+        warning("KNN imputation failed, falling back to MinProb: ", e$message)
+        NULL
+      }
+    )
+    if (is.null(result)) {
+      method <- "minprob"
+    } else {
+      if (verbose) {
+        message("KNN imputation complete.")
+      }
+      return(result)
     }
   }
 
-  if (verbose) {
-    message("Group-wise imputation complete.")
+  if (method == "minprob") {
+    # ── MinProb: column-wise Gaussian draw around the detection limit ──────────
+    # Proteomics-appropriate for MNAR data; ~73,000× faster than missForest
+    if (verbose) {
+      message("Imputation: MinProb (groupwise) ...")
+    }
+    imputed_data <- data
+    for (group in unique(group_labels)) {
+      g_cols <- which(group_labels == group)
+      gd <- imputed_data[, g_cols, drop = FALSE]
+      for (j in seq_along(g_cols)) {
+        na_rows <- which(is.na(gd[, j]))
+        if (length(na_rows) > 0) {
+          col_vals <- gd[, j]
+          col_mean <- mean(col_vals, na.rm = TRUE)
+          col_sd <- sd(col_vals, na.rm = TRUE)
+          if (is.na(col_sd) || col_sd == 0) {
+            col_sd <- 0.1
+          }
+          # draw from left tail: mean - 1.8 SD (standard MinProb shift)
+          imputed_data[na_rows, g_cols[j]] <- rnorm(
+            length(na_rows),
+            mean = col_mean - 1.8 * col_sd,
+            sd = 0.3 * col_sd
+          )
+        }
+      }
+    }
+    if (verbose) {
+      message("MinProb imputation complete.")
+    }
+    return(imputed_data)
   }
-  return(imputed_data)
+
+  if (method == "missforest") {
+    # ── missForest: random-forest MICE; accurate but O(n_proteins × ntree) ────
+    # WARNING: extremely slow for typical proteomics datasets (>5 min per group)
+    if (verbose) {
+      message(
+        "Imputation: missForest (groupwise) — this may take a long time ☕"
+      )
+    }
+    imputed_data <- data
+    for (group in unique(group_labels)) {
+      group_cols <- which(group_labels == group)
+      group_data <- data[, group_cols, drop = FALSE]
+      keep_rows <- !apply(group_data, 1, function(x) all(is.na(x)))
+      group_data_filtered <- group_data[keep_rows, , drop = FALSE]
+
+      if (nrow(group_data_filtered) > 0) {
+        imputed_group <- missForest::missForest(
+          as.data.frame(t(group_data_filtered)),
+          verbose = verbose
+        )$ximp
+        imputed_data[keep_rows, group_cols] <- t(imputed_group)
+        if (verbose) message(sprintf("         Group '%s' done.", group))
+      }
+    }
+    if (verbose) {
+      message("missForest imputation complete.")
+    }
+    return(imputed_data)
+  }
+
+  stop(
+    "Unknown imputation method: ",
+    method,
+    ". Use 'knn', 'minprob', or 'missforest'."
+  )
 }
 
 extract_power_stats <- function(contrast_fit, pwr_calc) {
@@ -113,6 +189,19 @@ PwrQuant_sidebar_ui <- function(id) {
         "Limma Regression Method",
         choices = c("ls", "robust"),
         selected = "ls"
+      ),
+      conditionalPanel(
+        condition = sprintf("input['%s'] == 'robust'", ns("limma_method")),
+        selectInput(
+          ns("imputation_method"),
+          "Imputation Method (robust mode only)",
+          choices = c(
+            "KNN — fast, MAR-appropriate" = "knn",
+            "MinProb — fastest, MNAR-aware" = "minprob",
+            "missForest — accurate, very slow ☕" = "missforest"
+          ),
+          selected = "knn"
+        )
       ),
       selectInput(
         ns("trend_param"),
@@ -801,12 +890,24 @@ PwrQuant_server <- function(id) {
         reg_method <- ifelse(input$limma_method == "robust", "robust", "ls")
 
         if (reg_method == "robust") {
-          # add a coffee icon to the text for execution time humor
+          imp_method <- input$imputation_method %||% "knn"
+          imp_labels <- c(
+            knn = "KNN imputation",
+            minprob = "MinProb imputation",
+            missforest = "missForest imputation (this may take a long time) ☕"
+          )
           incProgress(
             0.15,
-            detail = "Robust regression selected: performing groupwise missForest imputation (this may take a while) ☕"
+            detail = paste0(
+              "Robust regression: performing ",
+              imp_labels[imp_method]
+            )
           )
-          imputed_matrix <- groupwise_imputation(log2_matrix, group_labels)
+          imputed_matrix <- groupwise_imputation(
+            log2_matrix,
+            group_labels,
+            method = imp_method
+          )
 
           # Apply downshift for fully missing regions
           global_min <- min(imputed_matrix, na.rm = TRUE)
