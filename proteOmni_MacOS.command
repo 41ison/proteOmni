@@ -5,12 +5,12 @@
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 echo ""
-echo "  ╔══════════════════════════════════════════╗"
-echo "  ║   ♞  proteOmni — Proteomics QC Dashboard ║"
-echo "  ╚══════════════════════════════════════════╝"
+echo "  ╔══════════════════════════════════════════════════╗"
+echo "  ║     proteOmni — Proteomics QC Dashboard          ║"
+echo "  ╚══════════════════════════════════════════════════╝"
 echo ""
-echo "  Starting proteOmni from: $SCRIPT_DIR"
-echo "  Opening in your default browser..."
+echo "  🚀  Starting proteOmni from: $SCRIPT_DIR"
+echo "  🌐  Opening in your default browser..."
 echo ""
 
 cd "$SCRIPT_DIR"
