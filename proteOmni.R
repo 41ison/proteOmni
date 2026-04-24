@@ -59,6 +59,9 @@ if (!requireNamespace("Biostrings", quietly = TRUE)) {
 if (!requireNamespace("sva", quietly = TRUE)) {
   BiocManager::install("sva", update = FALSE, ask = FALSE)
 }
+if (!requireNamespace("impute", quietly = TRUE)) {
+  BiocManager::install("impute", update = FALSE, ask = FALSE)
+}
 if (!requireNamespace("ComplexHeatmap", quietly = TRUE)) {
   BiocManager::install("ComplexHeatmap", update = FALSE, ask = FALSE)
 }
@@ -86,6 +89,7 @@ library(arrow)
 library(tidyverse)
 library(tidytext)
 library(janitor)
+library(impute)
 library(ggpointdensity)
 library(ggtext)
 library(ggseqlogo)
