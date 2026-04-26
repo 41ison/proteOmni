@@ -27,52 +27,69 @@ groupwise_imputation <- function(
   }
 
   if (method == "knn") {
-    # ── KNN: operates on full matrix at once (~10,000× faster than missForest) ──
-    # impute.knn expects proteins × samples
+    # ── KNN: groupwise, proteins × samples within each group ─────────────────
+    # Running per-group prevents cross-condition borrowing during imputation
     if (verbose) {
-      message("Imputation: KNN (k=5) on full matrix...")
+      message("Imputation: KNN (k=5, groupwise)...")
     }
-    result <- tryCatch(
-      impute::impute.knn(data, k = 5)$data,
-      error = function(e) {
-        warning("KNN imputation failed, falling back to MinProb: ", e$message)
-        NULL
+    imputed_data <- data
+    knn_failed <- FALSE
+    for (group in unique(group_labels)) {
+      g_cols <- which(group_labels == group)
+      g_mat <- data[, g_cols, drop = FALSE]
+      k_use <- min(5L, ncol(g_mat) - 1L)
+      result <- tryCatch(
+        impute::impute.knn(g_mat, k = k_use)$data,
+        error = function(e) {
+          warning(
+            "KNN imputation failed for group '",
+            group,
+            "', falling back to MinProb: ",
+            e$message
+          )
+          NULL
+        }
+      )
+      if (is.null(result)) {
+        knn_failed <- TRUE
+        break
       }
-    )
-    if (is.null(result)) {
+      imputed_data[, g_cols] <- result
+    }
+    if (knn_failed) {
       method <- "minprob"
     } else {
       if (verbose) {
         message("KNN imputation complete.")
       }
-      return(result)
+      return(imputed_data)
     }
   }
 
   if (method == "minprob") {
-    # ── MinProb: column-wise Gaussian draw around the detection limit ──────────
-    # Proteomics-appropriate for MNAR data; ~73,000× faster than missForest
+    # ── MinProb: protein-level (row-wise) Gaussian draw, groupwise ───────────
+    # Statistics are derived from each protein's own distribution within the
+    # group, not from the sample columns, to better reflect MNAR missingness patterns.
     if (verbose) {
-      message("Imputation: MinProb (groupwise) ...")
+      message("Imputation: MinProb (protein-level, groupwise) ...")
     }
     imputed_data <- data
     for (group in unique(group_labels)) {
       g_cols <- which(group_labels == group)
-      gd <- imputed_data[, g_cols, drop = FALSE]
-      for (j in seq_along(g_cols)) {
-        na_rows <- which(is.na(gd[, j]))
-        if (length(na_rows) > 0) {
-          col_vals <- gd[, j]
-          col_mean <- mean(col_vals, na.rm = TRUE)
-          col_sd <- sd(col_vals, na.rm = TRUE)
-          if (is.na(col_sd) || col_sd == 0) {
-            col_sd <- 0.1
+      for (i in seq_len(nrow(imputed_data))) {
+        row_vals <- imputed_data[i, g_cols]
+        na_pos <- which(is.na(row_vals))
+        if (length(na_pos) > 0) {
+          row_mean <- mean(row_vals, na.rm = TRUE)
+          row_sd <- sd(row_vals, na.rm = TRUE)
+          if (is.na(row_sd) || row_sd == 0) {
+            row_sd <- 0.1
           }
           # draw from left tail: mean - 1.8 SD (standard MinProb shift)
-          imputed_data[na_rows, g_cols[j]] <- rnorm(
-            length(na_rows),
-            mean = col_mean - 1.8 * col_sd,
-            sd = 0.3 * col_sd
+          imputed_data[i, g_cols[na_pos]] <- rnorm(
+            length(na_pos),
+            mean = row_mean - 1.8 * row_sd,
+            sd = 0.3 * row_sd
           )
         }
       }
@@ -84,8 +101,7 @@ groupwise_imputation <- function(
   }
 
   if (method == "missforest") {
-    # ── missForest: random-forest MICE; accurate but O(n_proteins × ntree) ────
-    # WARNING: extremely slow for typical proteomics datasets (>5 min per group)
+    # ── missForest: random-forest strategy, accurate but extremely slow ────
     if (verbose) {
       message(
         "Imputation: missForest (groupwise) — this may take a long time ☕"
@@ -2243,7 +2259,7 @@ PwrQuant_server <- function(id) {
                   theme_bw() +
                   labs(
                     x = "log₂FC",
-                    y = "-log<sub>10</sub>(adj. p-value)"
+                    y = "-log10(adj. p-value)"
                   ) +
                   theme(
                     text = element_text(size = 16),
