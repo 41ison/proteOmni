@@ -579,6 +579,45 @@ deNovo_server <- function(id) {
       plotOutput(ns("dynamic_plot_out"), height = paste0(dn_plot_h(), "px"))
     })
 
+    # ── Dispatch plot on button click ─────────────────────────────────────────
+    observeEvent(input$run_plot, {
+      shinyjs::show(id = "spi_main")
+    })
+
+    current_plot <- eventReactive(
+      input$run_plot,
+      {
+        switch(
+          input$plot_select,
+          plot_score = plot_score_obj(),
+          plot_aa_score = plot_aa_score_obj(),
+          plot_length = plot_length_obj(),
+          plot_charge = plot_charge_obj(),
+          plot_mz_error = plot_mz_error_obj(),
+          plot_score_vs_aa = plot_score_vs_aa_obj(),
+          plot_elbow = plot_elbow_obj(),
+          plot_rt_mz_error = plot_rt_mz_error_obj(),
+          plot_rt_density = plot_rt_density_obj(),
+          plot_mods = plot_mods_obj(),
+          plot_mod_pie = plot_mod_pie_obj(),
+          plot_gravy = plot_gravy_obj(),
+          plot_pi = plot_pi_obj(),
+          plot_score_length = plot_score_length_obj(),
+          plot_mz_score = plot_mz_score_obj(),
+          plot_aa_freq = plot_aa_freq_obj(),
+          plot_nterm = plot_nterm_obj(),
+          plot_cterm = plot_cterm_obj(),
+          plot_cooccurrence = plot_cooccurrence_obj()
+        )
+      },
+      ignoreNULL = TRUE
+    )
+
+    output$dynamic_plot_out <- renderPlot({
+      on.exit(shinyjs::hide(id = "spi_main"), add = TRUE)
+      current_plot()
+    })
+
     plot_score_obj <- reactive({
       d <- data()
       req(nrow(d) > 0)
@@ -1481,7 +1520,7 @@ deNovo_server <- function(id) {
     })
 
     # ── Download handler ─────────────────────────────────────────────────────────
-    output$download_plots <- downloadHandler(
+    output$download_plot <- downloadHandler(
       filename = function() paste0("deNovo_plots_", Sys.Date(), ".zip"),
       content = function(file) {
         td <- tempdir()
