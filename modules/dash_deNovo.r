@@ -1525,8 +1525,10 @@ deNovo_server <- function(id) {
       content = function(file) {
         td <- tempdir()
         d <- data()
+        n_files <- dplyr::n_distinct(d$filename)
+        dl_h <- max(12, ceiling(n_files / 3L) * 6L)
         fps <- character()
-        save_p <- function(nm, fn, w = 10, h = 6) {
+        save_p <- function(nm, fn, w = 16, h = dl_h) {
           fp <- file.path(td, nm)
           tryCatch(
             {
