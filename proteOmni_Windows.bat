@@ -7,12 +7,12 @@ REM Enable UTF-8 so emoji render in Windows Terminal / PowerShell
 chcp 65001 >nul
 
 echo.
-echo   ╔══════════════════════════════════════════════════╗
+echo   +--------------------------------------------------+
 echo          proteOmni - Proteomics QC Dashboard
-echo   ╚══════════════════════════════════════════════════╝
+echo   +--------------------------------------------------+
 echo.
-echo   🚀  Starting proteOmni...
-echo   🌐  Opening in your default browser...
+echo   ^>^>  Starting proteOmni...
+echo   ^>^>  Opening in your default browser...
 echo.
 
 cd /d "%~dp0"
