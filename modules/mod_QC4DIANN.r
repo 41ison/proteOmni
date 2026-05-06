@@ -686,10 +686,20 @@ QC4DIANN_server <- function(id) {
 
     fasta_data <- reactive({
       req(input$fasta_file)
-      seqinr::read.fasta(
-        input$fasta_file$datapath,
-        seqtype = "AA",
-        as.string = TRUE
+      tryCatch(
+        seqinr::read.fasta(
+          input$fasta_file$datapath,
+          seqtype = "AA",
+          as.string = TRUE
+        ),
+        error = function(e) {
+          showNotification(
+            paste("Failed to read FASTA:", e$message),
+            type = "error",
+            duration = 8
+          )
+          NULL
+        }
       )
     })
 
@@ -773,6 +783,9 @@ QC4DIANN_server <- function(id) {
           is.na(prot_id) ||
           nchar(prot_id) == 0
       ) {
+        return(rep(NA_character_, 8))
+      }
+      if (!prot_id %in% names(full_seqs)) {
         return(rep(NA_character_, 8))
       }
       seq <- full_seqs[[prot_id]]
@@ -1269,6 +1282,7 @@ QC4DIANN_server <- function(id) {
         "Y"
       )
       seqs <- fasta_data()
+      req(!is.null(seqs) && length(seqs) > 0)
       all_fasta_aa <- paste0(sapply(seqs, as.character), collapse = "")
       all_fasta_aa <- toupper(gsub("[^A-Za-z]", "", all_fasta_aa))
       aa_counts <- table(strsplit(all_fasta_aa, "")[[1]])
