@@ -26,6 +26,12 @@ QC4DIANN_sidebar_ui <- function(id) {
         min = 0,
         max = 3,
         step = 1
+      ),
+      actionButton(
+        ns("run_fasta_analysis"),
+        tagList(icon("dna"), " Run FASTA Analysis"),
+        class = "btn-primary",
+        style = "width:80%;margin-top:6px;"
       )
     ),
     tags$hr(style = "border-color:#2d3741;margin:4px 0;"),
@@ -687,9 +693,11 @@ QC4DIANN_server <- function(id) {
       )
     })
 
-    digest_fasta <- reactive({
+    digest_fasta <- eventReactive(input$run_fasta_analysis, {
       req(fasta_data())
-      mc <- max(0, min(3, as.integer(input$missed_cleavages)))
+      mc_raw <- input$missed_cleavages
+      req(!is.null(mc_raw), !is.na(mc_raw))
+      mc <- max(0L, min(3L, as.integer(mc_raw)))
       seqs <- fasta_data()
       purrr::imap_dfr(seqs, function(seq_obj, prot_id) {
         first_word <- strsplit(prot_id, "\\s+")[[1]][1]
@@ -794,7 +802,7 @@ QC4DIANN_server <- function(id) {
       )
     }
 
-    cleavage_windows <- reactive({
+    cleavage_windows <- eventReactive(input$run_fasta_analysis, {
       req(data(), fasta_data())
       full_seqs <- sapply(fasta_data(), function(x) toupper(as.character(x)[1]))
       names(full_seqs) <- sapply(names(full_seqs), function(n) {
