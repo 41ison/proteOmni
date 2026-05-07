@@ -48,7 +48,7 @@ if (length(not_inst)) {
   install.packages(not_inst)
 }
 if (!requireNamespace("diann", quietly = TRUE)) {
-  devtools::install_github("https://github.com/vdemichev/diann-rpackage")
+  pak::pak("https://github.com/vdemichev/diann-rpackage")
 }
 if (!requireNamespace("limma", quietly = TRUE)) {
   BiocManager::install("limma", update = FALSE, ask = FALSE)
