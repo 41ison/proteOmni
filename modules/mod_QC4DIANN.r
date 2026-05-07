@@ -234,7 +234,7 @@ QC4DIANN_ui <- function(id) {
                 id = ns("sp_pca"),
                 icon("spinner", class = "fa-spin")
               ),
-              plotlyOutput(ns("PCA"), height = WIDE_HEIGHT)
+              plotOutput(ns("PCA"), height = WIDE_HEIGHT)
             )
           ),
           box(
@@ -652,22 +652,22 @@ QC4DIANN_server <- function(id) {
         dplyr::mutate(File.Name = Run)
     })
 
-    PCA_label <- reactive({
-      unique_genes() %>%
-        log2() %>%
-        na.omit() %>%
-        t() %>%
-        as.data.frame(check.names = FALSE) %>%
-        tibble::rownames_to_column("Sample")
-    })
-
     pca_data <- reactive({
-      unique_genes() %>%
-        log2() %>%
-        na.omit() %>%
-        t() %>%
-        prcomp(scale. = TRUE) %>%
-        ggplot2::autoplot(data = PCA_label(), colour = "Sample", label = TRUE)
+      req(unique_genes())
+      mat <- unique_genes() %>% log2() %>% na.omit()
+      req(nrow(mat) >= 2, ncol(mat) >= 2)
+      pca_res <- prcomp(t(mat), scale. = TRUE)
+      scores <- as.data.frame(pca_res$x)
+      scores$Sample <- rownames(scores)
+      ve <- summary(pca_res)$importance[2, ] * 100
+      ggplot(scores, aes(x = PC1, y = PC2, colour = Sample)) +
+        geom_point(size = 3) +
+        ggrepel::geom_text_repel(aes(label = Sample), size = 3, max.overlaps = 20) +
+        labs(
+          x = paste0("PC1 (", round(ve[1], 1), "%)"),
+          y = paste0("PC2 (", round(ve[2], 1), "%)"),
+          colour = "Sample"
+        )
     })
 
     fasta_data <- reactive({
@@ -1765,10 +1765,10 @@ QC4DIANN_server <- function(id) {
     })
 
     # ── PCA ──
-    output$PCA <- renderPlotly({
+    output$PCA <- renderPlot({
       on.exit(hide_spinner("sp_pca"), add = TRUE)
       req(pca_data())
-      ggplotly(pca_data())
+      pca_data()
     })
 
     # ════════════════════════════════════════════════════════════════════════
