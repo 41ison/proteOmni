@@ -26,16 +26,9 @@ QC4DIANN_sidebar_ui <- function(id) {
         min = 0,
         max = 3,
         step = 1
-      ),
-      actionButton(
-        ns("run_fasta_analysis"),
-        tagList(icon("dna"), " Run FASTA Analysis"),
-        class = "btn-primary",
-        style = "width:80%;margin-top:6px;"
       )
     ),
     tags$hr(style = "border-color:#2d3741;margin:4px 0;"),
-
     tags$div(class = "sidebar-section-label", "QuantUMS Filters"),
     tags$div(
       style = "padding:0 16px;",
@@ -57,7 +50,6 @@ QC4DIANN_sidebar_ui <- function(id) {
       )
     ),
     tags$hr(style = "border-color:#2d3741;margin:4px 0;"),
-
     tags$div(class = "sidebar-section-label", "Interactive Viewer"),
     tags$div(
       style = "padding:0 16px;",
@@ -73,7 +65,6 @@ QC4DIANN_sidebar_ui <- function(id) {
       )
     ),
     tags$hr(style = "border-color:#2d3741;margin:4px 0;"),
-
     tags$div(class = "sidebar-section-label", "Downloads"),
     tags$div(
       style = "padding:0 16px;",
@@ -121,7 +112,6 @@ QC4DIANN_ui <- function(id) {
 
   tagList(
     fluidRow(infoBoxOutput(ns("info_box1"), width = 12)),
-
     tabsetPanel(
       id = ns("tabs"),
       type = "tabs",
@@ -503,39 +493,30 @@ QC4DIANN_server <- function(id) {
     # ════════════════════════════════════════════════════════════════════════
     data <- reactive({
       req(input$report)
-      data_parquet <- arrow::read_parquet(input$report$datapath) %>%
-        data.table::as.data.table() # Dataset must be a data.table from data.table package
+      data_parquet <- arrow::read_parquet(input$report$datapath)
 
-      # Filters
-      data_parquet <- data_parquet[
-        Lib.PG.Q.Value <= 0.01 &
-          Lib.Q.Value <= 0.01 &
-          PG.Q.Value <= 0.01 &
-          # If input is null, use zero else use the user input
-          PG.MaxLFQ.Quality >=
-            ifelse(
-              is.null(input$PG.MaxLFQ.Quality),
-              0,
-              input$PG.MaxLFQ.Quality
-            ) &
-          # If input is null, use zero else use the user input
-          Empirical.Quality >=
-            ifelse(is.null(input$Empirical.Quality), 0, input$Empirical.Quality)
-      ]
+      # Empirical.Quality is only present in newer DIA-NN versions;
+      # create it as 0 if absent so downstream code works uniformly
+      if (!"Empirical.Quality" %in% names(data_parquet)) {
+        data_parquet$Empirical.Quality <- 0
+      }
 
-      # TODO: input$cRAP was not implemented yet #######
-      # # If the user select to remove the cRAP, remove it
-      # if(input$cRAP) {
-      #   data_parquet <- data_parquet[!grepl("cRAP", Protein.Ids)]
-      # }
-
-      # Mutate
-      data_parquet <- data_parquet[, `:=`(
-        File.Name = Run,
-        peptide_length = nchar(Stripped.Sequence)
-      )]
-
-      # return(data_parquet) # is implicit, no need to declare it
+      data_parquet %>%
+        dplyr::filter(
+          Lib.PG.Q.Value <= 0.01,
+          Lib.Q.Value <= 0.01,
+          PG.Q.Value <= 0.01,
+          PG.MaxLFQ.Quality >= ifelse(
+            is.null(input$PG.MaxLFQ.Quality), 0, input$PG.MaxLFQ.Quality
+          ),
+          Empirical.Quality >= ifelse(
+            is.null(input$Empirical.Quality), 0, input$Empirical.Quality
+          )
+        ) %>%
+        dplyr::mutate(
+          File.Name = Run,
+          peptide_length = nchar(Stripped.Sequence)
+        )
     })
 
     proteins <- reactive({
@@ -555,7 +536,7 @@ QC4DIANN_server <- function(id) {
     unique_genes <- reactive({
       req(data())
       diann::diann_matrix(
-        data(),
+        as.data.frame(data()),
         id.header = "Protein.Ids",
         quantity.header = "Genes.MaxLFQ.Unique",
         proteotypic.only = FALSE,
@@ -574,13 +555,13 @@ QC4DIANN_server <- function(id) {
       req(unique_genes())
       raw <- unique_genes() %>%
         log2() %>%
-        as.data.frame() %>%
+        as.data.frame(check.names = FALSE) %>%
         tidyr::gather("Sample", "Intensity") %>%
         dplyr::mutate(norm = "Raw matrix")
       mad <- unique_genes() %>%
         log2() %>%
         limma::normalizeBetweenArrays(method = "scale") %>%
-        as.data.frame() %>%
+        as.data.frame(check.names = FALSE) %>%
         tidyr::gather("Sample", "Intensity") %>%
         dplyr::mutate(norm = "MAD normalised")
       dplyr::bind_rows(raw, mad) %>%
@@ -591,13 +572,16 @@ QC4DIANN_server <- function(id) {
 
     QuantUMS_scores <- reactive({
       req(input$report)
-      arrow::read_parquet(input$report$datapath) %>%
+      df <- arrow::read_parquet(input$report$datapath) %>%
         dplyr::filter(
           Lib.PG.Q.Value <= 0.01,
           Lib.Q.Value <= 0.01,
           PG.Q.Value <= 0.01,
           !stringr::str_detect(Protein.Ids, "cRAP")
-        ) %>%
+        )
+      # Empirical.Quality may not exist in older DIA-NN versions
+      if (!"Empirical.Quality" %in% names(df)) df$Empirical.Quality <- 0
+      df %>%
         dplyr::select(
           Run,
           Precursor.Id,
@@ -628,7 +612,7 @@ QC4DIANN_server <- function(id) {
       base_df <- function(mat, label) {
         mat %>%
           log2() %>%
-          as.data.frame() %>%
+          as.data.frame(check.names = FALSE) %>%
           tidyr::gather("Sample", "Intensity") %>%
           dplyr::mutate(missing = is.na(Intensity)) %>%
           dplyr::group_by(Sample) %>%
@@ -652,18 +636,20 @@ QC4DIANN_server <- function(id) {
 
     MS_corr <- reactive({
       req(input$report)
-      data_parquet <- arrow::read_parquet(input$report$datapath) %>%
-        data.table::as.data.table() # Dataset must be a data.table from data.table package
+      data_parquet <- arrow::read_parquet(input$report$datapath)
 
-      # Filters
-      data_parquet <- data_parquet[
-        Lib.PG.Q.Value <= 0.01 &
-          Lib.Q.Value <= 0.01 &
+      # Empirical.Quality may not exist in older DIA-NN versions
+      if (!"Empirical.Quality" %in% names(data_parquet)) {
+        data_parquet$Empirical.Quality <- 0
+      }
+
+      data_parquet %>%
+        dplyr::filter(
+          Lib.PG.Q.Value <= 0.01,
+          Lib.Q.Value <= 0.01,
           PG.Q.Value <= 0.01
-      ]
-
-      # Mutate
-      data_parquet <- data_parquet[, File.Name := Run]
+        ) %>%
+        dplyr::mutate(File.Name = Run)
     })
 
     PCA_label <- reactive({
@@ -671,7 +657,7 @@ QC4DIANN_server <- function(id) {
         log2() %>%
         na.omit() %>%
         t() %>%
-        as.data.frame() %>%
+        as.data.frame(check.names = FALSE) %>%
         tibble::rownames_to_column("Sample")
     })
 
@@ -693,13 +679,19 @@ QC4DIANN_server <- function(id) {
       )
     })
 
-    digest_fasta <- eventReactive(input$run_fasta_analysis, {
+    observeEvent(input$fasta_file, {
+      showNotification(
+        "FASTA loaded — digestion and cleavage window analysis running…",
+        duration = 5,
+        type = "message"
+      )
+    })
+
+    digest_fasta <- reactive({
       req(fasta_data())
-      mc_raw <- input$missed_cleavages
-      req(!is.null(mc_raw), !is.na(mc_raw))
-      mc <- max(0L, min(3L, as.integer(mc_raw)))
+      mc <- max(0L, min(3L, as.integer(input$missed_cleavages)))
       seqs <- fasta_data()
-      purrr::imap_dfr(seqs, function(seq_obj, prot_id) {
+      result <- purrr::imap_dfr(seqs, function(seq_obj, prot_id) {
         first_word <- strsplit(prot_id, "\\s+")[[1]][1]
         parts <- strsplit(first_word, "\\|")[[1]]
         clean_id <- if (length(parts) >= 2) parts[2] else parts[1]
@@ -723,6 +715,7 @@ QC4DIANN_server <- function(id) {
         }
         tibble::tibble(protein_id = clean_id, peptide = peps)
       })
+      result
     })
 
     peptide_type <- reactive({
@@ -738,7 +731,7 @@ QC4DIANN_server <- function(id) {
 
     peptide_mapping <- reactive({
       req(data(), peptide_type())
-      data() %>%
+      as.data.frame(data()) %>%
         dplyr::select(Run, Stripped.Sequence) %>%
         dplyr::distinct() %>%
         dplyr::left_join(
@@ -775,6 +768,9 @@ QC4DIANN_server <- function(id) {
       ) {
         return(rep(NA_character_, 8))
       }
+      if (!(prot_id %in% names(full_seqs))) {
+        return(rep(NA_character_, 8))
+      }
       seq <- full_seqs[[prot_id]]
       if (is.null(seq) || length(seq) == 0 || is.na(seq[1])) {
         return(rep(NA_character_, 8))
@@ -802,7 +798,7 @@ QC4DIANN_server <- function(id) {
       )
     }
 
-    cleavage_windows <- eventReactive(input$run_fasta_analysis, {
+    cleavage_windows <- reactive({
       req(data(), fasta_data())
       full_seqs <- sapply(fasta_data(), function(x) toupper(as.character(x)[1]))
       names(full_seqs) <- sapply(names(full_seqs), function(n) {
@@ -810,7 +806,7 @@ QC4DIANN_server <- function(id) {
         p <- strsplit(fw, "\\|")[[1]]
         if (length(p) >= 2) p[2] else p[1]
       })
-      identified <- data() %>%
+      identified <- as.data.frame(data()) %>%
         dplyr::select(Run, Stripped.Sequence, Protein.Ids) %>%
         dplyr::distinct() %>%
         dplyr::mutate(
@@ -1049,7 +1045,7 @@ QC4DIANN_server <- function(id) {
     plot8_obj <- reactive({
       req(unique_genes())
       unique_genes() %>%
-        as.data.frame() %>%
+        as.data.frame(check.names = FALSE) %>%
         tidyr::gather("Sample", "Intensity") %>%
         dplyr::mutate(missing = is.na(Intensity)) %>%
         dplyr::group_by(Sample) %>%
@@ -1215,8 +1211,7 @@ QC4DIANN_server <- function(id) {
     current_qc_plot_obj <- eventReactive(input$run_qc_plot, {
       req(input$qc_plot_select)
       show_spinner("sp_qc_main")
-      switch(
-        input$qc_plot_select,
+      switch(input$qc_plot_select,
         "plot1" = plot1_obj(),
         "plot2" = plot2_obj(),
         "plot3" = plot3_obj(),
@@ -1279,8 +1274,9 @@ QC4DIANN_server <- function(id) {
       colnames(expected_freq) <- c("AA", "Frequency")
       expected_freq$Type <- "Expected (FASTA)"
 
-      obs_list <- lapply(unique(data()$Run), function(r) {
-        p_data <- data()[data()$Run == r, ] %>%
+      d_df <- as.data.frame(data())
+      obs_list <- lapply(unique(d_df$Run), function(r) {
+        p_data <- d_df[d_df$Run == r, ] %>%
           dplyr::select(Stripped.Sequence) %>%
           dplyr::distinct()
         pep_aa <- paste0(p_data$Stripped.Sequence, collapse = "")
@@ -1340,25 +1336,36 @@ QC4DIANN_server <- function(id) {
     # ════════════════════════════════════════════════════════════════════════
     observe({
       req(data(), input$fasta_file)
-      identified_proteins <- unique(unlist(strsplit(data()$Protein.Ids, ";")))
-      first_parts <- sapply(identified_proteins, function(x) {
-        p <- strsplit(x, "\\|")[[1]]
-        if (length(p) >= 2) p[2] else p[1]
-      })
-      valid_proteins <- first_parts[!is.na(first_parts)]
-      if (length(valid_proteins) > 0) {
-        updateSelectizeInput(
-          session,
-          "selected_protein",
-          choices = c("", sort(valid_proteins)),
-          server = TRUE
-        )
-      }
-      runs <- sort(unique(data()$Run))
-      updateSelectInput(
-        session,
-        "selected_sample_psv",
-        choices = c("All Samples", runs)
+      tryCatch(
+        {
+          d <- as.data.frame(data())
+          identified_proteins <- unique(unlist(strsplit(d$Protein.Ids, ";")))
+          first_parts <- sapply(identified_proteins, function(x) {
+            p <- strsplit(x, "\\|")[[1]]
+            if (length(p) >= 2) p[2] else p[1]
+          })
+          valid_proteins <- first_parts[!is.na(first_parts)]
+          if (length(valid_proteins) > 0) {
+            updateSelectizeInput(
+              session,
+              "selected_protein",
+              choices = c("", sort(valid_proteins)),
+              server = TRUE
+            )
+          }
+          runs <- sort(unique(d$Run))
+          updateSelectInput(
+            session,
+            "selected_sample_psv",
+            choices = c("All Samples", runs)
+          )
+        },
+        error = function(e) {
+          showNotification(
+            paste("Protein list update error:", e$message),
+            type = "error"
+          )
+        }
       )
     })
 
@@ -1374,8 +1381,9 @@ QC4DIANN_server <- function(id) {
       }
       pr_seq <- as.character(fasta_data()[[tix]])[1]
 
-      pep_df <- data()[
-        stringr::str_detect(data()$Protein.Ids, stringr::fixed(tp)),
+      d_df <- as.data.frame(data())
+      pep_df <- d_df[
+        stringr::str_detect(d_df$Protein.Ids, stringr::fixed(tp)),
       ]
       if (
         !is.null(input$selected_sample_psv) &&
@@ -1654,7 +1662,10 @@ QC4DIANN_server <- function(id) {
     # ── Exploratory Factor Analysis ──
     plot_efa_obj <- reactive({
       req(unique_genes(), input$efa_factors)
-      df <- unique_genes() %>% log2() %>% na.omit() %>% as.data.frame()
+      df <- unique_genes() %>%
+        log2() %>%
+        na.omit() %>%
+        as.data.frame(check.names = FALSE)
       tryCatch(
         {
           fit <- lavaan::efa(data = df, nfactors = input$efa_factors)
@@ -1715,9 +1726,11 @@ QC4DIANN_server <- function(id) {
     # ── Interactive scatter (Corr) ──
     output$Corr <- renderPlotly({
       req(unique_genes(), input$xcol, input$ycol)
+      cn <- colnames(unique_genes())
+      req(input$xcol %in% cn, input$ycol %in% cn)
       p <- unique_genes() %>%
         log2() %>%
-        as.data.frame() %>%
+        as.data.frame(check.names = FALSE) %>%
         ggplot(aes(x = !!sym(input$xcol), y = !!sym(input$ycol))) +
         geom_point(alpha = 0.6) +
         geom_smooth(method = "lm", se = FALSE, color = pal["red1"]) +
@@ -1883,28 +1896,39 @@ QC4DIANN_server <- function(id) {
 
     observe({
       req(input$fasta_file)
-      cw <- cleavage_windows()
-      runs <- unique(cw$Run)
-      for (i in seq_along(runs)) {
-        local({
-          rn <- runs[i]
-          oid <- paste0("seqlogo_run_", i)
-          output[[oid]] <- renderPlot({
-            sub_cw <- dplyr::filter(cw, Run == rn)
-            if (nrow(sub_cw) < 10) {
-              return(NULL)
-            }
-            ggseqlogo::ggseqlogo(
-              build_logo_matrix(sub_cw),
-              method = "prob",
-              seq_type = "aa"
-            ) +
-              seqlogo_x_scale +
-              labs(x = "Position (P4–P4')", y = "Probability") +
-              theme(plot.title = element_text(hjust = 0.5, face = "bold"))
-          })
-        })
-      }
+      tryCatch(
+        {
+          cw <- cleavage_windows()
+          req(nrow(cw) > 0)
+          runs <- unique(cw$Run)
+          for (i in seq_along(runs)) {
+            local({
+              rn <- runs[i]
+              oid <- paste0("seqlogo_run_", i)
+              output[[oid]] <- renderPlot({
+                sub_cw <- dplyr::filter(cw, Run == rn)
+                if (nrow(sub_cw) < 10) {
+                  return(NULL)
+                }
+                ggseqlogo::ggseqlogo(
+                  build_logo_matrix(sub_cw),
+                  method = "prob",
+                  seq_type = "aa"
+                ) +
+                  seqlogo_x_scale +
+                  labs(x = "Position (P4–P4')", y = "Probability") +
+                  theme(plot.title = element_text(hjust = 0.5, face = "bold"))
+              })
+            })
+          }
+        },
+        error = function(e) {
+          showNotification(
+            paste("Sequence logo error:", e$message),
+            type = "error"
+          )
+        }
+      )
     })
 
     # ════════════════════════════════════════════════════════════════════════
