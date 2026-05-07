@@ -216,7 +216,23 @@ for (.pkg in .omni_pkgs) {
   invokeRestart("muffleWarning")
 }
 
+.omni_log_err <- function(e) {
+  timestamp <- format(Sys.time(), "[%Y-%m-%d %H:%M:%S]")
+  line <- paste0(timestamp, " ERROR: ", conditionMessage(e))
+  tryCatch(
+    {
+      writeLines(line, con = .omni_log_con)
+      flush(.omni_log_con)
+    },
+    error = function(e2) NULL
+  )
+  .omni_buf_append(line)
+}
+
 globalCallingHandlers(message = .omni_log_msg, warning = .omni_log_warn)
+options(shiny.error = function() {
+  .omni_log_err(simpleError(geterrmessage()))
+})
 message("proteOmni started at ", Sys.time())
 
 
@@ -730,8 +746,14 @@ server <- function(input, output, session) {
       )
     },
     content = function(file) {
-      file.copy(.omni_log_path, file)
-      message("Log history downloaded by user at ", Sys.time())
+      # Append a download-timestamp to the buffer snapshot
+      lines <- c(
+        .omni_log_env$buffer,
+        "",
+        paste0("[", format(Sys.time(), "%Y-%m-%d %H:%M:%S"), "] ",
+               "Log downloaded by user")
+      )
+      writeLines(lines, con = file)
     },
     contentType = "text/plain"
   )
