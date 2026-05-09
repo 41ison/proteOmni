@@ -174,6 +174,49 @@ org_db_choices <- c(
   "Macaque (org.Mmu.eg.db)" = "org.Mmu.eg.db"
 )
 
+# ── ggsci palette options ──────────────────────────────────────────────────
+pwrquant_palette_choices <- c(
+  "NPG (Nature)" = "npg",
+  "AAAS (Science)" = "aaas",
+  "NEJM" = "nejm",
+  "Lancet" = "lancet",
+  "JAMA" = "jama",
+  "JCO" = "jco",
+  "D3 (Observable)" = "d3",
+  "Futurama" = "futurama",
+  "Simpsons" = "simpsons",
+  "Star Trek" = "startrek",
+  "UCSC Genome Browser" = "ucscgb",
+  "IGV (51 colors)" = "igv"
+)
+
+# Returns a ggsci color vector of length n (extended via colorRampPalette if needed)
+get_ggsci_colors <- function(pal_name, n) {
+  pal_fn <- switch(
+    pal_name,
+    npg = ggsci::pal_npg(),
+    aaas = ggsci::pal_aaas(),
+    nejm = ggsci::pal_nejm(),
+    lancet = ggsci::pal_lancet(),
+    jama = ggsci::pal_jama(),
+    jco = ggsci::pal_jco(),
+    d3 = ggsci::pal_d3(),
+    futurama = ggsci::pal_futurama(),
+    simpsons = ggsci::pal_simpsons(),
+    startrek = ggsci::pal_startrek(),
+    ucscgb = ggsci::pal_ucscgb(),
+    igv = ggsci::pal_igv(),
+    ggsci::pal_npg()
+  )
+  # Each ggsci palette function accepts the number of colors
+  base_n <- min(n, 100L)
+  cols <- tryCatch(pal_fn(base_n), error = function(e) pal_fn(1L))
+  if (n > length(cols)) {
+    cols <- colorRampPalette(cols)(n)
+  }
+  cols
+}
+
 # ── UI ───────────────────────────────────────────────────────────────────────
 PwrQuant_sidebar_ui <- function(id) {
   ns <- NS(id)
@@ -188,6 +231,12 @@ PwrQuant_sidebar_ui <- function(id) {
         ns("matrix_file"),
         "Upload Abundance Matrix (.tsv/.csv)",
         accept = c(".tsv", ".csv", ".txt")
+      ),
+      selectInput(
+        ns("cond_palette"),
+        "Condition colour palette",
+        choices = pwrquant_palette_choices,
+        selected = "npg"
       ),
       tags$hr(style = "border-color:#2d3741;margin:4px 0;"),
       tags$div(
@@ -744,7 +793,7 @@ PwrQuant_server <- function(id) {
       ggplot(df, aes(x = condition, y = log2_abundance, fill = condition)) +
         geom_boxplot(outlier.alpha = 0.4, linewidth = 0.4) +
         geom_jitter(width = 0.15, alpha = 0.4, size = 1.5) +
-        scale_fill_brewer(palette = "Dark2") +
+        scale_fill_manual(values = cond_colors()) +
         facet_wrap(~Protein, ncol = ncol_val, scales = "free_y") +
         labs(
           x = NULL,
@@ -757,7 +806,7 @@ PwrQuant_server <- function(id) {
           strip.text = element_text(face = "bold", size = 12),
           strip.background = element_blank(),
           axis.text.x = element_text(
-            angle = 35,
+            angle = 45,
             hjust = 1,
             face = "bold",
             color = "black"
@@ -765,7 +814,8 @@ PwrQuant_server <- function(id) {
           axis.text.y = element_text(face = "bold", color = "black"),
           axis.title = element_markdown(face = "bold"),
           legend.position = "bottom",
-          legend.title = element_text(face = "bold")
+          legend.title = element_text(face = "bold", hjust = 0.5),
+          legend.title.position = "top"
         )
     })
 
@@ -880,6 +930,16 @@ PwrQuant_server <- function(id) {
       req(meta_edit_df())
       meta <- meta_edit_df()
       setNames(meta$Display_Name, meta$Sample)
+    })
+
+    # Helper: named colour vector for conditions based on selected ggsci palette
+    cond_colors <- reactive({
+      req(meta_edit_df())
+      conds <- unique(meta_edit_df()$Condition)
+      n <- length(conds)
+      pal <- input$cond_palette %||% "npg"
+      cols <- get_ggsci_colors(pal, n)
+      setNames(cols[seq_len(n)], conds)
     })
 
     # ── Contrast UI ──────────────────────────────────────────────────────────
@@ -1313,7 +1373,7 @@ PwrQuant_server <- function(id) {
               outlier.alpha = 0.5
             ) +
             geom_vline(xintercept = 20, linetype = "dashed", color = "black") +
-            scale_fill_brewer(palette = "Dark2") +
+            scale_fill_manual(values = cond_colors()) +
             labs(y = NULL, x = "Coefficient of variation (%)", fill = NULL) +
             theme_linedraw() +
             theme(
@@ -1396,7 +1456,7 @@ PwrQuant_server <- function(id) {
             )
           ) +
             geom_boxplot(outlier.alpha = 0.3) +
-            scale_fill_brewer(palette = "Dark2") +
+            scale_fill_manual(values = cond_colors()) +
             labs(
               x = NULL,
               y = "log₂(abundance)"
@@ -1455,7 +1515,7 @@ PwrQuant_server <- function(id) {
             )
           ) +
             geom_boxplot(outlier.alpha = 0.3) +
-            scale_fill_brewer(palette = "Dark2") +
+            scale_fill_manual(values = cond_colors()) +
             labs(
               x = NULL,
               y = "log₂(abundance)"
@@ -2174,7 +2234,7 @@ PwrQuant_server <- function(id) {
               outlier.alpha = 0.5
             ) +
             geom_vline(xintercept = 20, linetype = "dashed", color = "black") +
-            scale_fill_brewer(palette = "Dark2") +
+            scale_fill_manual(values = cond_colors()) +
             labs(y = NULL, x = "Coefficient of variation (%)", fill = NULL) +
             theme_linedraw() +
             theme(
@@ -2242,7 +2302,7 @@ PwrQuant_server <- function(id) {
             aes(x = display_name, y = abundance, fill = condition)
           ) +
             geom_boxplot(outlier.alpha = 0.3) +
-            scale_fill_brewer(palette = "Dark2") +
+            scale_fill_manual(values = cond_colors()) +
             labs(x = NULL, y = "log₂(abundance)") +
             theme_bw() +
             theme(
@@ -2289,7 +2349,7 @@ PwrQuant_server <- function(id) {
                 aes(x = display_name, y = abundance, fill = condition)
               ) +
                 geom_boxplot(outlier.alpha = 0.3) +
-                scale_fill_brewer(palette = "Dark2") +
+                scale_fill_manual(values = cond_colors()) +
                 labs(x = NULL, y = "log₂(abundance)") +
                 theme_bw() +
                 theme(
@@ -2832,7 +2892,7 @@ PwrQuant_server <- function(id) {
                   ) +
                     geom_boxplot(outlier.alpha = 0.4, linewidth = 0.4) +
                     geom_jitter(width = 0.15, alpha = 0.4, size = 1.5) +
-                    scale_fill_brewer(palette = "Dark2") +
+                    scale_fill_manual(values = cond_colors()) +
                     facet_wrap(~Protein, ncol = ncol_val, scales = "free_y") +
                     labs(
                       x = NULL,
@@ -2845,7 +2905,7 @@ PwrQuant_server <- function(id) {
                       strip.text = element_text(face = "bold", size = 12),
                       strip.background = element_blank(),
                       axis.text.x = element_text(
-                        angle = 35,
+                        angle = 45,
                         hjust = 1,
                         face = "bold",
                         color = "black"
