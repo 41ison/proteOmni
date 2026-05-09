@@ -1878,14 +1878,42 @@ PwrQuant_server <- function(id) {
               )
             )
 
-          rho <- cor(
-            merged$logFC_x,
-            merged$logFC_y,
-            use = "complete.obs",
-            method = "spearman"
+          rho_classes <- c("Concordant", "Inverse", "Mismatch")
+          rho_ann <- do.call(
+            rbind,
+            lapply(seq_along(rho_classes), function(i) {
+              cl <- rho_classes[i]
+              sub <- merged[merged$class == cl, ]
+              if (nrow(sub) >= 3) {
+                r <- cor(
+                  sub$logFC_x,
+                  sub$logFC_y,
+                  use = "complete.obs",
+                  method = "spearman"
+                )
+                data.frame(
+                  class = cl,
+                  label = paste0(cl, ": \u03c1 = ", round(r, 3)),
+                  vjust_pos = 0.5 + (i - 1) * 1.8,
+                  stringsAsFactors = FALSE
+                )
+              } else {
+                NULL
+              }
+            })
           )
 
-          ggplot(merged, aes(x = logFC_x, y = logFC_y, color = class)) +
+          corr_colors <- c(
+            "Concordant" = "#11d362",
+            "Inverse" = "#00abf5",
+            "Mismatch" = "#ff0000",
+            "Not significant" = "#CCCCCCFE"
+          )
+
+          p_corr <- ggplot(
+            merged,
+            aes(x = logFC_x, y = logFC_y, color = class)
+          ) +
             geom_point(alpha = 0.5) +
             geom_smooth(
               data = merged |> dplyr::filter(class == "Concordant"),
@@ -1903,29 +1931,11 @@ PwrQuant_server <- function(id) {
             ) +
             geom_hline(yintercept = 0, color = "grey50", linewidth = 0.3) +
             geom_vline(xintercept = 0, color = "grey50", linewidth = 0.3) +
-            scale_color_manual(
-              values = c(
-                "Concordant" = "#1ca957",
-                "Inverse" = "#00B3FF",
-                "Mismatch" = "#E02121",
-                "Not significant" = "#CCCCCCFE"
-              )
-            ) +
-            annotate(
-              "text",
-              x = Inf,
-              y = Inf,
-              label = paste0("\u03c1 = ", round(rho, 3)),
-              hjust = 1.1,
-              vjust = 1.5,
-              size = 6,
-              fontface = "bold",
-              color = "black"
-            ) +
+            scale_color_manual(values = corr_colors) +
             labs(
               title = paste(input$adv_corr_x, "vs", input$adv_corr_y),
-              x = paste0("log₂FC: ", input$adv_corr_x),
-              y = paste0("log₂FC: ", input$adv_corr_y),
+              x = paste0("log\u2082FC: ", input$adv_corr_x),
+              y = paste0("log\u2082FC: ", input$adv_corr_y),
               color = "Classification"
             ) +
             theme_bw() +
@@ -1938,6 +1948,22 @@ PwrQuant_server <- function(id) {
               legend.title = element_text(face = "bold", hjust = 0.5),
               legend.title.position = "top"
             )
+
+          if (!is.null(rho_ann) && nrow(rho_ann) > 0) {
+            p_corr <- p_corr +
+              geom_text(
+                data = rho_ann,
+                aes(label = label, color = class, vjust = vjust_pos),
+                x = Inf,
+                y = Inf,
+                hjust = 1,
+                size = 4,
+                fontface = "bold",
+                inherit.aes = FALSE,
+                show.legend = FALSE
+              )
+          }
+          p_corr
         },
         "sp_adv_corr"
       )
@@ -2708,13 +2734,42 @@ PwrQuant_server <- function(id) {
                         TRUE ~ "Not significant"
                       )
                     )
-                  rho <- cor(
-                    merged$logFC_x,
-                    merged$logFC_y,
-                    use = "complete.obs",
-                    method = "spearman"
+                  rho_classes_dl <- c("Concordant", "Inverse", "Mismatch")
+                  rho_ann_dl <- do.call(
+                    rbind,
+                    lapply(seq_along(rho_classes_dl), function(i) {
+                      cl <- rho_classes_dl[i]
+                      sub <- merged[merged$class == cl, ]
+                      if (nrow(sub) >= 3) {
+                        r <- cor(
+                          sub$logFC_x,
+                          sub$logFC_y,
+                          use = "complete.obs",
+                          method = "spearman"
+                        )
+                        data.frame(
+                          class = cl,
+                          label = paste0(cl, ": \u03c1 = ", round(r, 3)),
+                          vjust_pos = 0.5 + (i - 1) * 1.8,
+                          stringsAsFactors = FALSE
+                        )
+                      } else {
+                        NULL
+                      }
+                    })
                   )
-                  ggplot(merged, aes(x = logFC_x, y = logFC_y, color = class)) +
+
+                  corr_colors_dl <- c(
+                    "Concordant" = "#1ca957",
+                    "Inverse" = "#00B3FF",
+                    "Mismatch" = "#E02121",
+                    "Not significant" = "#CCCCCCFE"
+                  )
+
+                  p_dl <- ggplot(
+                    merged,
+                    aes(x = logFC_x, y = logFC_y, color = class)
+                  ) +
                     geom_point(alpha = 0.5) +
                     geom_smooth(
                       data = merged |> dplyr::filter(class == "Concordant"),
@@ -2740,25 +2795,7 @@ PwrQuant_server <- function(id) {
                       color = "grey50",
                       linewidth = 0.3
                     ) +
-                    scale_color_manual(
-                      values = c(
-                        "Concordant" = "#1ca957",
-                        "Inverse" = "#00B3FF",
-                        "Mismatch" = "#E02121",
-                        "Not significant" = "#CCCCCCFE"
-                      )
-                    ) +
-                    annotate(
-                      "text",
-                      x = Inf,
-                      y = Inf,
-                      label = paste0("\u03c1 = ", round(rho, 3)),
-                      hjust = 1.1,
-                      vjust = 1.5,
-                      size = 6,
-                      fontface = "bold",
-                      color = "black"
-                    ) +
+                    scale_color_manual(values = corr_colors_dl) +
                     labs(
                       title = paste(cx, "vs", cy),
                       x = paste0("log\u2082FC: ", cx),
@@ -2773,6 +2810,22 @@ PwrQuant_server <- function(id) {
                       axis.title = element_text(face = "bold"),
                       legend.position = "bottom"
                     )
+
+                  if (!is.null(rho_ann_dl) && nrow(rho_ann_dl) > 0) {
+                    p_dl <- p_dl +
+                      geom_text(
+                        data = rho_ann_dl,
+                        aes(label = label, color = class, vjust = vjust_pos),
+                        x = Inf,
+                        y = Inf,
+                        hjust = 1.1,
+                        size = 4.5,
+                        fontface = "bold",
+                        inherit.aes = FALSE,
+                        show.legend = FALSE
+                      )
+                  }
+                  p_dl
                 },
                 w = 10,
                 h = 8
