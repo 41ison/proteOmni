@@ -265,6 +265,26 @@ PwrQuant_sidebar_ui <- function(id) {
       ),
       tags$hr(style = "border-color:#2d3741;margin:4px 0;"),
       tags$div(
+        style = "padding:12px 16px 4px;color:#adb5bd;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:1px;",
+        "Selected Proteins"
+      ),
+      selectizeInput(
+        ns("sel_proteins"),
+        "Proteins to plot",
+        choices = NULL,
+        multiple = TRUE,
+        options = list(placeholder = "Type or select proteins...")
+      ),
+      numericInput(
+        ns("sel_proteins_ncol"),
+        "Facet columns",
+        value = 3,
+        min = 1,
+        max = 10,
+        step = 1
+      ),
+      tags$hr(style = "border-color:#2d3741;margin:4px 0;"),
+      tags$div(
         style = "padding:0 8px;",
         div(
           style = "margin-bottom:8px;",
@@ -590,6 +610,29 @@ PwrQuant_body_ui <- function(id) {
       )
     ),
     tabPanel(
+      "Selected Proteins",
+      fluidRow(
+        box(
+          title = "Protein abundance by condition",
+          status = "primary",
+          solidHeader = TRUE,
+          width = 12,
+          p(
+            "Select proteins in the sidebar to visualise their log\u2082(abundance) distributions per condition."
+          ),
+          div(
+            class = "plot-wrap",
+            tags$div(
+              class = "spinner-overlay",
+              id = ns("sp_sel_prot"),
+              icon("spinner", class = "fa-spin")
+            ),
+            uiOutput(ns("sel_prot_plot_ui"))
+          )
+        )
+      )
+    ),
+    tabPanel(
       "UpSet — Proteins by Condition",
       fluidRow(
         box(
@@ -637,6 +680,94 @@ PwrQuant_server <- function(id) {
     output$barmir_plot_ui <- make_pq_plot_ui("barmir_plot")
     output$pval_histogram_ui <- make_pq_plot_ui("pval_histogram")
     output$adv_corr_plot_ui <- make_pq_plot_ui("adv_corr_plot")
+
+    # Populate Selected Proteins selectize from raw matrix row names
+    observe({
+      req(raw_matrix())
+      proteins <- rownames(raw_matrix())
+      updateSelectizeInput(
+        session,
+        "sel_proteins",
+        choices = proteins,
+        server = TRUE
+      )
+    })
+
+    # ── Selected Proteins Plot ──────────────────────────────────────────────
+    sel_prot_plot_data <- reactive({
+      req(raw_matrix(), meta_edit_df(), input$sel_proteins)
+      sel <- input$sel_proteins
+      mat <- raw_matrix()
+      meta <- meta_edit_df()
+      disp_names <- get_display_names()
+
+      # Filter to selected proteins
+      sel_mat <- mat[rownames(mat) %in% sel, , drop = FALSE]
+      req(nrow(sel_mat) > 0)
+
+      as.data.frame(sel_mat) |>
+        tibble::rownames_to_column("Protein") |>
+        tidyr::pivot_longer(
+          -Protein,
+          names_to = "sample",
+          values_to = "abundance"
+        ) |>
+        dplyr::mutate(
+          log2_abundance = log2(abundance + 1),
+          condition = meta$Condition[match(sample, meta$Sample)],
+          display_name = disp_names[sample]
+        ) |>
+        dplyr::filter(!is.na(condition))
+    })
+
+    output$sel_prot_plot_ui <- renderUI({
+      sel <- input$sel_proteins
+      if (is.null(sel) || length(sel) == 0) {
+        return(tags$p(
+          style = "color:#adb5bd;text-align:center;padding:30px;",
+          "Select one or more proteins in the sidebar to display their abundance distributions."
+        ))
+      }
+      ncol_val <- max(1L, as.integer(input$sel_proteins_ncol %||% 3))
+      n_prots <- length(sel)
+      n_rows <- ceiling(n_prots / ncol_val)
+      h <- max(350, n_rows * 320)
+      plotOutput(ns("sel_prot_plot"), height = paste0(h, "px"))
+    })
+
+    output$sel_prot_plot <- renderPlot({
+      shinyjs::show(id = "sp_sel_prot")
+      on.exit(shinyjs::hide(id = "sp_sel_prot"), add = TRUE)
+      df <- sel_prot_plot_data()
+      ncol_val <- max(1L, as.integer(input$sel_proteins_ncol %||% 3))
+
+      ggplot(df, aes(x = condition, y = log2_abundance, fill = condition)) +
+        geom_boxplot(outlier.alpha = 0.4, linewidth = 0.4) +
+        geom_jitter(width = 0.15, alpha = 0.4, size = 1.5) +
+        scale_fill_brewer(palette = "Dark2") +
+        facet_wrap(~Protein, ncol = ncol_val, scales = "free_y") +
+        labs(
+          x = NULL,
+          y = "log\u2082(abundance)",
+          fill = "Condition"
+        ) +
+        theme_bw() +
+        theme(
+          text = element_text(size = 14),
+          strip.text = element_text(face = "bold", size = 12),
+          strip.background = element_blank(),
+          axis.text.x = element_text(
+            angle = 35,
+            hjust = 1,
+            face = "bold",
+            color = "black"
+          ),
+          axis.text.y = element_text(face = "bold", color = "black"),
+          axis.title = element_markdown(face = "bold"),
+          legend.position = "bottom",
+          legend.title = element_text(face = "bold")
+        )
+    })
 
     ns <- session$ns
 
@@ -1112,8 +1243,17 @@ PwrQuant_server <- function(id) {
             ) %>%
             dplyr::filter(!is.na(gene_names) & gene_names != "")
 
-          # Validate organ db
+          # Validate organ db — install on demand if not yet present
           db_str <- input$org_db
+          if (!requireNamespace(db_str, quietly = TRUE)) {
+            withProgress(
+              message = paste("Installing", db_str, "..."),
+              value = 0.5,
+              {
+                BiocManager::install(db_str, update = FALSE, ask = FALSE)
+              }
+            )
+          }
           eval(parse(text = paste0("library(", db_str, ")")))
           current_org_db <- get(db_str)
 
@@ -1779,15 +1919,39 @@ PwrQuant_server <- function(id) {
     })
 
     output$ora_plot_ui <- renderUI({
-      ora <- tryCatch(ora_results_ev(), error = function(e) NULL)
       shinyjs::hide("sp_ora")
-      if (is.null(ora) || nrow(ora) == 0) {
+      ora_attempt <- tryCatch(
+        ora_results_ev(),
+        shiny.silent.error = function(e) "not_run",
+        error = function(e) {
+          showNotification(
+            paste("ORA failed:", conditionMessage(e)),
+            type = "error",
+            duration = 10
+          )
+          "error"
+        }
+      )
+
+      if (identical(ora_attempt, "not_run")) {
         return(tags$p(
           style = "color:#adb5bd;text-align:center;padding:20px;",
-          "No significant & reliable proteins found for ORA. Run limma first."
+          "Click 'Start ORA' to run overrepresentation analysis."
         ))
       }
-      n_panels <- nrow(ora)
+      if (identical(ora_attempt, "error")) {
+        return(tags$p(
+          style = "color:#e07070;text-align:center;padding:20px;",
+          "ORA encountered an error. Check the notification for details."
+        ))
+      }
+      if (is.null(ora_attempt) || nrow(ora_attempt) == 0) {
+        return(tags$p(
+          style = "color:#adb5bd;text-align:center;padding:20px;",
+          "No significant & reliable proteins found for ORA. Ensure limma has been run and significant proteins exist."
+        ))
+      }
+      n_panels <- nrow(ora_attempt)
       dynamic_h <- max(600, n_panels * 350)
       plotOutput(ns("ora_plot"), height = paste0(dynamic_h, "px"))
     })
@@ -2152,7 +2316,7 @@ PwrQuant_server <- function(id) {
               "ma_plot.png",
               function() {
                 label_ids <- input$label_proteins
-                lr <- lr %>%
+                lr_ma <- lr %>%
                   dplyr::mutate(
                     label = ifelse(
                       Protein %in% label_ids,
@@ -2160,8 +2324,18 @@ PwrQuant_server <- function(id) {
                       NA_character_
                     )
                   )
-                ggplot(lr, aes(x = AveExpr, y = logFC, color = status)) +
+                count_ann_ma <- lr_ma |>
+                  dplyr::filter(status != "Not significant") |>
+                  dplyr::count(comparison, status)
+                ggplot(lr_ma, aes(x = AveExpr, y = logFC, color = status)) +
                   geom_point(alpha = 0.3) +
+                  geom_smooth(
+                    method = "gam",
+                    se = FALSE,
+                    color = "darkblue",
+                    linewidth = 1,
+                    linetype = "dashed"
+                  ) +
                   ggrepel::geom_text_repel(
                     aes(label = label),
                     size = 3,
@@ -2169,16 +2343,22 @@ PwrQuant_server <- function(id) {
                     show.legend = FALSE,
                     color = "black"
                   ) +
+                  geom_text(
+                    data = count_ann_ma,
+                    aes(label = paste0(status, ": ", n), color = status),
+                    x = Inf,
+                    y = Inf,
+                    hjust = 1.1,
+                    vjust = ifelse(count_ann_ma$status == "Increased", 1.5, 3),
+                    size = 4,
+                    fontface = "bold",
+                    inherit.aes = FALSE,
+                    show.legend = FALSE
+                  ) +
                   guides(
                     color = guide_legend(
                       override.aes = list(alpha = 1, size = 3)
                     )
-                  ) +
-                  geom_smooth(
-                    method = "gam",
-                    se = TRUE,
-                    color = "black",
-                    linewidth = 1
                   ) +
                   scale_color_manual(
                     values = c(
@@ -2189,12 +2369,13 @@ PwrQuant_server <- function(id) {
                   ) +
                   facet_wrap(~comparison, ncol = 2) +
                   theme_bw() +
-                  labs(x = "log₂ average abundance", y = "log₂FC") +
+                  labs(x = "log\u2082 average abundance", y = "log\u2082FC") +
                   theme(
                     text = element_text(size = 16),
                     strip.text = element_text(face = "bold", size = 14),
                     strip.background = element_blank(),
                     legend.position = "bottom",
+                    legend.title = element_blank(),
                     axis.title = element_markdown(face = "bold", size = 16),
                     axis.text = element_text(
                       color = "black",
@@ -2212,7 +2393,7 @@ PwrQuant_server <- function(id) {
               "volcano_plot.png",
               function() {
                 label_ids <- input$label_proteins
-                lr <- lr %>%
+                lr_vol <- lr %>%
                   dplyr::mutate(
                     label = ifelse(
                       Protein %in% label_ids,
@@ -2220,16 +2401,14 @@ PwrQuant_server <- function(id) {
                       NA_character_
                     )
                   )
+                count_ann_vol <- lr_vol |>
+                  dplyr::filter(status != "Not significant") |>
+                  dplyr::count(comparison, status)
                 ggplot(
-                  lr,
+                  lr_vol,
                   aes(x = logFC, y = -log10(adj.P.Val), color = status)
                 ) +
                   geom_point(alpha = 0.3) +
-                  guides(
-                    color = guide_legend(
-                      override.aes = list(alpha = 1, size = 3)
-                    )
-                  ) +
                   geom_hline(
                     yintercept = -log10(0.05),
                     linetype = "dashed",
@@ -2248,6 +2427,23 @@ PwrQuant_server <- function(id) {
                     show.legend = FALSE,
                     color = "black"
                   ) +
+                  geom_text(
+                    data = count_ann_vol,
+                    aes(label = paste0(status, ": ", n), color = status),
+                    x = Inf,
+                    y = Inf,
+                    hjust = 1.1,
+                    vjust = ifelse(count_ann_vol$status == "Increased", 1.5, 3),
+                    size = 4,
+                    fontface = "bold",
+                    inherit.aes = FALSE,
+                    show.legend = FALSE
+                  ) +
+                  guides(
+                    color = guide_legend(
+                      override.aes = list(alpha = 1, size = 3)
+                    )
+                  ) +
                   scale_color_manual(
                     values = c(
                       "Decreased" = "steelblue",
@@ -2258,14 +2454,15 @@ PwrQuant_server <- function(id) {
                   facet_wrap(~comparison, ncol = 2) +
                   theme_bw() +
                   labs(
-                    x = "log₂FC",
-                    y = "-log10(adj. p-value)"
+                    x = "log\u2082FC",
+                    y = "-log\u2081\u2080(adj. p-value)"
                   ) +
                   theme(
                     text = element_text(size = 16),
                     strip.text = element_text(face = "bold", size = 14),
                     strip.background = element_blank(),
                     legend.position = "bottom",
+                    legend.title = element_blank(),
                     axis.title = element_markdown(face = "bold", size = 16),
                     axis.text = element_text(
                       color = "black",
@@ -2371,6 +2568,156 @@ PwrQuant_server <- function(id) {
                   strip.background = element_blank()
                 )
             })
+
+            # 10. P-value distribution
+            safe_save(
+              "pval_histogram.png",
+              function() {
+                ggplot(lr, aes(x = P.Value)) +
+                  geom_histogram(
+                    bins = 50,
+                    fill = "steelblue",
+                    color = "black",
+                    alpha = 0.8
+                  ) +
+                  geom_vline(
+                    xintercept = 0.05,
+                    linetype = "dashed",
+                    color = "red",
+                    linewidth = 0.7
+                  ) +
+                  annotate(
+                    "text",
+                    x = 0.05,
+                    y = Inf,
+                    label = "p = 0.05",
+                    vjust = 2,
+                    hjust = -0.1,
+                    color = "red",
+                    fontface = "bold",
+                    size = 3.5
+                  ) +
+                  facet_wrap(~comparison, ncol = 2) +
+                  labs(
+                    title = "Raw p-value distribution",
+                    x = "p-value",
+                    y = "Count"
+                  ) +
+                  theme_bw() +
+                  theme(
+                    text = element_text(size = 14),
+                    strip.text = element_text(face = "bold", size = 14),
+                    strip.background = element_blank(),
+                    axis.text = element_text(color = "black", face = "bold"),
+                    axis.title = element_text(face = "bold"),
+                    plot.title = element_text(face = "bold", hjust = 0.5)
+                  )
+              },
+              w = 14,
+              h = 10
+            )
+
+            # 11. Contrast correlation
+            contrasts_avail <- unique(lr$comparison)
+            if (length(contrasts_avail) >= 2) {
+              cx <- contrasts_avail[1]
+              cy <- contrasts_avail[2]
+              safe_save(
+                "contrast_correlation.png",
+                function() {
+                  dx <- lr |>
+                    dplyr::filter(comparison == cx) |>
+                    dplyr::select(Protein, logFC, status) |>
+                    dplyr::rename(logFC_x = logFC, status_x = status)
+                  dy <- lr |>
+                    dplyr::filter(comparison == cy) |>
+                    dplyr::select(Protein, logFC, status) |>
+                    dplyr::rename(logFC_y = logFC, status_y = status)
+                  merged <- dplyr::inner_join(dx, dy, by = "Protein") |>
+                    dplyr::mutate(
+                      class = dplyr::case_when(
+                        (status_x == status_y) &
+                          (status_x != "Not significant") ~ "Concordant",
+                        (status_x != "Not significant") &
+                          (status_y != "Not significant") &
+                          (status_x != status_y) ~ "Inverse",
+                        xor(
+                          status_x == "Not significant",
+                          status_y == "Not significant"
+                        ) ~ "Mismatch",
+                        TRUE ~ "Not significant"
+                      )
+                    )
+                  rho <- cor(
+                    merged$logFC_x,
+                    merged$logFC_y,
+                    use = "complete.obs",
+                    method = "spearman"
+                  )
+                  ggplot(merged, aes(x = logFC_x, y = logFC_y, color = class)) +
+                    geom_point(alpha = 0.5) +
+                    geom_smooth(
+                      data = merged |> dplyr::filter(class == "Concordant"),
+                      method = "lm",
+                      se = FALSE,
+                      linewidth = 1,
+                      linetype = "solid"
+                    ) +
+                    geom_smooth(
+                      data = merged |> dplyr::filter(class == "Inverse"),
+                      method = "lm",
+                      se = FALSE,
+                      linewidth = 1,
+                      linetype = "solid"
+                    ) +
+                    geom_hline(
+                      yintercept = 0,
+                      color = "grey50",
+                      linewidth = 0.3
+                    ) +
+                    geom_vline(
+                      xintercept = 0,
+                      color = "grey50",
+                      linewidth = 0.3
+                    ) +
+                    scale_color_manual(
+                      values = c(
+                        "Concordant" = "#1ca957",
+                        "Inverse" = "#00B3FF",
+                        "Mismatch" = "#E02121",
+                        "Not significant" = "#CCCCCCFE"
+                      )
+                    ) +
+                    annotate(
+                      "text",
+                      x = Inf,
+                      y = Inf,
+                      label = paste0("\u03c1 = ", round(rho, 3)),
+                      hjust = 1.1,
+                      vjust = 1.5,
+                      size = 6,
+                      fontface = "bold",
+                      color = "black"
+                    ) +
+                    labs(
+                      title = paste(cx, "vs", cy),
+                      x = paste0("log\u2082FC: ", cx),
+                      y = paste0("log\u2082FC: ", cy),
+                      color = "Classification"
+                    ) +
+                    theme_bw() +
+                    theme(
+                      text = element_text(size = 14),
+                      plot.title = element_text(face = "bold", hjust = 0.5),
+                      axis.text = element_text(color = "black", face = "bold"),
+                      axis.title = element_text(face = "bold"),
+                      legend.position = "bottom"
+                    )
+                },
+                w = 10,
+                h = 8
+              )
+            }
           },
           error = function(e) {
             warning("limma results not available for plot export: ", e$message)
@@ -2415,6 +2762,114 @@ PwrQuant_server <- function(id) {
           },
           error = function(e) {
             warning("ORA results not available for plot export: ", e$message)
+          }
+        )
+
+        # UpSet plot
+        tryCatch(
+          {
+            sets <- upset_sets()
+            if (length(sets) >= 2) {
+              safe_save_base("upset_plot.png", function() {
+                m <- ComplexHeatmap::make_comb_mat(sets)
+                ComplexHeatmap::draw(
+                  ComplexHeatmap::UpSet(
+                    m,
+                    comb_order = order(
+                      ComplexHeatmap::comb_size(m),
+                      decreasing = TRUE
+                    ),
+                    top_annotation = ComplexHeatmap::upset_top_annotation(
+                      m,
+                      add_numbers = TRUE,
+                      annotation_name_rot = 0,
+                      annotation_name_gp = grid::gpar(
+                        fontsize = 12,
+                        fontface = "bold"
+                      ),
+                      gp = grid::gpar(fill = "#1B4965")
+                    ),
+                    right_annotation = ComplexHeatmap::upset_right_annotation(
+                      m,
+                      add_numbers = TRUE,
+                      annotation_name_gp = grid::gpar(
+                        fontsize = 12,
+                        fontface = "bold"
+                      ),
+                      gp = grid::gpar(fill = "#5FA8D3")
+                    ),
+                    row_names_gp = grid::gpar(fontsize = 11, fontface = "bold"),
+                    column_title = "Proteins detected per condition",
+                    column_title_gp = grid::gpar(
+                      fontsize = 14,
+                      fontface = "bold"
+                    )
+                  )
+                )
+              })
+            }
+          },
+          error = function(e) {
+            warning("UpSet plot not available for export: ", e$message)
+          }
+        )
+
+        # Selected proteins plot
+        tryCatch(
+          {
+            sel <- input$sel_proteins
+            if (!is.null(sel) && length(sel) > 0) {
+              df_sel <- sel_prot_plot_data()
+              ncol_val <- max(1L, as.integer(input$sel_proteins_ncol %||% 3))
+              n_rows <- ceiling(length(sel) / ncol_val)
+              h_sel <- max(4, n_rows * 3.5)
+              safe_save(
+                "selected_proteins.png",
+                function() {
+                  ggplot(
+                    df_sel,
+                    aes(x = condition, y = log2_abundance, fill = condition)
+                  ) +
+                    geom_boxplot(outlier.alpha = 0.4, linewidth = 0.4) +
+                    geom_jitter(width = 0.15, alpha = 0.4, size = 1.5) +
+                    scale_fill_brewer(palette = "Dark2") +
+                    facet_wrap(~Protein, ncol = ncol_val, scales = "free_y") +
+                    labs(
+                      x = NULL,
+                      y = "log\u2082(abundance)",
+                      fill = "Condition"
+                    ) +
+                    theme_bw() +
+                    theme(
+                      text = element_text(size = 14),
+                      strip.text = element_text(face = "bold", size = 12),
+                      strip.background = element_blank(),
+                      axis.text.x = element_text(
+                        angle = 35,
+                        hjust = 1,
+                        face = "bold",
+                        color = "black"
+                      ),
+                      axis.text.y = element_text(
+                        face = "bold",
+                        color = "black"
+                      ),
+                      axis.title = element_markdown(face = "bold"),
+                      legend.position = "bottom",
+                      legend.title = element_text(face = "bold", hjust = 0.5),
+                      legend.title.position = "top"
+                    )
+                },
+                w = max(8, ncol_val * 3.5),
+                h = h_sel
+              )
+            }
+          },
+          error = function(e) {
+            warning(
+              "Selected proteins plot not available for export: ",
+              e$message
+            )
           }
         )
 
