@@ -20,6 +20,8 @@ CRAN_packages <- c(
   "ggtext",
   "ggrepel",
   "ggseqlogo",
+  "GGally",
+  "ggsci",
   "lsa",
   "vegan",
   "plotly",
@@ -37,8 +39,7 @@ CRAN_packages <- c(
   "patchwork",
   "pwr",
   "missForest",
-  "data.table",
-  "GGally"
+  "data.table"
 )
 
 not_inst <- CRAN_packages[
@@ -97,6 +98,7 @@ library(impute)
 library(ggpointdensity)
 library(ggtext)
 library(ggseqlogo)
+library(ggsci)
 library(lsa)
 library(vegan)
 library(plotly)
@@ -159,7 +161,8 @@ writeLines(
   "Biostrings",
   "lavaan",
   "arrow",
-  "diann"
+  "diann",
+  "ggsci"
 )
 for (.pkg in .omni_pkgs) {
   .ver <- tryCatch(as.character(packageVersion(.pkg)), error = function(e) {
@@ -255,7 +258,7 @@ source("modules/mod_MaxQuantMSMS.r")
 
 
 # ── Global options ────────────────────────────────────────────────────────────
-options(shiny.maxRequestSize = 2000 * 1024^2)
+options(shiny.maxRequestSize = 5000 * 1024^2)
 
 theme_set(theme_bw(base_size = 13))
 ggplot2::theme_update(
