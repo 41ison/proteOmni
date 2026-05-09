@@ -74,6 +74,10 @@ if (!requireNamespace("GO.db", quietly = TRUE)) {
 if (!requireNamespace("enrichplot", quietly = TRUE)) {
   BiocManager::install("enrichplot", update = FALSE, ask = FALSE)
 }
+# ── Organism annotation DBs — install Human DB at startup; others loaded on demand ──
+if (!requireNamespace("org.Hs.eg.db", quietly = TRUE)) {
+  BiocManager::install("org.Hs.eg.db", update = FALSE, ask = FALSE)
+}
 Sys.setenv(LIBARROW_MINIMAL = "false", ARROW_WITH_ZSTD = "ON")
 if (!requireNamespace("arrow", quietly = TRUE)) {
   install.packages("arrow")
@@ -113,6 +117,7 @@ library(lavaan)
 library(patchwork)
 library(enrichplot)
 library(ComplexHeatmap)
+library(org.Hs.eg.db)
 
 # ── Session info & Logging ─────────────────────────────────────────────────
 cat("\n========== proteOmni Session Info ==========", "\n")
@@ -750,8 +755,12 @@ server <- function(input, output, session) {
       lines <- c(
         .omni_log_env$buffer,
         "",
-        paste0("[", format(Sys.time(), "%Y-%m-%d %H:%M:%S"), "] ",
-               "Log downloaded by user")
+        paste0(
+          "[",
+          format(Sys.time(), "%Y-%m-%d %H:%M:%S"),
+          "] ",
+          "Log downloaded by user"
+        )
       )
       writeLines(lines, con = file)
     },
