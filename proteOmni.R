@@ -119,6 +119,7 @@ library(lavaan)
 library(patchwork)
 library(enrichplot)
 library(ComplexHeatmap)
+library(compiler)
 library(org.Hs.eg.db)
 
 # ── Session info & Logging ─────────────────────────────────────────────────
