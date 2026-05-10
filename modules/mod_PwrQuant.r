@@ -157,6 +157,11 @@ extract_power_stats <- function(contrast_fit, pwr_calc) {
     dplyr::bind_rows()
 }
 
+# compiled version of helper functions
+compute_cv_mtx_fast <- compiler::cmpfun(compute_cv_mtx)
+groupwise_imputation_fast <- compiler::cmpfun(groupwise_imputation)
+extract_power_stats_fast <- compiler::cmpfun(extract_power_stats)
+
 # ── Valid Organism DBs ──────────────────────────────────────────────────────
 org_db_choices <- c(
   "Human (org.Hs.eg.db)" = "org.Hs.eg.db",
@@ -1020,7 +1025,7 @@ PwrQuant_server <- function(id) {
       group_labels <- meta$Condition[match(colnames(raw), meta$Sample)]
 
       log2_matrix <- log2(raw + 1)
-      cv <- compute_cv_mtx(2^log2_matrix, group_labels) |>
+      cv <- compute_cv_mtx_fast(2^log2_matrix, group_labels) |>
         rownames_to_column("protein") |>
         pivot_longer(-protein, names_to = "condition", values_to = "CV") |>
         dplyr::mutate(condition = str_remove(condition, "CV_"))
@@ -1110,7 +1115,7 @@ PwrQuant_server <- function(id) {
               imp_labels[imp_method]
             )
           )
-          imputed_matrix <- groupwise_imputation(
+          imputed_matrix <- groupwise_imputation_fast(
             log2_matrix,
             group_labels,
             method = imp_method
@@ -1232,7 +1237,7 @@ PwrQuant_server <- function(id) {
           power = 0.80,
           type = "two.sample"
         )
-        power_stats <- extract_power_stats(contrast_fit, pwr_calc)
+        power_stats <- extract_power_stats_fast(contrast_fit, pwr_calc)
 
         # 8. Results Mapping
         incProgress(0.9, detail = "Isolating significance mappings")
