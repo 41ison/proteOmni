@@ -1724,13 +1724,13 @@ PwrQuant_server <- function(id) {
           }
 
           top_up <- sig %>%
-            dplyr::filter(status == "Increased") %>%
+            dplyr::filter(status == "Increased" & Is_reliable == TRUE) %>%
             group_by(comparison) %>%
             dplyr::slice_max(order_by = logFC, n = 20) %>%
             ungroup()
 
           top_down <- sig %>%
-            dplyr::filter(status == "Decreased") %>%
+            dplyr::filter(status == "Decreased" & Is_reliable == TRUE) %>%
             group_by(comparison) %>%
             dplyr::slice_min(order_by = logFC, n = 20) %>%
             ungroup()
@@ -1977,8 +1977,9 @@ PwrQuant_server <- function(id) {
     output$limma_power_plot <- renderPlot({
       rh(
         function() {
-          pw <- limma_results_ev()$limma_results
-          ggplot(pw, aes(x = Sigma, y = abs(logFC))) +
+          pw <- limma_results_ev()$limma_results |>
+            dplyr::filter(imputation_driven == FALSE) |>
+            ggplot(pw, aes(x = Sigma, y = abs(logFC))) +
             geom_point(aes(color = Is_reliable), alpha = 0.3) +
             geom_line(
               aes(y = Min_Detectable_Log2FC),
@@ -2578,12 +2579,12 @@ PwrQuant_server <- function(id) {
                   return(NULL)
                 }
                 top_up <- sig %>%
-                  dplyr::filter(status == "Increased") %>%
+                  dplyr::filter(status == "Increased" & Is_reliable == TRUE) %>%
                   dplyr::group_by(comparison) %>%
                   dplyr::slice_max(order_by = logFC, n = 20) %>%
                   dplyr::ungroup()
                 top_down <- sig %>%
-                  dplyr::filter(status == "Decreased") %>%
+                  dplyr::filter(status == "Decreased" & Is_reliable == TRUE) %>%
                   dplyr::group_by(comparison) %>%
                   dplyr::slice_min(order_by = logFC, n = 20) %>%
                   dplyr::ungroup()
