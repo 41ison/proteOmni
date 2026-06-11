@@ -134,7 +134,7 @@ read_mztab <- function(path) {
       mod_name = sapply(modifications, parse_mod_name, USE.NAMES = FALSE),
       is_modified = !is.na(mod_name),
       aa_score_mean = sapply(
-        `opt_ms_run[1]_aa_scores`,
+        `opt_global_aa_scores`,
         function(x) {
           if (is.na(x)) {
             return(NA_real_)
@@ -689,7 +689,7 @@ deNovo_server <- function(id) {
           x = "Mean AA score (per PSM)",
           y = "Count",
           caption = paste0(
-            "Each PSM receives one score per predicted amino acid (opt_ms_run[1]_aa_scores); ",
+            "Each PSM receives one score per predicted amino acid (opt_global_aa_scores); ",
             "this plot shows the mean across residues in each peptide.\n",
             "Interpretation: scores near 1 = high model confidence; scores near 0 = uncertain prediction.\n",
             "Median = ",
