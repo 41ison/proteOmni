@@ -2775,7 +2775,7 @@ PSManalyst_server <- function(id) {
           return()
         }
 
-        # Select abundance columns based on the chosen metric
+        # Select abundance columns based on the user chosen metric
         if (metric == "max_lfq_intensity") {
           abundance_cols <- grep(
             "max_lfq_intensity$",
@@ -2783,13 +2783,11 @@ PSManalyst_server <- function(id) {
             value = TRUE,
             ignore.case = TRUE
           )
-          # Exclude any "combined" columns
           abundance_cols <- abundance_cols[
             !grepl("combined", abundance_cols, ignore.case = TRUE)
           ]
           suffix_pattern <- "_max_lfq_intensity$"
         } else {
-          # Select intensity columns that are NOT max_lfq_intensity
           all_intensity <- grep(
             "_intensity$",
             colnames(raw),
@@ -2818,11 +2816,18 @@ PSManalyst_server <- function(id) {
           return()
         }
 
-        # Build clean matrix
+        # Build matrix
         export_df <- raw %>%
           dplyr::select(dplyr::all_of(c(id_col, abundance_cols)))
 
-        # Clean sample names by removing the metric suffix
+        export_df <- export_df %>%
+          dplyr::mutate(
+            dplyr::across(
+              dplyr::all_of(abundance_cols),
+              ~ dplyr::if_else(.x == 0, NA_real_, as.numeric(.x))
+            )
+          )
+
         clean_names <- stringr::str_remove(
           abundance_cols,
           stringr::regex(suffix_pattern, ignore_case = TRUE)
