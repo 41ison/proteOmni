@@ -16,11 +16,10 @@ compute_cv_mtx <- function(protein_matrix, group_labels) {
 
 # method: "knn" (fast, MAR), "minprob" (fastest, MNAR-aware), "missforest" (slow legacy)
 groupwise_imputation <- function(
-  data,
-  group_labels,
-  method = "knn",
-  verbose = TRUE
-) {
+    data,
+    group_labels,
+    method = "knn",
+    verbose = TRUE) {
   # If the dataset has zero NAs, don't waste time trying to impute
   if (sum(is.na(data)) == 0) {
     return(data)
@@ -197,8 +196,7 @@ pwrquant_palette_choices <- c(
 
 # Returns a ggsci color vector of length n (extended via colorRampPalette if needed)
 get_ggsci_colors <- function(pal_name, n) {
-  pal_fn <- switch(
-    pal_name,
+  pal_fn <- switch(pal_name,
     npg = ggsci::pal_npg(),
     aaas = ggsci::pal_aaas(),
     nejm = ggsci::pal_nejm(),
@@ -336,6 +334,31 @@ PwrQuant_sidebar_ui <- function(id) {
         min = 1,
         max = 10,
         step = 1
+      ),
+      tags$hr(style = "border-color:#2d3741;margin:4px 0;"),
+      tags$div(
+        style = "padding:12px 16px 4px;color:#adb5bd;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:1px;",
+        "Z-Score Heatmap"
+      ),
+      radioButtons(
+        ns("heatmap_filter"),
+        "Filtering Strategy",
+        choices = c(
+          "Significant & Reliable" = "sig_reliable",
+          "Top N Proteins" = "top_n"
+        ),
+        selected = "top_n"
+      ),
+      conditionalPanel(
+        condition = sprintf("input['%s'] == 'top_n'", ns("heatmap_filter")),
+        numericInput(
+          ns("heatmap_top_n"),
+          "Number of proteins (N)",
+          value = 50,
+          min = 5,
+          max = 500,
+          step = 5
+        )
       ),
       tags$hr(style = "border-color:#2d3741;margin:4px 0;"),
       tags$div(
@@ -484,6 +507,78 @@ PwrQuant_body_ui <- function(id) {
               icon("spinner", class = "fa-spin")
             ),
             plotOutput(ns("norm_boxplots"), height = 500)
+          )
+        ),
+        box(
+          title = "PCA \u2014 Raw Data",
+          status = "primary",
+          solidHeader = TRUE,
+          width = 12,
+          p(
+            "Principal Component Analysis of the raw log\u2082-transformed abundance matrix. Useful for inspecting sample clustering and identifying outliers before any processing."
+          ),
+          div(
+            class = "plot-wrap",
+            tags$div(
+              class = "spinner-overlay",
+              id = ns("sp_pca_raw"),
+              icon("spinner", class = "fa-spin")
+            ),
+            plotOutput(ns("pca_raw_plot"), height = 500)
+          )
+        ),
+        box(
+          title = "PCA \u2014 Post-processed Data",
+          status = "primary",
+          solidHeader = TRUE,
+          width = 12,
+          p(
+            "PCA of the normalized and batch-corrected abundance matrix. Compare with the raw PCA above to verify that batch effects have been mitigated."
+          ),
+          div(
+            class = "plot-wrap",
+            tags$div(
+              class = "spinner-overlay",
+              id = ns("sp_pca_proc"),
+              icon("spinner", class = "fa-spin")
+            ),
+            plotOutput(ns("pca_processed_plot"), height = 500)
+          )
+        ),
+        box(
+          title = "PLS-DA \u2014 Raw Data",
+          status = "primary",
+          solidHeader = TRUE,
+          width = 12,
+          p(
+            "Partial Least Squares Discriminant Analysis of the raw log\u2082-transformed abundance matrix. Supervised method that maximizes separation between conditions."
+          ),
+          div(
+            class = "plot-wrap",
+            tags$div(
+              class = "spinner-overlay",
+              id = ns("sp_plsda_raw"),
+              icon("spinner", class = "fa-spin")
+            ),
+            plotOutput(ns("plsda_raw_plot"), height = 500)
+          )
+        ),
+        box(
+          title = "PLS-DA \u2014 Post-processed Data",
+          status = "primary",
+          solidHeader = TRUE,
+          width = 12,
+          p(
+            "PLS-DA of the normalized and batch-corrected abundance matrix. Compare with the raw PLS-DA above to assess the effect of pre-processing on class separation."
+          ),
+          div(
+            class = "plot-wrap",
+            tags$div(
+              class = "spinner-overlay",
+              id = ns("sp_plsda_proc"),
+              icon("spinner", class = "fa-spin")
+            ),
+            plotOutput(ns("plsda_processed_plot"), height = 500)
           )
         )
       )
@@ -708,6 +803,31 @@ PwrQuant_body_ui <- function(id) {
           )
         )
       )
+    ),
+    tabPanel(
+      "Z-Score Heatmap",
+      fluidRow(
+        box(
+          title = "Z-Score Protein Abundance Heatmap",
+          status = "primary",
+          solidHeader = TRUE,
+          width = 12,
+          p(
+            "Heatmap of Z-score transformed protein abundances with hierarchical clustering on proteins. ",
+            "Samples are grouped by condition. Grey cells indicate missing values. ",
+            "Use the sidebar controls to select a filtering strategy."
+          ),
+          div(
+            class = "plot-wrap",
+            tags$div(
+              class = "spinner-overlay",
+              id = ns("sp_heatmap"),
+              icon("spinner", class = "fa-spin")
+            ),
+            plotOutput(ns("zscore_heatmap"), height = 700)
+          )
+        )
+      )
     )
   )
 }
@@ -839,7 +959,12 @@ PwrQuant_server <- function(id) {
       "sp_barmir",
       "sp_corr",
       "sp_pwr",
-      "sp_ora"
+      "sp_ora",
+      "sp_pca_raw",
+      "sp_pca_proc",
+      "sp_plsda_raw",
+      "sp_plsda_proc",
+      "sp_heatmap"
     )
     show_spinners <- function() {
       lapply(spin_ids, function(s) shinyjs::show(id = s))
@@ -1548,6 +1673,182 @@ PwrQuant_server <- function(id) {
       )
     })
 
+    # ── PCA & PLS-DA Helper Functions ──────────────────────────────────────
+    build_pca_plot <- function(mat, meta, cond_cols, disp_names, title) {
+      complete_rows <- complete.cases(mat)
+      mat_clean <- mat[complete_rows, , drop = FALSE]
+      req(nrow(mat_clean) > 1, ncol(mat_clean) > 1)
+
+      pca_res <- prcomp(t(mat_clean), center = TRUE, scale. = TRUE)
+      var_explained <- summary(pca_res)$importance[2, ] * 100
+
+      pca_df <- data.frame(
+        PC1 = pca_res$x[, 1],
+        PC2 = pca_res$x[, 2],
+        Sample = colnames(mat_clean),
+        stringsAsFactors = FALSE
+      )
+      pca_df$Condition <- meta$Condition[match(pca_df$Sample, meta$Sample)]
+      pca_df$Display_Name <- disp_names[pca_df$Sample]
+
+      ggplot(pca_df, aes(x = PC1, y = PC2, color = Condition)) +
+        geom_point(size = 4, alpha = 0.8) +
+        ggrepel::geom_text_repel(
+          aes(label = Display_Name),
+          size = 3.5,
+          max.overlaps = 20,
+          show.legend = FALSE
+        ) +
+        stat_ellipse(level = 0.95, linetype = "dashed", linewidth = 0.5) +
+        scale_color_manual(values = cond_cols) +
+        labs(
+          title = title,
+          x = sprintf("PC1 (%.1f%%)", var_explained[1]),
+          y = sprintf("PC2 (%.1f%%)", var_explained[2]),
+          color = "Condition"
+        ) +
+        theme_bw() +
+        theme(
+          text = element_text(size = 16),
+          plot.title = element_text(face = "bold", hjust = 0.5),
+          axis.title = element_text(face = "bold"),
+          axis.text = element_text(color = "black", face = "bold"),
+          legend.position = "bottom",
+          legend.title = element_text(face = "bold", hjust = 0.5),
+          legend.title.position = "top"
+        )
+    }
+
+    build_plsda_plot <- function(mat, meta, cond_cols, disp_names, title) {
+      complete_rows <- complete.cases(mat)
+      mat_clean <- mat[complete_rows, , drop = FALSE]
+      req(nrow(mat_clean) > 1, ncol(mat_clean) > 1)
+
+      conditions <- factor(
+        meta$Condition[match(colnames(mat_clean), meta$Sample)]
+      )
+      req(length(unique(conditions)) >= 2)
+
+      plsda_res <- mixOmics::plsda(
+        X = t(mat_clean),
+        Y = conditions,
+        ncomp = 2
+      )
+
+      variates <- plsda_res$variates$X
+      var_explained <- plsda_res$prop_expl_var$X * 100
+
+      plsda_df <- data.frame(
+        Comp1 = variates[, 1],
+        Comp2 = variates[, 2],
+        Sample = colnames(mat_clean),
+        Condition = as.character(conditions),
+        stringsAsFactors = FALSE
+      )
+      plsda_df$Display_Name <- disp_names[plsda_df$Sample]
+
+      ggplot(plsda_df, aes(x = Comp1, y = Comp2, color = Condition)) +
+        geom_point(size = 4, alpha = 0.8) +
+        ggrepel::geom_text_repel(
+          aes(label = Display_Name),
+          size = 3.5,
+          max.overlaps = 20,
+          show.legend = FALSE
+        ) +
+        stat_ellipse(level = 0.95, linetype = "dashed", linewidth = 0.5) +
+        scale_color_manual(values = cond_cols) +
+        labs(
+          title = title,
+          x = sprintf("Component 1 (%.1f%%)", var_explained[1]),
+          y = sprintf("Component 2 (%.1f%%)", var_explained[2]),
+          color = "Condition"
+        ) +
+        theme_bw() +
+        theme(
+          text = element_text(size = 16),
+          plot.title = element_text(face = "bold", hjust = 0.5),
+          axis.title = element_text(face = "bold"),
+          axis.text = element_text(color = "black", face = "bold"),
+          legend.position = "bottom",
+          legend.title = element_text(face = "bold", hjust = 0.5),
+          legend.title.position = "top"
+        )
+    }
+
+    # ── PCA Plots ────────────────────────────────────────────────────────────
+    output$pca_raw_plot <- renderPlot({
+      rh(
+        function() {
+          req(raw_matrix(), meta_edit_df())
+          build_pca_plot(
+            log2(raw_matrix() + 1),
+            meta_edit_df(),
+            cond_colors(),
+            get_display_names(),
+            "PCA \u2014 Raw Data"
+          )
+        },
+        "sp_pca_raw"
+      )
+    })
+
+    output$pca_processed_plot <- renderPlot({
+      rh(
+        function() {
+          res <- limma_results_ev()
+          req(res$norm_mat)
+          build_pca_plot(
+            as.matrix(res$norm_mat),
+            meta_edit_df(),
+            cond_colors(),
+            get_display_names(),
+            "PCA \u2014 Post-processed Data"
+          )
+        },
+        "sp_pca_proc"
+      )
+    })
+
+    # ── PLS-DA Plots ─────────────────────────────────────────────────────────
+    output$plsda_raw_plot <- renderPlot({
+      rh(
+        function() {
+          req(raw_matrix(), meta_edit_df())
+          meta <- meta_edit_df()
+          conds <- unique(meta$Condition)
+          req(length(conds) >= 2)
+          build_plsda_plot(
+            log2(raw_matrix() + 1),
+            meta,
+            cond_colors(),
+            get_display_names(),
+            "PLS-DA \u2014 Raw Data"
+          )
+        },
+        "sp_plsda_raw"
+      )
+    })
+
+    output$plsda_processed_plot <- renderPlot({
+      rh(
+        function() {
+          res <- limma_results_ev()
+          req(res$norm_mat)
+          meta <- meta_edit_df()
+          conds <- unique(meta$Condition)
+          req(length(conds) >= 2)
+          build_plsda_plot(
+            as.matrix(res$norm_mat),
+            meta,
+            cond_colors(),
+            get_display_names(),
+            "PLS-DA \u2014 Post-processed Data"
+          )
+        },
+        "sp_plsda_proc"
+      )
+    })
+
     output$dap_plot <- renderPlot({
       rh(
         function() {
@@ -1680,7 +1981,7 @@ PwrQuant_server <- function(id) {
             facet_wrap(~comparison, ncol = 2) +
             theme_bw() +
             labs(
-              x = "log₂FC",
+              x = "log<sub>2</sub>FC",
               y = "-log<sub>10</sub>(adj. p-value)"
             ) +
             theme(
@@ -1689,7 +1990,8 @@ PwrQuant_server <- function(id) {
               strip.background = element_blank(),
               legend.position = "bottom",
               legend.title = element_blank(),
-              axis.title = element_markdown(face = "bold"),
+              axis.title.x = element_markdown(face = "bold"),
+              axis.title.y = element_markdown(face = "bold"),
               axis.text = element_text(color = "black", face = "bold")
             )
         },
@@ -2932,6 +3234,139 @@ PwrQuant_server <- function(id) {
           }
         )
 
+        # PCA plots
+        safe_save("pca_raw.png", function() {
+          build_pca_plot(
+            log2(raw_matrix() + 1),
+            meta,
+            cond_colors(),
+            disp_names,
+            "PCA \u2014 Raw Data"
+          )
+        })
+
+        tryCatch(
+          {
+            res <- limma_results_ev()
+            safe_save("pca_processed.png", function() {
+              build_pca_plot(
+                as.matrix(res$norm_mat),
+                meta,
+                cond_colors(),
+                disp_names,
+                "PCA \u2014 Post-processed Data"
+              )
+            })
+          },
+          error = function(e) {
+            warning("Post-processed PCA not available for export: ", e$message)
+          }
+        )
+
+        # PLS-DA plots
+        tryCatch(
+          {
+            conds_dl <- unique(meta$Condition)
+            if (length(conds_dl) >= 2) {
+              safe_save("plsda_raw.png", function() {
+                build_plsda_plot(
+                  log2(raw_matrix() + 1),
+                  meta,
+                  cond_colors(),
+                  disp_names,
+                  "PLS-DA \u2014 Raw Data"
+                )
+              })
+            }
+          },
+          error = function(e) {
+            warning("Raw PLS-DA not available for export: ", e$message)
+          }
+        )
+
+        tryCatch(
+          {
+            res <- limma_results_ev()
+            conds_dl <- unique(meta$Condition)
+            if (length(conds_dl) >= 2) {
+              safe_save("plsda_processed.png", function() {
+                build_plsda_plot(
+                  as.matrix(res$norm_mat),
+                  meta,
+                  cond_colors(),
+                  disp_names,
+                  "PLS-DA \u2014 Post-processed Data"
+                )
+              })
+            }
+          },
+          error = function(e) {
+            warning("Post-processed PLS-DA not available for export: ", e$message)
+          }
+        )
+
+        # Z-Score Heatmap
+        tryCatch(
+          {
+            mat_z <- zscore_heatmap_data()
+            if (!is.null(mat_z) && nrow(mat_z) > 0) {
+              safe_save_base("zscore_heatmap.png", function() {
+                meta_dl <- meta
+                col_order <- order(factor(
+                  meta_dl$Condition[match(colnames(mat_z), meta_dl$Sample)]
+                ))
+                mat_z_ord <- mat_z[, col_order, drop = FALSE]
+                col_labels <- disp_names[colnames(mat_z_ord)]
+                cond_vec <- meta_dl$Condition[match(
+                  colnames(mat_z_ord),
+                  meta_dl$Sample
+                )]
+                col_ha <- ComplexHeatmap::HeatmapAnnotation(
+                  Condition = cond_vec,
+                  col = list(Condition = cond_colors()),
+                  annotation_name_gp = grid::gpar(
+                    fontsize = 11,
+                    fontface = "bold"
+                  )
+                )
+                col_fun <- circlize::colorRamp2(
+                  c(-2, 0, 2),
+                  c("#2166AC", "white", "#B2182B")
+                )
+                ComplexHeatmap::draw(
+                  ComplexHeatmap::Heatmap(
+                    mat_z_ord,
+                    name = "Z-score",
+                    col = col_fun,
+                    na_col = "grey",
+                    cluster_rows = function(m) {
+                      hclust(dist(replace(m, is.na(m), 0)))
+                    },
+                    cluster_columns = FALSE,
+                    top_annotation = col_ha,
+                    column_labels = col_labels,
+                    column_names_rot = 45,
+                    column_names_gp = grid::gpar(
+                      fontsize = 10,
+                      fontface = "bold"
+                    ),
+                    row_names_gp = grid::gpar(fontsize = 8),
+                    show_row_names = nrow(mat_z_ord) <= 80,
+                    column_title = "Z-Score Protein Abundance",
+                    column_title_gp = grid::gpar(
+                      fontsize = 14,
+                      fontface = "bold"
+                    )
+                  )
+                )
+              }, w = 14, h = 10)
+            }
+          },
+          error = function(e) {
+            warning("Z-score heatmap not available for export: ", e$message)
+          }
+        )
+
         # Selected proteins plot
         tryCatch(
           {
@@ -3004,6 +3439,105 @@ PwrQuant_server <- function(id) {
         }
       }
     )
+
+    # ── Z-Score Heatmap ──────────────────────────────────────────────────────
+    zscore_heatmap_data <- reactive({
+      filter_mode <- input$heatmap_filter %||% "top_n"
+
+      if (filter_mode == "sig_reliable") {
+        res <- limma_results_ev()
+        req(res$norm_mat, res$limma_results)
+        lr <- res$limma_results
+        sig_proteins <- unique(lr$Protein[
+          lr$status != "Not significant" & lr$Is_reliable == TRUE
+        ])
+        mat <- as.matrix(res$norm_mat)
+        mat <- mat[rownames(mat) %in% sig_proteins, , drop = FALSE]
+        req(nrow(mat) > 1)
+      } else {
+        req(raw_matrix())
+        mat <- log2(raw_matrix() + 1)
+        top_n <- input$heatmap_top_n %||% 50
+        top_n <- min(top_n, nrow(mat))
+        row_vars <- apply(mat, 1, var, na.rm = TRUE)
+        top_idx <- order(row_vars, decreasing = TRUE)[seq_len(top_n)]
+        mat <- mat[top_idx, , drop = FALSE]
+      }
+
+      # Z-score transformation (row-wise)
+      mat_z <- t(scale(t(mat)))
+      mat_z[is.nan(mat_z)] <- 0
+
+      # Drop rows that are completely NA
+      keep <- rowSums(!is.na(mat_z)) > 0
+      mat_z[keep, , drop = FALSE]
+    })
+
+    output$zscore_heatmap <- renderPlot({
+      shinyjs::show(id = "sp_heatmap")
+      on.exit(shinyjs::hide(id = "sp_heatmap"), add = TRUE)
+
+      mat_z <- zscore_heatmap_data()
+      req(nrow(mat_z) > 0, ncol(mat_z) > 0)
+
+      meta <- meta_edit_df()
+      disp_names <- get_display_names()
+
+      # Order columns by condition factor
+      col_order <- order(factor(
+        meta$Condition[match(colnames(mat_z), meta$Sample)]
+      ))
+      mat_z <- mat_z[, col_order, drop = FALSE]
+
+      # Column labels use display names
+      col_labels <- disp_names[colnames(mat_z)]
+
+      # Condition annotation
+      cond_vec <- meta$Condition[match(colnames(mat_z), meta$Sample)]
+      col_ha <- ComplexHeatmap::HeatmapAnnotation(
+        Condition = cond_vec,
+        col = list(Condition = cond_colors()),
+        annotation_name_gp = grid::gpar(fontsize = 11, fontface = "bold"),
+        annotation_legend_param = list(
+          Condition = list(
+            title_gp = grid::gpar(fontsize = 11, fontface = "bold"),
+            labels_gp = grid::gpar(fontsize = 10)
+          )
+        )
+      )
+
+      # Color scale
+      col_fun <- circlize::colorRamp2(
+        c(-2, 0, 2),
+        c("#2166AC", "white", "#B2182B")
+      )
+
+      ComplexHeatmap::Heatmap(
+        mat_z,
+        name = "Z-score",
+        col = col_fun,
+        na_col = "grey",
+        cluster_rows = function(m) {
+          hclust(dist(replace(m, is.na(m), 0)))
+        },
+        cluster_columns = FALSE,
+        show_row_dend = TRUE,
+        show_column_dend = FALSE,
+        top_annotation = col_ha,
+        column_labels = col_labels,
+        column_names_rot = 45,
+        column_names_gp = grid::gpar(fontsize = 10, fontface = "bold"),
+        row_names_gp = grid::gpar(fontsize = 8),
+        show_row_names = nrow(mat_z) <= 80,
+        heatmap_legend_param = list(
+          title = "Z-score",
+          title_gp = grid::gpar(fontsize = 11, fontface = "bold"),
+          labels_gp = grid::gpar(fontsize = 10)
+        ),
+        column_title = "Z-Score Protein Abundance",
+        column_title_gp = grid::gpar(fontsize = 14, fontface = "bold")
+      )
+    })
 
     # ── UpSet — Proteins by Condition ──────────────────────────────────────────────
     upset_sets <- reactive({

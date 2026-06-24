@@ -57,8 +57,7 @@ extract_matrix_per_sample <- function(data) {
 
         mat <- matrix(unlist(fp), ncol = 8, byrow = TRUE)
         mat <- mat[
-          !apply(mat, 1, function(x) any(x %in% c("B", "X", "Z", "U", "O"))),
-          ,
+          !apply(mat, 1, function(x) any(x %in% c("B", "X", "Z", "U", "O"))), ,
           drop = FALSE
         ]
 
@@ -108,10 +107,9 @@ extract_matrix_per_sample <- function(data) {
 }
 
 analyze_terminus_cooccurrence <- function(
-  df,
-  peptide_col,
-  show_values = FALSE
-) {
+    df,
+    peptide_col,
+    show_values = FALSE) {
   aas <- c(
     "A",
     "C",
@@ -457,6 +455,36 @@ PSManalyst_sidebar_ui <- function(id) {
         ns("combined_protein"),
         "combined_protein.tsv",
         accept = ".tsv"
+      ),
+      tags$hr(style = "border-color:#2d3741;"),
+      tags$div(
+        style = "padding:12px 16px 4px;color:#adb5bd;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:1px;",
+        "Abundance Matrix Export"
+      ),
+      selectInput(
+        ns("export_abundance_metric"),
+        "Abundance Metric",
+        choices = c(
+          "Intensity" = "intensity",
+          "MaxLFQ Intensity" = "max_lfq_intensity"
+        ),
+        selected = "max_lfq_intensity"
+      ),
+      selectInput(
+        ns("export_protein_id"),
+        "Protein Identifier",
+        choices = c(
+          "Protein ID" = "protein_id",
+          "Entry Name" = "entry_name",
+          "Gene" = "gene"
+        ),
+        selected = "protein_id"
+      ),
+      downloadButton(
+        ns("download_abundance_matrix"),
+        tagList(icon("download"), " Export Abundance Matrix"),
+        class = "dl-btn",
+        style = "width:100%;margin-bottom:8px;"
       ),
       fileInput(
         ns("fasta_file"),
@@ -2717,6 +2745,92 @@ PSManalyst_server <- function(id) {
         utils::zip(file, files = fps, flags = "-j")
       },
       contentType = "application/zip"
+    )
+
+    # ── Abundance Matrix Export ──────────────────────────────────────────────
+    output$download_abundance_matrix <- downloadHandler(
+      filename = function() {
+        metric <- input$export_abundance_metric %||% "max_lfq_intensity"
+        paste0("abundance_matrix_", metric, "_", Sys.Date(), ".tsv")
+      },
+      content = function(file) {
+        req(input$combined_protein)
+        metric <- input$export_abundance_metric %||% "max_lfq_intensity"
+        id_col <- input$export_protein_id %||% "protein_id"
+
+        raw <- data.table::fread(
+          input$combined_protein$datapath,
+          sep = "\t",
+          header = TRUE
+        ) %>%
+          janitor::clean_names()
+
+        # Validate that the chosen identifier column exists
+        if (!id_col %in% colnames(raw)) {
+          showNotification(
+            paste0("Column '", id_col, "' not found in combined_protein.tsv."),
+            type = "error",
+            duration = 8
+          )
+          return()
+        }
+
+        # Select abundance columns based on the chosen metric
+        if (metric == "max_lfq_intensity") {
+          abundance_cols <- grep(
+            "max_lfq_intensity$",
+            colnames(raw),
+            value = TRUE,
+            ignore.case = TRUE
+          )
+          # Exclude any "combined" columns
+          abundance_cols <- abundance_cols[
+            !grepl("combined", abundance_cols, ignore.case = TRUE)
+          ]
+          suffix_pattern <- "_max_lfq_intensity$"
+        } else {
+          # Select intensity columns that are NOT max_lfq_intensity
+          all_intensity <- grep(
+            "_intensity$",
+            colnames(raw),
+            value = TRUE,
+            ignore.case = TRUE
+          )
+          max_lfq <- grep(
+            "max_lfq_intensity$",
+            colnames(raw),
+            value = TRUE,
+            ignore.case = TRUE
+          )
+          abundance_cols <- setdiff(all_intensity, max_lfq)
+          abundance_cols <- abundance_cols[
+            !grepl("combined", abundance_cols, ignore.case = TRUE)
+          ]
+          suffix_pattern <- "_intensity$"
+        }
+
+        if (length(abundance_cols) == 0) {
+          showNotification(
+            paste0("No '", metric, "' columns found in the data."),
+            type = "error",
+            duration = 8
+          )
+          return()
+        }
+
+        # Build clean matrix
+        export_df <- raw %>%
+          dplyr::select(dplyr::all_of(c(id_col, abundance_cols)))
+
+        # Clean sample names by removing the metric suffix
+        clean_names <- stringr::str_remove(
+          abundance_cols,
+          stringr::regex(suffix_pattern, ignore_case = TRUE)
+        )
+        colnames(export_df) <- c(id_col, clean_names)
+
+        data.table::fwrite(export_df, file = file, sep = "\t", na = "NA")
+      }
     )
   })
 }
