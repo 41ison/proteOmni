@@ -16,10 +16,11 @@ compute_cv_mtx <- function(protein_matrix, group_labels) {
 
 # method: "knn" (fast, MAR), "minprob" (fastest, MNAR-aware), "missforest" (slow legacy)
 groupwise_imputation <- function(
-    data,
-    group_labels,
-    method = "knn",
-    verbose = TRUE) {
+  data,
+  group_labels,
+  method = "knn",
+  verbose = TRUE
+) {
   # If the dataset has zero NAs, don't waste time trying to impute
   if (sum(is.na(data)) == 0) {
     return(data)
@@ -196,7 +197,8 @@ pwrquant_palette_choices <- c(
 
 # Returns a ggsci color vector of length n (extended via colorRampPalette if needed)
 get_ggsci_colors <- function(pal_name, n) {
-  pal_fn <- switch(pal_name,
+  pal_fn <- switch(
+    pal_name,
     npg = ggsci::pal_npg(),
     aaas = ggsci::pal_aaas(),
     nejm = ggsci::pal_nejm(),
@@ -800,6 +802,24 @@ PwrQuant_body_ui <- function(id) {
               icon("spinner", class = "fa-spin")
             ),
             uiOutput(ns("upset_plot_ui"))
+          ),
+          tags$hr(style = "border-color:#2d3741;margin:12px 0;"),
+          tags$div(
+            style = "display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;",
+            tags$b("Proteins per intersection"),
+            downloadButton(
+              ns("download_upset_table"),
+              "⬇ Download table (.tsv)",
+              class = "dl-btn"
+            )
+          ),
+          p(
+            style = "color:#adb5bd;font-size:13px;",
+            "Each row lists a protein and the exact combination of conditions in which it was detected."
+          ),
+          div(
+            class = "plot-wrap",
+            DT::dataTableOutput(ns("upset_table"))
           )
         )
       )
@@ -3301,7 +3321,10 @@ PwrQuant_server <- function(id) {
             }
           },
           error = function(e) {
-            warning("Post-processed PLS-DA not available for export: ", e$message)
+            warning(
+              "Post-processed PLS-DA not available for export: ",
+              e$message
+            )
           }
         )
 
@@ -3310,56 +3333,61 @@ PwrQuant_server <- function(id) {
           {
             mat_z <- zscore_heatmap_data()
             if (!is.null(mat_z) && nrow(mat_z) > 0) {
-              safe_save_base("zscore_heatmap.png", function() {
-                meta_dl <- meta
-                col_order <- order(factor(
-                  meta_dl$Condition[match(colnames(mat_z), meta_dl$Sample)]
-                ))
-                mat_z_ord <- mat_z[, col_order, drop = FALSE]
-                col_labels <- disp_names[colnames(mat_z_ord)]
-                cond_vec <- meta_dl$Condition[match(
-                  colnames(mat_z_ord),
-                  meta_dl$Sample
-                )]
-                col_ha <- ComplexHeatmap::HeatmapAnnotation(
-                  Condition = cond_vec,
-                  col = list(Condition = cond_colors()),
-                  annotation_name_gp = grid::gpar(
-                    fontsize = 11,
-                    fontface = "bold"
-                  )
-                )
-                col_fun <- circlize::colorRamp2(
-                  c(-2, 0, 2),
-                  c("#2166AC", "white", "#B2182B")
-                )
-                ComplexHeatmap::draw(
-                  ComplexHeatmap::Heatmap(
-                    mat_z_ord,
-                    name = "Z-score",
-                    col = col_fun,
-                    na_col = "grey",
-                    cluster_rows = function(m) {
-                      hclust(dist(replace(m, is.na(m), 0)))
-                    },
-                    cluster_columns = FALSE,
-                    top_annotation = col_ha,
-                    column_labels = col_labels,
-                    column_names_rot = 45,
-                    column_names_gp = grid::gpar(
-                      fontsize = 10,
-                      fontface = "bold"
-                    ),
-                    row_names_gp = grid::gpar(fontsize = 8),
-                    show_row_names = nrow(mat_z_ord) <= 80,
-                    column_title = "Z-Score Protein Abundance",
-                    column_title_gp = grid::gpar(
-                      fontsize = 14,
+              safe_save_base(
+                "zscore_heatmap.png",
+                function() {
+                  meta_dl <- meta
+                  col_order <- order(factor(
+                    meta_dl$Condition[match(colnames(mat_z), meta_dl$Sample)]
+                  ))
+                  mat_z_ord <- mat_z[, col_order, drop = FALSE]
+                  col_labels <- disp_names[colnames(mat_z_ord)]
+                  cond_vec <- meta_dl$Condition[match(
+                    colnames(mat_z_ord),
+                    meta_dl$Sample
+                  )]
+                  col_ha <- ComplexHeatmap::HeatmapAnnotation(
+                    Condition = cond_vec,
+                    col = list(Condition = cond_colors()),
+                    annotation_name_gp = grid::gpar(
+                      fontsize = 11,
                       fontface = "bold"
                     )
                   )
-                )
-              }, w = 14, h = 10)
+                  col_fun <- circlize::colorRamp2(
+                    c(-2, 0, 2),
+                    c("#2166AC", "white", "#B2182B")
+                  )
+                  ComplexHeatmap::draw(
+                    ComplexHeatmap::Heatmap(
+                      mat_z_ord,
+                      name = "Z-score",
+                      col = col_fun,
+                      na_col = "grey",
+                      cluster_rows = function(m) {
+                        hclust(dist(replace(m, is.na(m), 0)))
+                      },
+                      cluster_columns = FALSE,
+                      top_annotation = col_ha,
+                      column_labels = col_labels,
+                      column_names_rot = 45,
+                      column_names_gp = grid::gpar(
+                        fontsize = 10,
+                        fontface = "bold"
+                      ),
+                      row_names_gp = grid::gpar(fontsize = 8),
+                      show_row_names = nrow(mat_z_ord) <= 80,
+                      column_title = "Z-Score Protein Abundance",
+                      column_title_gp = grid::gpar(
+                        fontsize = 14,
+                        fontface = "bold"
+                      )
+                    )
+                  )
+                },
+                w = 14,
+                h = 10
+              )
             }
           },
           error = function(e) {
@@ -3559,6 +3587,81 @@ PwrQuant_server <- function(id) {
       names(sets) <- conditions
       sets[vapply(sets, length, integer(1)) > 0]
     })
+
+    # Build a tidy table mapping each protein to its exact intersection
+    # (the combination of conditions in which it was detected).
+    upset_table_data <- reactive({
+      sets <- upset_sets()
+      req(length(sets) >= 1)
+
+      all_proteins <- sort(unique(unlist(sets, use.names = FALSE)))
+      cond_names <- names(sets)
+
+      # Presence matrix: proteins x conditions
+      presence <- vapply(
+        sets,
+        function(members) all_proteins %in% members,
+        logical(length(all_proteins))
+      )
+      presence <- matrix(
+        presence,
+        nrow = length(all_proteins),
+        dimnames = list(all_proteins, cond_names)
+      )
+
+      intersection <- apply(presence, 1, function(row) {
+        paste(cond_names[row], collapse = " & ")
+      })
+      degree <- rowSums(presence)
+
+      df <- data.frame(
+        Protein = all_proteins,
+        Intersection = intersection,
+        Degree = as.integer(degree),
+        stringsAsFactors = FALSE,
+        check.names = FALSE
+      )
+      # Attach a 0/1 indicator per condition for convenience
+      ind <- as.data.frame(presence + 0L, check.names = FALSE)
+      df <- cbind(df, ind)
+
+      # Order by intersection size (largest first), then protein
+      set_sizes <- table(df$Intersection)
+      df$.size <- as.integer(set_sizes[df$Intersection])
+      df <- df[order(-df$.size, df$Intersection, df$Protein), ]
+      df$.size <- NULL
+      rownames(df) <- NULL
+      df
+    })
+
+    output$upset_table <- DT::renderDataTable({
+      req(upset_table_data())
+      DT::datatable(
+        upset_table_data(),
+        rownames = FALSE,
+        filter = "top",
+        options = list(
+          pageLength = 15,
+          scrollX = TRUE,
+          order = list(list(2, "desc"))
+        ),
+        class = "display compact"
+      )
+    })
+
+    output$download_upset_table <- downloadHandler(
+      filename = function() {
+        paste0("upset_intersections_", Sys.Date(), ".tsv")
+      },
+      content = function(file) {
+        data.table::fwrite(
+          upset_table_data(),
+          file = file,
+          sep = "\t",
+          na = "NA"
+        )
+      }
+    )
 
     output$upset_plot_ui <- renderUI({
       req(upset_sets())
