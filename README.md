@@ -459,6 +459,52 @@ ComBat requires at least 2 distinct batch labels. If all samples are assigned to
 
 </details>
 
+<details>
+
+<summary><b>Linux: Arrow package not compiling</b></summary>
+
+With you have problems to compile the arrow-apache in proteOmni inicialization, install through your package manager, for example:
+
+```bash
+# Arch
+sudo pacman -S arrow
+
+# Debian/Ubuntu
+sudo apt install -y -V ca-certificates lsb-release wget
+wget https://packages.apache.org/artifactory/arrow/$(lsb_release --id --short | tr 'A-Z' 'a-z')/apache-arrow-apt-source-latest-$(lsb_release --codename --short).deb
+
+sudo apt install -y -V ./apache-arrow-apt-source-latest-$(lsb_release --codename --short).deb
+
+```
+
+ System dependecies for arrow compiling and work is: `gcc`, `curl`, `openssl`.
+</details>
+
+<details>
+
+<summary><b>Linux: Error in utils::browseURL(appUrl)</b></summary>
+
+The complete error is:
+```bash
+Error in utils::browseURL(appUrl) : 
+  'browser' should not be a empty string
+Calls: <Anonymous> -> .setupShinyApp -> <Anonymous>
+```
+
+R in terminal don't have a default browser for open, you have to configure manually
+
+```bash
+# In: /home/yourusername
+nano .Rprofile # <- Can use vim or emacs too
+
+# Insert this line
+options(browser = "<your default browser>")
+```
+
+This line tells R which browser to open, without it, it doesn't know where to open proteOmni
+
+</details>
+
 ---
 
 ## Citation
