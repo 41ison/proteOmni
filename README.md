@@ -1,3 +1,5 @@
+[![DOI](https://zenodo.org/badge/1205443879.svg)](https://doi.org/10.5281/zenodo.21195113)
+
 # proteOmni
 
 **proteOmni** is a comprehensive, unified Shiny-based dashboard for visual quality control (QC), diagnostics, and differential abundance analysis of proteomics results from multiple search engines and acquisition strategies. It centralizes eight specialized modules covering DDA, DIA, and *de novo* sequencing workflows into a single interactive application.
