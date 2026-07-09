@@ -63,6 +63,9 @@ if (!requireNamespace("sva", quietly = TRUE)) {
 if (!requireNamespace("impute", quietly = TRUE)) {
   BiocManager::install("impute", update = FALSE, ask = FALSE)
 }
+if (!requireNamespace("pcaMethods", quietly = TRUE)) {
+  BiocManager::install("pcaMethods", update = FALSE, ask = FALSE)
+}
 if (!requireNamespace("ComplexHeatmap", quietly = TRUE)) {
   BiocManager::install("ComplexHeatmap", update = FALSE, ask = FALSE)
 }

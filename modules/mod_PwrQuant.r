@@ -14,7 +14,8 @@ compute_cv_mtx <- function(protein_matrix, group_labels) {
   return(cv_results)
 }
 
-# method: "knn" (fast, MAR), "minprob" (fastest, MNAR-aware), "missforest" (slow legacy)
+# method: "knn" (fast, MAR), "minprob" (fastest, MNAR-aware),
+#         "missforest" (slow legacy), "bpca" (global Bayesian PCA, not groupwise)
 groupwise_imputation <- function(
   data,
   group_labels,
@@ -24,6 +25,47 @@ groupwise_imputation <- function(
   # If the dataset has zero NAs, don't waste time trying to impute
   if (sum(is.na(data)) == 0) {
     return(data)
+  }
+
+  if (method == "bpca") {
+    # ── Bayesian PCA: GLOBAL (full matrix, not groupwise) ────────────────────
+    # BPCA is a latent-factor Bayesian model that borrows signal across ALL
+    # samples/conditions via principal axes. Unlike KNN/MinProb/missForest it is
+    # intentionally NOT run per-group; running it groupwise would undercut the
+    # factor model. Falls back to KNN if pcaMethods is unavailable or fails.
+    if (verbose) {
+      message("Imputation: Bayesian PCA (global, full matrix)...")
+    }
+    result <- tryCatch(
+      {
+        # pcaMethods expects samples in rows, features in columns.
+        n_pcs <- min(10L, ncol(data) - 1L, nrow(data) - 1L)
+        n_pcs <- max(1L, n_pcs)
+        pc <- pcaMethods::pca(
+          t(data),
+          method = "bpca",
+          nPcs = n_pcs,
+          verbose = FALSE
+        )
+        completed <- t(pcaMethods::completeObs(pc))
+        dimnames(completed) <- dimnames(data)
+        completed
+      },
+      error = function(e) {
+        warning(
+          "Bayesian PCA imputation failed, falling back to KNN: ",
+          e$message
+        )
+        NULL
+      }
+    )
+    if (!is.null(result)) {
+      if (verbose) {
+        message("Bayesian PCA imputation complete.")
+      }
+      return(result)
+    }
+    method <- "knn"
   }
 
   if (method == "knn") {
@@ -268,7 +310,8 @@ PwrQuant_sidebar_ui <- function(id) {
           choices = c(
             "KNN — fast, MAR-appropriate" = "knn",
             "MinProb — fastest, MNAR-aware" = "minprob",
-            "missForest — accurate, very slow ☕" = "missforest"
+            "missForest — accurate, very slow ☕" = "missforest",
+            "Bayesian PCA — global latent-factor model" = "bpca"
           ),
           selected = "knn"
         )
@@ -693,6 +736,20 @@ PwrQuant_body_ui <- function(id) {
               icon("spinner", class = "fa-spin")
             ),
             uiOutput(ns("adv_corr_plot_ui"))
+          ),
+          tags$div(
+            style = "margin-top:14px;",
+            tags$h5(
+              style = "font-weight:700;color:#1B4965;margin-bottom:6px;",
+              "Proteins in selected correlation"
+            ),
+            tags$p(
+              style = "color:#6c757d;font-size:12px;margin-bottom:8px;",
+              "Updates with the selected contrast pair. The ",
+              tags$code("class"),
+              " column holds the correlation status."
+            ),
+            DT::dataTableOutput(ns("adv_corr_table"))
           )
         )
       )
@@ -1251,7 +1308,8 @@ PwrQuant_server <- function(id) {
           imp_labels <- c(
             knn = "KNN imputation",
             minprob = "MinProb imputation",
-            missforest = "missForest imputation (this may take a long time) ☕"
+            missforest = "missForest imputation (this may take a long time) ☕",
+            bpca = "Bayesian PCA imputation (global)"
           )
           incProgress(
             0.15,
@@ -2170,46 +2228,92 @@ PwrQuant_server <- function(id) {
       }
     })
 
+    # Shared reactive: proteins merged across the selected contrast pair.
+    # Both the correlation plot and the dynamic table consume this, so they
+    # always stay in sync when the user changes the X/Y contrasts.
+    adv_corr_data <- reactive({
+      lr <- limma_results_ev()$limma_results
+      req(
+        input$adv_corr_x,
+        input$adv_corr_y,
+        input$adv_corr_x != input$adv_corr_y
+      )
+
+      dx <- lr |>
+        dplyr::filter(comparison == input$adv_corr_x) |>
+        dplyr::select(Protein, logFC, status) |>
+        dplyr::rename(logFC_x = logFC, status_x = status)
+      dy <- lr |>
+        dplyr::filter(comparison == input$adv_corr_y) |>
+        dplyr::select(Protein, logFC, status) |>
+        dplyr::rename(logFC_y = logFC, status_y = status)
+
+      dplyr::inner_join(dx, dy, by = "Protein") |>
+        dplyr::mutate(
+          class = dplyr::case_when(
+            (status_x == status_y) &
+              (status_x != "Not significant") ~ "Concordant",
+            (status_x != "Not significant") &
+              (status_y != "Not significant") &
+              (status_x != status_y) ~ "Inverse",
+            xor(
+              status_x == "Not significant",
+              status_y == "Not significant"
+            ) ~ "Mismatch",
+            TRUE ~ "Not significant"
+          )
+        )
+    })
+
+    output$adv_corr_table <- DT::renderDataTable({
+      merged <- adv_corr_data()
+      tbl <- merged |>
+        dplyr::mutate(
+          logFC_x = round(logFC_x, 3),
+          logFC_y = round(logFC_y, 3),
+          status_x = as.character(status_x),
+          status_y = as.character(status_y)
+        ) |>
+        dplyr::select(
+          Protein,
+          logFC_x,
+          logFC_y,
+          status_x,
+          status_y,
+          class
+        )
+      # Dynamic, contrast-aware column names for the two logFC columns.
+      col_names <- c(
+        "Protein",
+        paste0("logFC: ", input$adv_corr_x),
+        paste0("logFC: ", input$adv_corr_y),
+        paste0("status: ", input$adv_corr_x),
+        paste0("status: ", input$adv_corr_y),
+        "class"
+      )
+      DT::datatable(
+        tbl,
+        colnames = col_names,
+        rownames = FALSE,
+        filter = "top",
+        options = list(
+          pageLength = 15,
+          scrollX = TRUE,
+          order = list(list(5, "asc"))
+        ),
+        class = "display compact"
+      )
+    })
+
     output$adv_corr_plot <- renderPlot({
       rh(
         function() {
-          lr <- limma_results_ev()$limma_results
-          req(
-            input$adv_corr_x,
-            input$adv_corr_y,
-            input$adv_corr_x != input$adv_corr_y
-          )
-
-          dx <- lr |>
-            dplyr::filter(comparison == input$adv_corr_x) |>
-            dplyr::select(Protein, logFC, status) |>
-            dplyr::rename(logFC_x = logFC, status_x = status)
-          dy <- lr |>
-            dplyr::filter(comparison == input$adv_corr_y) |>
-            dplyr::select(Protein, logFC, status) |>
-            dplyr::rename(logFC_y = logFC, status_y = status)
-
-          merged <- dplyr::inner_join(dx, dy, by = "Protein") |>
-            dplyr::mutate(
-              class = dplyr::case_when(
-                (status_x == status_y) &
-                  (status_x != "Not significant") ~ "Concordant",
-                (status_x != "Not significant") &
-                  (status_y != "Not significant") &
-                  (status_x != status_y) ~ "Inverse",
-                xor(
-                  status_x == "Not significant",
-                  status_y == "Not significant"
-                ) ~ "Mismatch",
-                TRUE ~ "Not significant"
-              )
-            )
+          merged <- adv_corr_data()
 
           rho_classes <- c("Concordant", "Inverse", "Mismatch")
           rho_ann <- do.call(
             rbind,
-            lapply(seq_along(rho_classes), function(i) {
-              cl <- rho_classes[i]
+            lapply(rho_classes, function(cl) {
               sub <- merged[merged$class == cl, ]
               if (nrow(sub) >= 3) {
                 r <- cor(
@@ -2221,7 +2325,6 @@ PwrQuant_server <- function(id) {
                 data.frame(
                   class = cl,
                   label = paste0(cl, ": \u03c1 = ", round(r, 3)),
-                  vjust_pos = 0.5 + (i - 1) * 1.8,
                   stringsAsFactors = FALSE
                 )
               } else {
@@ -2229,6 +2332,26 @@ PwrQuant_server <- function(id) {
               }
             })
           )
+
+          # Position ρ labels using data-relative coordinates so they always sit
+          # INSIDE the panel (the previous Inf/vjust stacking clipped labels).
+          # Anchor at the top-left, left-aligned, stepping down by a fixed
+          # fraction of the y-range for each successive class.
+          if (!is.null(rho_ann) && nrow(rho_ann) > 0) {
+            x_rng <- range(merged$logFC_x, na.rm = TRUE)
+            y_rng <- range(merged$logFC_y, na.rm = TRUE)
+            x_span <- diff(x_rng)
+            y_span <- diff(y_rng)
+            if (!is.finite(x_span) || x_span == 0) {
+              x_span <- 1
+            }
+            if (!is.finite(y_span) || y_span == 0) {
+              y_span <- 1
+            }
+            rho_ann$x_pos <- x_rng[1] + 0.02 * x_span
+            rho_ann$y_pos <- y_rng[2] -
+              (seq_len(nrow(rho_ann)) - 1) * 0.07 * y_span
+          }
 
           corr_colors <- c(
             "Concordant" = "#11d362",
@@ -2259,6 +2382,10 @@ PwrQuant_server <- function(id) {
             geom_hline(yintercept = 0, color = "grey50", linewidth = 0.3) +
             geom_vline(xintercept = 0, color = "grey50", linewidth = 0.3) +
             scale_color_manual(values = corr_colors) +
+            scale_y_continuous(
+              expand = expansion(mult = c(0.05, 0.08))
+            ) +
+            coord_cartesian(clip = "off") +
             labs(
               title = paste(input$adv_corr_x, "vs", input$adv_corr_y),
               x = paste0("log\u2082FC: ", input$adv_corr_x),
@@ -2280,10 +2407,9 @@ PwrQuant_server <- function(id) {
             p_corr <- p_corr +
               geom_text(
                 data = rho_ann,
-                aes(label = label, color = class, vjust = vjust_pos),
-                x = Inf,
-                y = Inf,
-                hjust = 1,
+                aes(x = x_pos, y = y_pos, label = label, color = class),
+                hjust = 0,
+                vjust = 1,
                 size = 4,
                 fontface = "bold",
                 inherit.aes = FALSE,

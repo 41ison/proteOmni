@@ -289,6 +289,7 @@ Imputation is performed when **Limma Regression Method** is set to `robust`. Thr
 | **KNN** (default) | ⚡ ~0.2 s | MAR / MCAR — borrows information from k=5 nearest proteins | General use; moderate missingness |
 | **MinProb** | ⚡⚡ ~0.03 s | MNAR — Gaussian draw at the detection limit (mean − 1.8 SD per column) | MNAR-dominated datasets, large matrices |
 | **missForest** | 🐢 ~40 min | MAR / MCAR — random-forest multiple imputation | Maximum accuracy; small matrices are preferred |
+| **bPCA** | ⚡ ~2 min | MAR / MCAR - BPCA borrows signal across all samples and conditions | Flexible statistical framework |
 
 > **Why missForest is slow:** after transposition, missForest receives a P-sample × N-protein matrix and builds one random forest per protein to predict missing values. For a typical proteomics dataset with 3,000 proteins across 3 groups, this means ~9,000 forests — reducing `ntree` or `maxiter` does not help because the bottleneck is the number of trees, not their depth. KNN is **~10,000× faster** and MinProb is **~73,000× faster** for equivalent datasets in our tests.
 
