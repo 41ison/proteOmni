@@ -1,4 +1,5 @@
 [![DOI](https://zenodo.org/badge/1205443879.svg)](https://doi.org/10.5281/zenodo.21195113)
+![GitHub Downloads (all assets, all releases)](https://img.shields.io/github/downloads/41ison/proteOmni/total)
 
 # proteOmni
 
