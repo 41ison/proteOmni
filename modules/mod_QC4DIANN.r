@@ -202,6 +202,15 @@ QC4DIANN_ui <- function(id) {
       # ── TAB 2: Interactive Viewer ──
       tabPanel(
         "Interactive Viewer",
+        fluidRow(column(
+          12,
+          downloadButton(
+            ns("download_all_viewer_plots"),
+            tagList(icon("file-zipper"), " Download All Plots (.zip)"),
+            class = "dl-btn",
+            style = "margin-bottom:12px;"
+          )
+        )),
         fluidRow(
           box(
             title = "Sample Correlation — Non-normalized log₂(Intensity)",
@@ -291,6 +300,15 @@ QC4DIANN_ui <- function(id) {
       tabPanel(
         "Peptide Mapping",
         fluidRow(uiOutput(ns("pep_map_banner"))),
+        fluidRow(column(
+          12,
+          downloadButton(
+            ns("download_all_peptide_plots"),
+            tagList(icon("file-zipper"), " Download All Plots (.zip)"),
+            class = "dl-btn",
+            style = "margin-bottom:12px;"
+          )
+        )),
         fluidRow(box(
           title = "Protein Sequence View",
           status = "primary",
@@ -397,6 +415,15 @@ QC4DIANN_ui <- function(id) {
       tabPanel(
         "Protease Specificity",
         fluidRow(uiOutput(ns("prot_spec_banner"))),
+        fluidRow(column(
+          12,
+          downloadButton(
+            ns("download_all_protease_plots"),
+            tagList(icon("file-zipper"), " Download All Plots (.zip)"),
+            class = "dl-btn",
+            style = "margin-bottom:12px;"
+          )
+        )),
         fluidRow(box(
           title = "Schechter-Berger Sequence Logo (P4–P4') — All Runs Combined",
           status = "primary",
@@ -417,6 +444,15 @@ QC4DIANN_ui <- function(id) {
       # ── TAB: Modification Diagnostic ──────────────────────────────────────
       tabPanel(
         "Modification Diagnostic",
+        fluidRow(column(
+          12,
+          downloadButton(
+            ns("download_all_mod_diag_plots"),
+            tagList(icon("file-zipper"), " Download All Plots (.zip)"),
+            class = "dl-btn",
+            style = "margin-bottom:12px;"
+          )
+        )),
         fluidRow(
           box(
             title = "RT Shift Profile — Modified vs Unmodified Peptides",
@@ -1455,7 +1491,7 @@ QC4DIANN_server <- function(id) {
       plotOutput(ns("protein_coverage_plot"), height = paste0(ph, "px"))
     })
 
-    output$protein_coverage_plot <- renderPlot({
+    protein_coverage_grob_obj <- reactive({
       pd <- coverage_plot_data_qc4()
       req(is.null(pd$error), pd$protein_sequence)
       apl <- max(
@@ -1566,11 +1602,17 @@ QC4DIANN_server <- function(id) {
         gp = grid::gpar(fontsize = 16, fontface = "bold")
       )
       combined <- do.call(gridExtra::arrangeGrob, c(plots, ncol = 1))
-      gridExtra::grid.arrange(
+      gridExtra::arrangeGrob(
         tg,
         combined,
         heights = c(0.5, max(4, nr_runs) * 1.5)
       )
+    })
+
+    output$protein_coverage_plot <- renderPlot({
+      grob <- protein_coverage_grob_obj()
+      req(grob)
+      grid::grid.draw(grob)
     })
 
     # ════════════════════════════════════════════════════════════════════════
@@ -1895,7 +1937,7 @@ QC4DIANN_server <- function(id) {
       labels = c("P4", "P3", "P2", "P1", "P1'", "P2'", "P3'", "P4'")
     )
 
-    output$seqlogo_all <- renderPlot({
+    seqlogo_all_obj <- reactive({
       req(input$fasta_file)
       cw <- cleavage_windows()
       req(nrow(cw) > 0)
@@ -1908,6 +1950,33 @@ QC4DIANN_server <- function(id) {
           y = "Probability"
         ) +
         theme(plot.title = element_text(hjust = 0.5, face = "bold", size = 14))
+    })
+
+    output$seqlogo_all <- renderPlot({
+      seqlogo_all_obj()
+    })
+
+    seqlogo_perrun_objs <- reactive({
+      req(input$fasta_file)
+      cw <- cleavage_windows()
+      req(nrow(cw) > 0)
+      runs <- unique(cw$Run)
+      objs <- lapply(runs, function(rn) {
+        sub_cw <- dplyr::filter(cw, Run == rn)
+        if (nrow(sub_cw) < 10) {
+          return(NULL)
+        }
+        ggseqlogo::ggseqlogo(
+          build_logo_matrix(sub_cw),
+          method = "prob",
+          seq_type = "aa"
+        ) +
+          seqlogo_x_scale +
+          labs(x = "Position (P4–P4')", y = "Probability") +
+          theme(plot.title = element_text(hjust = 0.5, face = "bold"))
+      })
+      names(objs) <- runs
+      objs
     })
 
     output$seqlogo_perrun_ui <- renderUI({
@@ -1938,18 +2007,8 @@ QC4DIANN_server <- function(id) {
               rn <- runs[i]
               oid <- paste0("seqlogo_run_", i)
               output[[oid]] <- renderPlot({
-                sub_cw <- dplyr::filter(cw, Run == rn)
-                if (nrow(sub_cw) < 10) {
-                  return(NULL)
-                }
-                ggseqlogo::ggseqlogo(
-                  build_logo_matrix(sub_cw),
-                  method = "prob",
-                  seq_type = "aa"
-                ) +
-                  seqlogo_x_scale +
-                  labs(x = "Position (P4–P4')", y = "Probability") +
-                  theme(plot.title = element_text(hjust = 0.5, face = "bold"))
+                req(seqlogo_perrun_objs()[[rn]])
+                seqlogo_perrun_objs()[[rn]]
               })
             })
           }
@@ -2022,6 +2081,176 @@ QC4DIANN_server <- function(id) {
       }
     )
 
+    # ── Shared helper: save a plot-like object (ggplot / ggmatrix / grob) ──
+    save_plot_obj <- function(fp, obj, w, h) {
+      if (is.null(obj)) {
+        return(FALSE)
+      }
+      ggsave(fp, obj, width = w, height = h, dpi = 300, bg = "white")
+      TRUE
+    }
+
+    # ── Download All Plots — Interactive Viewer tab (.zip) ──
+    output$download_all_viewer_plots <- downloadHandler(
+      filename = function() {
+        paste0("QC4DIANN_InteractiveViewer_plots_", Sys.Date(), ".zip")
+      },
+      content = function(file) {
+        td <- tempdir()
+        fps <- character()
+        save_p <- function(nm, fn, w = 10, h = 8) {
+          fp <- file.path(td, nm)
+          tryCatch(
+            {
+              if (save_plot_obj(fp, fn(), w, h)) fps <<- c(fps, fp)
+            },
+            error = function(e) message("Skip ", nm, ": ", conditionMessage(e))
+          )
+        }
+
+        withProgress(message = "Saving plots...", value = 0, {
+          save_p(
+            "cosine_similarity.png",
+            function() cosine_obj(),
+            w = 10,
+            h = 10
+          )
+          incProgress(1 / 6)
+          save_p(
+            "euclidean_distance.png",
+            function() euclidean_obj(),
+            w = 10,
+            h = 10
+          )
+          incProgress(1 / 6)
+          save_p(
+            "jaccard_similarity.png",
+            function() jaccard_obj(),
+            w = 10,
+            h = 10
+          )
+          incProgress(1 / 6)
+          save_p("PCA.png", function() pca_data(), w = 10, h = 8)
+          incProgress(1 / 6)
+          save_p(
+            "sample_correlation_matrix.png",
+            function() plot_ggpairs_obj(),
+            w = 14,
+            h = 14
+          )
+          incProgress(1 / 6)
+          save_p("EFA.png", function() plot_efa_obj(), w = 10, h = 8)
+          incProgress(1 / 6)
+        })
+
+        req(length(fps) > 0)
+        utils::zip(file, files = fps, flags = "-j")
+      },
+      contentType = "application/zip"
+    )
+
+    # ── Download All Plots — Peptide Mapping tab (.zip) ──
+    output$download_all_peptide_plots <- downloadHandler(
+      filename = function() {
+        paste0("QC4DIANN_PeptideMapping_plots_", Sys.Date(), ".zip")
+      },
+      content = function(file) {
+        td <- tempdir()
+        fps <- character()
+        save_p <- function(nm, fn, w = 10, h = 8) {
+          fp <- file.path(td, nm)
+          tryCatch(
+            {
+              if (save_plot_obj(fp, fn(), w, h)) fps <<- c(fps, fp)
+            },
+            error = function(e) message("Skip ", nm, ": ", conditionMessage(e))
+          )
+        }
+
+        withProgress(message = "Saving plots...", value = 0, {
+          if (!is.null(input$fasta_file)) {
+            save_p(
+              "protein_coverage.png",
+              function() protein_coverage_grob_obj(),
+              w = 12,
+              h = 8
+            )
+            save_p(
+              "aa_frequency.png",
+              function() plot_aa_freq_obj(),
+              w = 12,
+              h = 8
+            )
+            save_p(
+              "peptide_type_counts.png",
+              function() plot_pep_count_obj(),
+              w = 10,
+              h = 8
+            )
+            save_p(
+              "peptide_type_proportions.png",
+              function() plot_pep_prop_obj(),
+              w = 10,
+              h = 8
+            )
+          }
+          incProgress(1)
+        })
+
+        req(length(fps) > 0)
+        utils::zip(file, files = fps, flags = "-j")
+      },
+      contentType = "application/zip"
+    )
+
+    # ── Download All Plots — Protease Specificity tab (.zip) ──
+    output$download_all_protease_plots <- downloadHandler(
+      filename = function() {
+        paste0("QC4DIANN_ProteaseSpecificity_plots_", Sys.Date(), ".zip")
+      },
+      content = function(file) {
+        td <- tempdir()
+        fps <- character()
+        save_p <- function(nm, fn, w = 10, h = 6) {
+          fp <- file.path(td, nm)
+          tryCatch(
+            {
+              if (save_plot_obj(fp, fn(), w, h)) fps <<- c(fps, fp)
+            },
+            error = function(e) message("Skip ", nm, ": ", conditionMessage(e))
+          )
+        }
+
+        withProgress(message = "Saving plots...", value = 0, {
+          if (!is.null(input$fasta_file)) {
+            save_p(
+              "seqlogo_all_runs.png",
+              function() seqlogo_all_obj(),
+              w = 12,
+              h = 5
+            )
+            objs <- tryCatch(seqlogo_perrun_objs(), error = function(e) list())
+            for (rn in names(objs)) {
+              if (!is.null(objs[[rn]])) {
+                safe_rn <- gsub("[^A-Za-z0-9_.-]", "_", rn)
+                save_p(
+                  paste0("seqlogo_", safe_rn, ".png"),
+                  function() objs[[rn]],
+                  w = 10,
+                  h = 5
+                )
+              }
+            }
+          }
+          incProgress(1)
+        })
+
+        req(length(fps) > 0)
+        utils::zip(file, files = fps, flags = "-j")
+      },
+      contentType = "application/zip"
+    )
+
     output$download_mod_diag_plot <- downloadHandler(
       filename = function() {
         paste0("mod_diagnostic_", Sys.Date(), ".png")
@@ -2043,6 +2272,40 @@ QC4DIANN_server <- function(id) {
           dpi = 300
         )
       }
+    )
+
+    # ── Download All Plots — Modification Diagnostic tab (.zip) ──
+    output$download_all_mod_diag_plots <- downloadHandler(
+      filename = function() {
+        paste0("QC4DIANN_ModDiagnostic_plots_", Sys.Date(), ".zip")
+      },
+      content = function(file) {
+        td <- tempdir()
+        fps <- character()
+        save_p <- function(nm, fn, w = 14, h = 10) {
+          fp <- file.path(td, nm)
+          tryCatch(
+            {
+              if (save_plot_obj(fp, fn(), w, h)) fps <<- c(fps, fp)
+            },
+            error = function(e) message("Skip ", nm, ": ", conditionMessage(e))
+          )
+        }
+
+        withProgress(message = "Saving plot...", value = 0, {
+          obj <- mod_diag_plot_obj()
+          paired <- mod_diag_data()
+          n_samp <- dplyr::n_distinct(paired$sample_name)
+          n_pepts <- length(mod_diag_visible_peptides())
+          h_in <- min(max(6, n_samp * 3 + n_pepts * 0.18), 30)
+          save_p("mod_diagnostic.png", function() obj, w = 14, h = h_in)
+          incProgress(1)
+        })
+
+        req(length(fps) > 0)
+        utils::zip(file, files = fps, flags = "-j")
+      },
+      contentType = "application/zip"
     )
 
     # ════════════════════════════════════════════════════════════════════════
