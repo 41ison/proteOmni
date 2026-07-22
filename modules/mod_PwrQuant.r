@@ -293,7 +293,7 @@ PwrQuant_sidebar_ui <- function(id) {
       selectInput(
         ns("norm_method"),
         "Normalization Method",
-        choices = c("scale", "quantile", "cyclicloess"),
+        choices = c("none", "scale", "quantile", "cyclicloess"),
         selected = "cyclicloess"
       ),
       selectInput(
