@@ -283,7 +283,7 @@ PwrQuant_sidebar_ui <- function(id) {
         ns("cond_palette"),
         "Condition colour palette",
         choices = pwrquant_palette_choices,
-        selected = "npg"
+        selected = "simpsons"
       ),
       tags$hr(style = "border-color:#2d3741;margin:4px 0;"),
       tags$div(
@@ -1392,6 +1392,12 @@ PwrQuant_server <- function(id) {
           limma_mtx <- limma::normalizeBetweenArrays(
             as.matrix(mtx_batch_correct),
             method = "scale"
+          ) %>%
+            as.data.frame()
+        } else if (norm_meth == "none") {
+          limma_mtx <- limma::normalizeBetweenArrays(
+            as.matrix(mtx_batch_correct),
+            method = "none"
           ) %>%
             as.data.frame()
         } else {
