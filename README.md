@@ -305,6 +305,7 @@ Three between-array normalization methods are available via `limma::normalizeBet
 
 | Method | When to use |
 |---|---|
+| `none` | When the data behaves very well |
 | `cyclicloess` (default) | General purpose; robust to composition effects |
 | `quantile` | When identical distributions across samples is a valid assumption |
 | `scale` | Per-sample mean/variance scaling |
