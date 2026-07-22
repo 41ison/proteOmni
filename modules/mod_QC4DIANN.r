@@ -29,6 +29,21 @@ QC4DIANN_sidebar_ui <- function(id) {
       )
     ),
     tags$hr(style = "border-color:#2d3741;margin:4px 0;"),
+    tags$div(class = "sidebar-section-label", "Protein Matrix Options"),
+    tags$div(
+      style = "padding:0 16px;",
+      selectInput(
+        ns("id_header"),
+        "Protein Matrix ID Column",
+        choices = c(
+          "Protein.Ids" = "Protein.Ids",
+          "Protein.Names" = "Protein.Names",
+          "Genes" = "Genes"
+        ),
+        selected = "Protein.Ids"
+      )
+    ),
+    tags$hr(style = "border-color:#2d3741;margin:4px 0;"),
     tags$div(class = "sidebar-section-label", "QuantUMS Filters"),
     tags$div(
       style = "padding:0 16px;",
@@ -506,12 +521,18 @@ QC4DIANN_server <- function(id) {
           Lib.PG.Q.Value <= 0.01,
           Lib.Q.Value <= 0.01,
           PG.Q.Value <= 0.01,
-          PG.MaxLFQ.Quality >= ifelse(
-            is.null(input$PG.MaxLFQ.Quality), 0, input$PG.MaxLFQ.Quality
-          ),
-          Empirical.Quality >= ifelse(
-            is.null(input$Empirical.Quality), 0, input$Empirical.Quality
-          )
+          PG.MaxLFQ.Quality >=
+            ifelse(
+              is.null(input$PG.MaxLFQ.Quality),
+              0,
+              input$PG.MaxLFQ.Quality
+            ),
+          Empirical.Quality >=
+            ifelse(
+              is.null(input$Empirical.Quality),
+              0,
+              input$Empirical.Quality
+            )
         ) %>%
         dplyr::mutate(
           File.Name = Run,
@@ -535,9 +556,15 @@ QC4DIANN_server <- function(id) {
 
     unique_genes <- reactive({
       req(data())
+      id_header <- if (is.null(input$id_header)) {
+        "Protein.Ids"
+      } else {
+        input$id_header
+      }
+      req(id_header %in% names(data()))
       diann::diann_matrix(
         as.data.frame(data()),
-        id.header = "Protein.Ids",
+        id.header = id_header,
         quantity.header = "Genes.MaxLFQ.Unique",
         proteotypic.only = FALSE,
         pg.q = 0.01
@@ -579,8 +606,10 @@ QC4DIANN_server <- function(id) {
           PG.Q.Value <= 0.01,
           !stringr::str_detect(Protein.Ids, "cRAP")
         )
-      # Empirical.Quality may not exist in older DIA-NN versions
-      if (!"Empirical.Quality" %in% names(df)) df$Empirical.Quality <- 0
+
+      if (!"Empirical.Quality" %in% names(df)) {
+        df$Empirical.Quality <- 0
+      }
       df %>%
         dplyr::select(
           Run,
@@ -638,7 +667,6 @@ QC4DIANN_server <- function(id) {
       req(input$report)
       data_parquet <- arrow::read_parquet(input$report$datapath)
 
-      # Empirical.Quality may not exist in older DIA-NN versions
       if (!"Empirical.Quality" %in% names(data_parquet)) {
         data_parquet$Empirical.Quality <- 0
       }
@@ -662,7 +690,11 @@ QC4DIANN_server <- function(id) {
       ve <- summary(pca_res)$importance[2, ] * 100
       ggplot(scores, aes(x = PC1, y = PC2, colour = Sample)) +
         geom_point(size = 3) +
-        ggrepel::geom_text_repel(aes(label = Sample), size = 3, max.overlaps = 20) +
+        ggrepel::geom_text_repel(
+          aes(label = Sample),
+          size = 3,
+          max.overlaps = 20
+        ) +
         labs(
           x = paste0("PC1 (", round(ve[1], 1), "%)"),
           y = paste0("PC2 (", round(ve[2], 1), "%)"),
@@ -758,7 +790,6 @@ QC4DIANN_server <- function(id) {
         dplyr::summarise(n = n(), .groups = "drop")
     })
 
-    # ── Cleavage windows helpers ───────────────────────────────
     extract_one_window <- function(pep, prot_id, full_seqs) {
       if (
         is.null(prot_id) ||
@@ -1211,7 +1242,8 @@ QC4DIANN_server <- function(id) {
     current_qc_plot_obj <- eventReactive(input$run_qc_plot, {
       req(input$qc_plot_select)
       show_spinner("sp_qc_main")
-      switch(input$qc_plot_select,
+      switch(
+        input$qc_plot_select,
         "plot1" = plot1_obj(),
         "plot2" = plot2_obj(),
         "plot3" = plot3_obj(),
@@ -1936,12 +1968,28 @@ QC4DIANN_server <- function(id) {
     # ════════════════════════════════════════════════════════════════════════
     output$download_matrix <- downloadHandler(
       filename = function() {
-        paste0("filtered_protein_matrix_", Sys.Date(), ".tsv")
+        id_header <- if (is.null(input$id_header)) {
+          "Protein.Ids"
+        } else {
+          input$id_header
+        }
+        paste0(
+          "filtered_protein_matrix_",
+          id_header,
+          "_",
+          Sys.Date(),
+          ".tsv"
+        )
       },
       content = function(file) {
+        id_header <- if (is.null(input$id_header)) {
+          "Protein.Ids"
+        } else {
+          input$id_header
+        }
         data.table::fwrite(
           as.data.frame(unique_genes()) %>%
-            tibble::rownames_to_column("protein_id"),
+            tibble::rownames_to_column(id_header),
           file = file,
           sep = ",",
           na = "NA"
