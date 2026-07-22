@@ -26,6 +26,7 @@ CRAN_packages <- c(
   "vegan",
   "plotly",
   "viridis",
+  "RColorBrewer",
   "ggfortify",
   "seqinr",
   "zip",
@@ -106,6 +107,7 @@ library(lsa)
 library(vegan)
 library(plotly)
 library(viridis)
+library(RColorBrewer)
 library(ggfortify)
 library(seqinr)
 library(zip)

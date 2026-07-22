@@ -221,24 +221,97 @@ org_db_choices <- c(
   "Macaque (org.Mmu.eg.db)" = "org.Mmu.eg.db"
 )
 
-# ── ggsci palette options ──────────────────────────────────────────────────
-pwrquant_palette_choices <- c(
-  "NPG (Nature)" = "npg",
-  "AAAS (Science)" = "aaas",
-  "NEJM" = "nejm",
-  "Lancet" = "lancet",
-  "JAMA" = "jama",
-  "JCO" = "jco",
-  "D3 (Observable)" = "d3",
-  "Futurama" = "futurama",
-  "Simpsons" = "simpsons",
-  "Star Trek" = "startrek",
-  "UCSC Genome Browser" = "ucscgb",
-  "IGV (51 colors)" = "igv"
+# ── Color palette options (ggsci, viridis, RColorBrewer) ───────────────────
+pwrquant_palette_choices <- list(
+  "ggsci" = c(
+    "NPG (Nature)" = "npg",
+    "AAAS (Science)" = "aaas",
+    "NEJM" = "nejm",
+    "Lancet" = "lancet",
+    "JAMA" = "jama",
+    "JCO" = "jco",
+    "D3 (Observable)" = "d3",
+    "Futurama" = "futurama",
+    "Simpsons" = "simpsons",
+    "Star Trek" = "startrek",
+    "UCSC Genome Browser" = "ucscgb",
+    "IGV (51 colors)" = "igv"
+  ),
+  "Viridis" = c(
+    "Viridis" = "viridis",
+    "Magma" = "magma",
+    "Inferno" = "inferno",
+    "Plasma" = "plasma",
+    "Cividis" = "cividis",
+    "Rocket" = "rocket",
+    "Mako" = "mako",
+    "Turbo" = "turbo"
+  ),
+  "ColorBrewer - Qualitative" = c(
+    "Set1" = "brewer_Set1",
+    "Set2" = "brewer_Set2",
+    "Set3" = "brewer_Set3",
+    "Paired" = "brewer_Paired",
+    "Dark2" = "brewer_Dark2",
+    "Pastel1" = "brewer_Pastel1",
+    "Pastel2" = "brewer_Pastel2",
+    "Accent" = "brewer_Accent"
+  ),
+  "ColorBrewer - Sequential" = c(
+    "Blues" = "brewer_Blues",
+    "Greens" = "brewer_Greens",
+    "Oranges" = "brewer_Oranges",
+    "Purples" = "brewer_Purples",
+    "Reds" = "brewer_Reds",
+    "YlOrRd" = "brewer_YlOrRd",
+    "BuGn" = "brewer_BuGn",
+    "PuBuGn" = "brewer_PuBuGn"
+  ),
+  "ColorBrewer - Diverging" = c(
+    "RdBu" = "brewer_RdBu",
+    "RdYlBu" = "brewer_RdYlBu",
+    "PiYG" = "brewer_PiYG",
+    "Spectral" = "brewer_Spectral"
+  )
 )
 
-# Returns a ggsci color vector of length n (extended via colorRampPalette if needed)
-get_ggsci_colors <- function(pal_name, n) {
+# Maximum number of colors natively supported by each RColorBrewer palette
+brewer_max_n <- c(
+  Set1 = 9, Set2 = 8, Set3 = 12, Paired = 12, Dark2 = 8,
+  Pastel1 = 9, Pastel2 = 8, Accent = 8,
+  Blues = 9, Greens = 9, Oranges = 9, Purples = 9, Reds = 9,
+  YlOrRd = 9, BuGn = 9, PuBuGn = 9,
+  RdBu = 11, RdYlBu = 11, PiYG = 11, Spectral = 11
+)
+
+# Returns a color vector of length n for the selected palette (ggsci, viridis,
+# or RColorBrewer), extending via colorRampPalette when the base palette has
+# fewer colors than requested.
+get_palette_colors <- function(pal_name, n) {
+  n <- max(n, 1L)
+
+  # RColorBrewer palettes are prefixed with "brewer_"
+  if (grepl("^brewer_", pal_name)) {
+    brewer_name <- sub("^brewer_", "", pal_name)
+    max_n <- brewer_max_n[[brewer_name]] %||% 9
+    # brewer.pal requires at least 3 colors
+    base_n <- max(min(n, max_n), 3L)
+    cols <- tryCatch(
+      RColorBrewer::brewer.pal(base_n, brewer_name),
+      error = function(e) RColorBrewer::brewer.pal(3L, "Set1")
+    )[seq_len(min(n, base_n))]
+    if (n > length(cols)) {
+      cols <- colorRampPalette(cols)(n)
+    }
+    return(cols)
+  }
+
+  # viridis-family palettes
+  if (pal_name %in% c("viridis", "magma", "inferno", "plasma", "cividis", "rocket", "mako", "turbo")) {
+    return(viridisLite::viridis(n, option = pal_name))
+  }
+
+  # ggsci palettes
   pal_fn <- switch(
     pal_name,
     npg = ggsci::pal_npg(),
@@ -255,11 +328,21 @@ get_ggsci_colors <- function(pal_name, n) {
     igv = ggsci::pal_igv(),
     ggsci::pal_npg()
   )
-  # Each ggsci palette function accepts the number of colors
+
   base_n <- min(n, 100L)
-  cols <- tryCatch(pal_fn(base_n), error = function(e) pal_fn(1L))
+  cols <- suppressWarnings(
+    tryCatch(pal_fn(base_n), error = function(e) pal_fn(1L))
+  )
+  # Some ggsci palettes cap out below `base_n` and pad the remainder with NA
+  # instead of returning a shorter vector; drop those before expanding.
+  cols <- cols[!is.na(cols)]
+  if (length(cols) == 0) {
+    cols <- suppressWarnings(pal_fn(1L))
+  }
   if (n > length(cols)) {
     cols <- colorRampPalette(cols)(n)
+  } else {
+    cols <- cols[seq_len(n)]
   }
   cols
 }
@@ -1145,7 +1228,7 @@ PwrQuant_server <- function(id) {
       conds <- unique(meta_edit_df()$Condition)
       n <- length(conds)
       pal <- input$cond_palette %||% "npg"
-      cols <- get_ggsci_colors(pal, n)
+      cols <- get_palette_colors(pal, n)
       setNames(cols[seq_len(n)], conds)
     })
 
