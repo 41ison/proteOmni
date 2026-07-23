@@ -204,22 +204,213 @@ compute_cv_mtx_fast <- compiler::cmpfun(compute_cv_mtx)
 groupwise_imputation_fast <- compiler::cmpfun(groupwise_imputation)
 extract_power_stats_fast <- compiler::cmpfun(extract_power_stats)
 
-# ── Valid Organism DBs ──────────────────────────────────────────────────────
-org_db_choices <- c(
-  "Human (org.Hs.eg.db)" = "org.Hs.eg.db",
-  "Mouse (org.Mm.eg.db)" = "org.Mm.eg.db",
-  "Rat (org.Rn.eg.db)" = "org.Rn.eg.db",
-  "Zebrafish (org.Dr.eg.db)" = "org.Dr.eg.db",
-  "C. elegans (org.Ce.eg.db)" = "org.Ce.eg.db",
-  "Drosophila (org.Dm.eg.db)" = "org.Dm.eg.db",
-  "Yeast (org.Sc.sgd.db)" = "org.Sc.sgd.db",
-  "Arabidopsis (org.At.tair.db)" = "org.At.tair.db",
-  "Bovine (org.Bt.eg.db)" = "org.Bt.eg.db",
-  "Canine (org.Cf.eg.db)" = "org.Cf.eg.db",
-  "Pig (org.Ss.eg.db)" = "org.Ss.eg.db",
-  "Chicken (org.Gg.eg.db)" = "org.Gg.eg.db",
-  "Macaque (org.Mmu.eg.db)" = "org.Mmu.eg.db"
-)
+# ── UniProt-backed GO annotation & hypergeometric ORA helpers ───────────────
+
+is_uniprot_accession <- function(x) {
+  grepl(
+    "^[OPQ][0-9][A-Z0-9]{3}[0-9](-[0-9]+)?$|^[A-NR-Z][0-9]([A-Z][A-Z0-9]{2}[0-9]){1,2}(-[0-9]+)?$",
+    x
+  )
+}
+
+extract_uniprot_lookup_id <- function(protein_ids) {
+  first_id <- str_extract(protein_ids, "^[^;,]+")
+  first_id <- ifelse(is.na(first_id) | first_id == "", protein_ids, first_id)
+  acc <- str_extract(first_id, "(?<=\\|)[A-Za-z0-9]+(?=\\|)")
+  gene <- str_extract(first_id, "(?<=GN=)[A-Za-z0-9_]+")
+  gene <- ifelse(
+    is.na(gene),
+    str_extract(first_id, "(?<=\\|)[A-Za-z0-9_]+(?=_)"),
+    gene
+  )
+  lookup <- ifelse(!is.na(acc), acc, ifelse(!is.na(gene), gene, first_id))
+  ifelse(is.na(lookup) | lookup == "", protein_ids, lookup)
+}
+
+fetch_uniprot_go <- function(ids, taxon_id = NULL, batch_size = 150) {
+  ids <- unique(ids[!is.na(ids) & ids != ""])
+  if (length(ids) == 0) {
+    return(NULL)
+  }
+  is_acc <- is_uniprot_accession(ids)
+
+  build_query <- function(batch_ids, by_accession) {
+    terms <- if (by_accession) {
+      paste0("accession:", batch_ids)
+    } else {
+      paste0("gene_exact:", batch_ids)
+    }
+    q <- paste(terms, collapse = " OR ")
+    if (!by_accession && !is.null(taxon_id) && nzchar(taxon_id)) {
+      q <- paste0("(", q, ") AND organism_id:", taxon_id)
+    }
+    q
+  }
+
+  fetch_batches <- function(id_vec, by_accession) {
+    if (length(id_vec) == 0) {
+      return(NULL)
+    }
+    batches <- split(id_vec, ceiling(seq_along(id_vec) / batch_size))
+    purrr::map_dfr(batches, function(b) {
+      q <- build_query(b, by_accession)
+      resp <- tryCatch(
+        httr::GET(
+          "https://rest.uniprot.org/uniprotkb/stream",
+          query = list(
+            query = q,
+            fields = "accession,gene_names,go_p,go_c,go_f",
+            format = "tsv"
+          ),
+          httr::timeout(60)
+        ),
+        error = function(e) NULL
+      )
+      if (is.null(resp) || httr::status_code(resp) != 200) {
+        return(NULL)
+      }
+      txt <- httr::content(resp, as = "text", encoding = "UTF-8")
+      if (!nzchar(trimws(txt))) {
+        return(NULL)
+      }
+      df <- tryCatch(
+        readr::read_tsv(txt, show_col_types = FALSE),
+        error = function(e) NULL
+      )
+      if (is.null(df) || nrow(df) == 0) {
+        return(NULL)
+      }
+      colnames(df)[seq_len(min(5, ncol(df)))] <- c(
+        "Entry",
+        "Gene_Names",
+        "GO_BP",
+        "GO_CC",
+        "GO_MF"
+      )[seq_len(min(5, ncol(df)))]
+      df$Query_ID <- if (by_accession) b[match(df$Entry, b)] else NA_character_
+      df
+    })
+  }
+
+  acc_res <- fetch_batches(ids[is_acc], by_accession = TRUE)
+  gene_res <- fetch_batches(ids[!is_acc], by_accession = FALSE)
+  dplyr::bind_rows(acc_res, gene_res)
+}
+
+parse_go_column <- function(df, col, category) {
+  if (is.null(df) || !col %in% colnames(df)) {
+    return(NULL)
+  }
+  df %>%
+    dplyr::select(Protein = Match_ID, GO_raw = dplyr::all_of(col)) %>%
+    dplyr::filter(!is.na(GO_raw), GO_raw != "") %>%
+    dplyr::mutate(GO_raw = strsplit(GO_raw, ";\\s*")) %>%
+    tidyr::unnest(GO_raw) %>%
+    dplyr::mutate(
+      GO_ID = stringr::str_extract(GO_raw, "GO:\\d+"),
+      GO_Term = stringr::str_trim(stringr::str_remove(
+        GO_raw,
+        "\\s*\\[GO:\\d+\\]"
+      )),
+      Category = category
+    ) %>%
+    dplyr::filter(!is.na(GO_ID)) %>%
+    dplyr::select(Protein, GO_ID, GO_Term, Category)
+}
+
+build_go_background <- function(original_ids, taxon_id = NULL) {
+  lookup_ids <- extract_uniprot_lookup_id(original_ids)
+  id_map <- data.frame(
+    Original = original_ids,
+    Lookup = lookup_ids,
+    stringsAsFactors = FALSE
+  ) %>%
+    dplyr::distinct()
+
+  raw <- fetch_uniprot_go(unique(lookup_ids), taxon_id = taxon_id)
+  if (is.null(raw) || nrow(raw) == 0) {
+    return(NULL)
+  }
+
+  raw <- raw %>%
+    dplyr::mutate(
+      Gene_First = stringr::str_trim(
+        stringr::str_extract(Gene_Names, "^[^ ;]+")
+      ),
+      Match_ID = dplyr::if_else(!is.na(Query_ID), Query_ID, Gene_First)
+    ) %>%
+    dplyr::filter(!is.na(Match_ID))
+
+  bg_long <- dplyr::bind_rows(
+    parse_go_column(raw, "GO_BP", "BP"),
+    parse_go_column(raw, "GO_CC", "CC"),
+    parse_go_column(raw, "GO_MF", "MF")
+  )
+  if (is.null(bg_long) || nrow(bg_long) == 0) {
+    return(NULL)
+  }
+
+  bg_long %>%
+    dplyr::inner_join(id_map, by = c("Protein" = "Lookup")) %>%
+    dplyr::select(Protein = Original, GO_ID, GO_Term, Category) %>%
+    dplyr::distinct()
+}
+
+run_hypergeom_ora <- function(
+  query_ids,
+  background,
+  categories = c("BP", "CC", "MF")
+) {
+  if (is.null(background) || nrow(background) == 0 || length(query_ids) == 0) {
+    return(NULL)
+  }
+  purrr::map_dfr(categories, function(cat) {
+    bg_cat <- dplyr::filter(background, Category == cat)
+    universe <- unique(bg_cat$Protein)
+    N <- length(universe)
+    query_in_universe <- intersect(query_ids, universe)
+    k <- length(query_in_universe)
+    if (N == 0 || k == 0) {
+      return(NULL)
+    }
+
+    term_tbl <- bg_cat %>%
+      dplyr::group_by(GO_ID, GO_Term) %>%
+      dplyr::summarise(
+        n = dplyr::n_distinct(Protein),
+        overlap_proteins = list(intersect(unique(Protein), query_in_universe)),
+        .groups = "drop"
+      ) %>%
+      dplyr::mutate(x = lengths(overlap_proteins)) %>%
+      dplyr::filter(x > 0) %>%
+      dplyr::mutate(
+        pvalue = phyper(x - 1, n, N - n, k, lower.tail = FALSE),
+        GeneRatio = paste0(x, "/", k),
+        BgRatio = paste0(n, "/", N),
+        FoldEnrichment = (x / k) / (n / N),
+        Category = cat
+      )
+
+    if (nrow(term_tbl) == 0) {
+      return(NULL)
+    }
+    term_tbl$p.adjust <- p.adjust(term_tbl$pvalue, method = "BH")
+    term_tbl %>%
+      dplyr::rename(Count = x, Description = GO_Term) %>%
+      dplyr::select(
+        Category,
+        GO_ID,
+        Description,
+        GeneRatio,
+        BgRatio,
+        FoldEnrichment,
+        Count,
+        pvalue,
+        p.adjust,
+        overlap_proteins
+      )
+  })
+}
 
 # ── Color palette options (ggsci, viridis, RColorBrewer) ───────────────────
 pwrquant_palette_choices <- list(
@@ -275,13 +466,27 @@ pwrquant_palette_choices <- list(
   )
 )
 
-# Maximum number of colors natively supported by each RColorBrewer palette
 brewer_max_n <- c(
-  Set1 = 9, Set2 = 8, Set3 = 12, Paired = 12, Dark2 = 8,
-  Pastel1 = 9, Pastel2 = 8, Accent = 8,
-  Blues = 9, Greens = 9, Oranges = 9, Purples = 9, Reds = 9,
-  YlOrRd = 9, BuGn = 9, PuBuGn = 9,
-  RdBu = 11, RdYlBu = 11, PiYG = 11, Spectral = 11
+  Set1 = 9,
+  Set2 = 8,
+  Set3 = 12,
+  Paired = 12,
+  Dark2 = 8,
+  Pastel1 = 9,
+  Pastel2 = 8,
+  Accent = 8,
+  Blues = 9,
+  Greens = 9,
+  Oranges = 9,
+  Purples = 9,
+  Reds = 9,
+  YlOrRd = 9,
+  BuGn = 9,
+  PuBuGn = 9,
+  RdBu = 11,
+  RdYlBu = 11,
+  PiYG = 11,
+  Spectral = 11
 )
 
 # Returns a color vector of length n for the selected palette (ggsci, viridis,
@@ -290,11 +495,9 @@ brewer_max_n <- c(
 get_palette_colors <- function(pal_name, n) {
   n <- max(n, 1L)
 
-  # RColorBrewer palettes are prefixed with "brewer_"
   if (grepl("^brewer_", pal_name)) {
     brewer_name <- sub("^brewer_", "", pal_name)
     max_n <- brewer_max_n[[brewer_name]] %||% 9
-    # brewer.pal requires at least 3 colors
     base_n <- max(min(n, max_n), 3L)
     cols <- tryCatch(
       RColorBrewer::brewer.pal(base_n, brewer_name),
@@ -307,7 +510,19 @@ get_palette_colors <- function(pal_name, n) {
   }
 
   # viridis-family palettes
-  if (pal_name %in% c("viridis", "magma", "inferno", "plasma", "cividis", "rocket", "mako", "turbo")) {
+  if (
+    pal_name %in%
+      c(
+        "viridis",
+        "magma",
+        "inferno",
+        "plasma",
+        "cividis",
+        "rocket",
+        "mako",
+        "turbo"
+      )
+  ) {
     return(viridisLite::viridis(n, option = pal_name))
   }
 
@@ -333,8 +548,7 @@ get_palette_colors <- function(pal_name, n) {
   cols <- suppressWarnings(
     tryCatch(pal_fn(base_n), error = function(e) pal_fn(1L))
   )
-  # Some ggsci palettes cap out below `base_n` and pad the remainder with NA
-  # instead of returning a shorter vector; drop those before expanding.
+
   cols <- cols[!is.na(cols)]
   if (length(cols) == 0) {
     cols <- suppressWarnings(pal_fn(1L))
@@ -428,11 +642,28 @@ PwrQuant_sidebar_ui <- function(id) {
         style = "padding:12px 16px 4px;color:#adb5bd;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:1px;",
         "Overrepresentation Analysis"
       ),
-      selectInput(
-        ns("org_db"),
-        "Organism Database (ORA)",
-        choices = org_db_choices,
-        selected = "org.Hs.eg.db"
+      textInput(
+        ns("uniprot_taxon"),
+        "Organism Taxonomy ID (optional)",
+        value = "9606",
+        placeholder = "e.g. 9606 for human"
+      ),
+      radioButtons(
+        ns("ora_scope"),
+        "Enrichment Scope",
+        choices = c(
+          "Combined (all significant)" = "combined",
+          "Split (Up/Down separately)" = "split"
+        ),
+        selected = "combined"
+      ),
+      numericInput(
+        ns("ora_fdr_cutoff"),
+        "GO term FDR (adj. p-value) cutoff",
+        value = 0.2,
+        min = 0.001,
+        max = 1,
+        step = 0.01
       ),
       tags$div(
         style = "padding:0 8px;text-align:center;",
@@ -868,11 +1099,23 @@ PwrQuant_body_ui <- function(id) {
           tags$div(
             style = "padding:10px 14px;margin-bottom:8px;background:#2a3f54;border-radius:6px;color:#ddd;font-size:13px;",
             icon("info-circle", style = "color:#5bc0de;"),
-            tags$b(" Protein identifier format: "),
-            "For ORA to work, the row names in your abundance matrix should contain gene symbols. ",
-            "Accepted formats: ",
+            tags$b(" UniProt-backed GO enrichment: "),
+            "GO annotations (Biological Process, Cellular Component, Molecular Function) are ",
+            "fetched live from the UniProt REST API for the proteins in your abundance matrix, ",
+            "and tested with a custom hypergeometric test (",
+            tags$code("phyper()"),
+            ") + ",
+            "Benjamini-Hochberg FDR correction \u2014 no local organism database required. ",
+            "Accepted identifier formats: ",
             tags$ul(
               style = "margin-top:6px;margin-bottom:0;",
+              tags$li(
+                "UniProt accessions, plain or pipe-separated (e.g. ",
+                tags$code("P12345"),
+                " or ",
+                tags$code("sp|P12345|TP53_HUMAN"),
+                ")"
+              ),
               tags$li(
                 "UniProt FASTA headers with ",
                 tags$code("GN=SYMBOL"),
@@ -881,12 +1124,20 @@ PwrQuant_body_ui <- function(id) {
                 ")"
               ),
               tags$li(
-                "Pipe-separated IDs (e.g. ",
-                tags$code("sp|P12345|TP53_HUMAN"),
-                ")"
-              ),
-              tags$li("Plain gene symbols (e.g. ", tags$code("TP53"), ")")
-            )
+                "Plain gene symbols (e.g. ",
+                tags$code("TP53"),
+                ") \u2014 use the Organism Taxonomy ID field to disambiguate across species"
+              )
+            ),
+            tags$b("Enrichment Scope: "),
+            "choose ",
+            tags$b("Combined"),
+            " to test all significant & reliable proteins per contrast together, or ",
+            tags$b("Split"),
+            " to test increased and decreased proteins separately. ",
+            "Each result row is flagged with a ",
+            tags$code("Regulation"),
+            " column."
           ),
           div(
             class = "plot-wrap",
@@ -1148,9 +1399,15 @@ PwrQuant_server <- function(id) {
       # Drop rows where the first column (representing IDs) is NA
       df <- df[!is.na(df[[1]]), ]
 
-      # Robustly force the first column as rownames (resolving potential duplicates)
+      # Robustly force the first column as rownames (resolving potential duplicates).
+      # quote = "" above disables fread's quote handling, so IDs from files that
+      # wrap fields in double quotes (e.g. "A0A0C2EJP6") retain the literal quote
+      # characters; strip any such stray leading/trailing quotes before use.
       df_clean <- df %>%
-        dplyr::mutate(dplyr::across(1, ~ make.unique(as.character(.))))
+        dplyr::mutate(dplyr::across(
+          1,
+          ~ make.unique(gsub('^"|"$', "", as.character(.)))
+        ))
       mtx <- df_clean %>%
         tibble::column_to_rownames(colnames(df_clean)[1]) %>%
         as.matrix()
@@ -1203,6 +1460,10 @@ PwrQuant_server <- function(id) {
 
     # Reactive value to capture the edited table
     meta_edit_df <- reactiveVal()
+    # Cache for the UniProt GO background mapping, keyed on the set of lookup IDs
+    # + taxon filter used to build it, so re-running ORA doesn't re-query UniProt
+    # unless the input matrix or organism filter actually changed.
+    go_background_cache <- reactiveVal(NULL)
 
     observeEvent(metadata_base(), {
       meta_edit_df(metadata_base())
@@ -1582,73 +1843,161 @@ PwrQuant_server <- function(id) {
         value = 0.1,
         {
           lr <- limma_results_ev()$limma_results
+          taxon_id <- trimws(input$uniprot_taxon %||% "")
+          scope <- input$ora_scope %||% "combined"
 
-          incProgress(0.3, detail = "Mapping Gene Symbols")
-          # Attempt multiple strategies to extract gene names from Protein IDs
-          id_mapping <- lr %>%
-            dplyr::mutate(
-              # Strategy 1: UniProt FASTA header with GN= tag
-              gene_names = str_extract(Protein, "(?<=GN=)[A-Za-z0-9_]+"),
-              # Strategy 2: pipe-separated (sp|ACC|GENE_SPECIES or tr|ACC|GENE_SPECIES)
-              gene_names = ifelse(
-                is.na(gene_names),
-                str_extract(Protein, "(?<=\\|)[A-Za-z0-9_]+(?=_)"),
-                gene_names
-              ),
-              # Strategy 3: use the Protein ID as-is (already a gene symbol)
-              gene_names = ifelse(is.na(gene_names), Protein, gene_names)
-            ) %>%
-            dplyr::filter(!is.na(gene_names) & gene_names != "")
+          incProgress(0.2, detail = "Resolving UniProt lookup IDs")
+          lookup_ids <- extract_uniprot_lookup_id(unique(lr$Protein))
 
-          # Validate organ db — install on demand if not yet present
-          db_str <- input$org_db
-          if (!requireNamespace(db_str, quietly = TRUE)) {
-            withProgress(
-              message = paste("Installing", db_str, "..."),
-              value = 0.5,
-              {
-                BiocManager::install(db_str, update = FALSE, ask = FALSE)
+          # Reuse the cached background mapping unless the protein set or taxon
+          # filter changed since the last successful fetch.
+          cache_key <- list(ids = sort(lookup_ids), taxon = taxon_id)
+          cached <- go_background_cache()
+          if (!is.null(cached) && identical(cached$key, cache_key)) {
+            background <- cached$data
+          } else {
+            incProgress(
+              0.4,
+              detail = "Querying UniProt for GO annotations (BP/CC/MF)... ☕"
+            )
+            background <- tryCatch(
+              build_go_background(unique(lr$Protein), taxon_id = taxon_id),
+              error = function(e) {
+                stop(
+                  "UniProt GO annotation fetch failed (",
+                  e$message,
+                  "). Check your internet connection and try again.",
+                  call. = FALSE
+                )
               }
             )
+            go_background_cache(list(key = cache_key, data = background))
           }
-          eval(parse(text = paste0("library(", db_str, ")")))
-          current_org_db <- get(db_str)
 
-          ora_results <- id_mapping %>%
-            dplyr::filter(status != "Not significant" & Is_reliable == TRUE) %>%
-            group_by(status, comparison) %>%
-            summarise(proteins_list = list(gene_names), .groups = "drop")
-
-          if (nrow(ora_results) > 0) {
-            incProgress(
-              0.6,
-              detail = "Running clusterProfiler hypergeometric tests... (this may take a while) ☕"
+          if (is.null(background) || nrow(background) == 0) {
+            incProgress(1.0, detail = "No GO annotations retrieved")
+            stop(
+              "No GO annotations could be retrieved from UniProt for the ",
+              length(unique(lookup_ids)),
+              " protein identifier(s) in your matrix. ",
+              "This usually means: (1) UniProt is unreachable from this session, ",
+              "(2) the row names aren't UniProt accessions/gene symbols UniProt ",
+              "recognizes, or (3) the Organism Taxonomy ID doesn't match your samples.",
+              call. = FALSE
             )
-            ora_results <- ora_results %>%
-              rowwise() %>%
-              dplyr::mutate(
-                enrich_result = list(
-                  tryCatch(
-                    clusterProfiler::enrichGO(
-                      gene = proteins_list,
-                      OrgDb = current_org_db,
-                      keyType = "SYMBOL",
-                      ont = "BP",
-                      pAdjustMethod = "BH",
-                      pvalueCutoff = 0.05,
-                      qvalueCutoff = 0.2
-                    ),
-                    error = function(e) {
-                      warning("enrichGO failed: ", e$message)
-                      NULL
-                    }
-                  )
-                )
-              ) %>%
-              ungroup()
-          } else {
-            ora_results <- NULL
           }
+
+          sig_reliable <- lr %>%
+            dplyr::filter(status != "Not significant" & Is_reliable == TRUE)
+
+          # A protein -> regulation status lookup per comparison, used later to
+          # flag each overlapping protein's direction in the results table.
+          status_lookup <- lr %>%
+            dplyr::select(comparison, Protein, status)
+
+          # Define the query groups according to the chosen scope: either one
+          # combined significant set per contrast, or separate up/down sets.
+          groups <- if (scope == "split") {
+            sig_reliable %>%
+              dplyr::group_by(comparison, status) %>%
+              dplyr::summarise(
+                proteins_list = list(Protein),
+                .groups = "drop"
+              ) %>%
+              dplyr::rename(Regulation = status)
+          } else {
+            sig_reliable %>%
+              dplyr::group_by(comparison) %>%
+              dplyr::summarise(
+                proteins_list = list(Protein),
+                .groups = "drop"
+              ) %>%
+              dplyr::mutate(Regulation = "Combined")
+          }
+
+          if (nrow(groups) == 0) {
+            incProgress(1.0, detail = "No significant & reliable proteins")
+            return(NULL)
+          }
+
+          incProgress(0.7, detail = "Running hypergeometric tests (phyper)...")
+          ora_results <- purrr::pmap_dfr(
+            list(groups$comparison, groups$Regulation, groups$proteins_list),
+            function(comp, reg, prots) {
+              res <- run_hypergeom_ora(prots, background)
+              if (is.null(res) || nrow(res) == 0) {
+                return(NULL)
+              }
+              res$comparison <- comp
+              res$Regulation <- reg
+              res
+            }
+          )
+
+          if (is.null(ora_results) || nrow(ora_results) == 0) {
+            incProgress(1.0, detail = "No enriched GO terms found")
+            n_sig <- length(unique(unlist(groups$proteins_list)))
+            n_annotated <- length(intersect(
+              unique(unlist(groups$proteins_list)),
+              background$Protein
+            ))
+            stop(
+              "Found ",
+              n_sig,
+              " significant & reliable protein(s), but only ",
+              n_annotated,
+              " of them matched a UniProt GO annotation in the ",
+              "background \u2014 the hypergeometric test found no enriched terms. ",
+              "This often means the protein identifiers in your matrix (e.g. ",
+              "multi-accession protein groups) couldn't be resolved by UniProt.",
+              call. = FALSE
+            )
+          }
+
+          # BH correction is applied within each (comparison x Regulation x
+          # Category) group inside run_hypergeom_ora(); now filter to the
+          # user-configurable FDR (adj. p-value) cutoff.
+          fdr_cutoff <- input$ora_fdr_cutoff %||% 0.2
+          if (!is.numeric(fdr_cutoff) || is.na(fdr_cutoff) || fdr_cutoff <= 0) {
+            fdr_cutoff <- 0.2
+          }
+          fdr_cutoff <- min(fdr_cutoff, 1)
+          ora_results_unfiltered_n <- nrow(ora_results)
+          ora_results <- ora_results %>%
+            dplyr::filter(p.adjust < fdr_cutoff)
+
+          if (nrow(ora_results) == 0) {
+            incProgress(1.0, detail = "No enriched GO terms passed FDR cutoff")
+            stop(
+              "ORA found ",
+              ora_results_unfiltered_n,
+              " enriched GO term(s), but ",
+              "none passed the current FDR (adj. p-value) cutoff of ",
+              fdr_cutoff,
+              ". Try raising the cutoff in the sidebar.",
+              call. = FALSE
+            )
+          }
+
+          # Flatten the overlap_proteins list-column into flag/detail columns.
+          ora_results <- ora_results %>%
+            dplyr::rowwise() %>%
+            dplyr::mutate(
+              geneID = paste(overlap_proteins, collapse = ";"),
+              geneID_Regulation = paste(
+                purrr::map_chr(overlap_proteins, function(p) {
+                  st <- status_lookup$status[
+                    status_lookup$comparison == comparison &
+                      status_lookup$Protein == p
+                  ]
+                  paste0(p, ":", if (length(st) > 0) st[1] else NA_character_)
+                }),
+                collapse = ";"
+              )
+            ) %>%
+            dplyr::ungroup() %>%
+            dplyr::select(-overlap_proteins) %>%
+            dplyr::arrange(comparison, Regulation, p.adjust)
 
           incProgress(1.0, detail = "Rendering Outputs")
           ora_results
@@ -2579,10 +2928,50 @@ PwrQuant_server <- function(id) {
           "No significant & reliable proteins found for ORA. Ensure limma has been run and significant proteins exist."
         ))
       }
-      n_panels <- nrow(ora_attempt)
+      n_panels <- dplyr::n_distinct(
+        paste(ora_attempt$comparison, ora_attempt$Regulation)
+      )
       dynamic_h <- max(600, n_panels * 350)
       plotOutput(ns("ora_plot"), height = paste0(dynamic_h, "px"))
     })
+
+    # Builds one GO-term dotplot (top 15 terms by adj. p-value) for a single
+    # (comparison, Regulation) group of the flat ORA results tibble.
+    build_ora_dotplot <- function(d) {
+      d <- d %>%
+        dplyr::arrange(p.adjust) %>%
+        dplyr::slice_head(n = 15)
+      ggplot(
+        d,
+        aes(
+          x = FoldEnrichment,
+          y = forcats::fct_reorder(Description, FoldEnrichment)
+        )
+      ) +
+        geom_point(aes(size = Count, color = p.adjust)) +
+        scale_color_viridis_c(direction = -1) +
+        labs(
+          title = unique(d$comparison),
+          subtitle = paste0(
+            "Status: ",
+            unique(d$Regulation),
+            " | ",
+            unique(d$Category)
+          ),
+          x = "Fold Enrichment",
+          y = NULL,
+          size = "Count",
+          color = "adj. p"
+        ) +
+        theme(
+          plot.title = element_text(face = "bold", size = 16),
+          plot.subtitle = element_text(size = 13),
+          axis.text = element_text(size = 11, color = "black"),
+          axis.title = element_text(size = 14, face = "bold"),
+          legend.position = "right",
+          legend.text = element_text(size = 12)
+        )
+    }
 
     output$ora_plot <- renderPlot({
       rh(
@@ -2603,49 +2992,23 @@ PwrQuant_server <- function(id) {
                 theme_void()
             )
           }
-          plots <- lapply(seq_len(nrow(ora)), function(i) {
-            row_data <- ora[i, ]
-            er <- row_data$enrich_result[[1]]
-            # Check that the enrichResult is valid and has actual enriched terms
-            if (!is.null(er) && is(er, "enrichResult")) {
-              sig_terms <- tryCatch(
-                sum(er@result$p.adjust < 0.05, na.rm = TRUE),
-                error = function(e) 0
+          plots <- ora %>%
+            dplyr::group_by(comparison, Regulation, Category) %>%
+            dplyr::group_split() %>%
+            purrr::map(function(d) {
+              tryCatch(
+                build_ora_dotplot(d),
+                error = function(e) {
+                  warning(
+                    "dotplot rendering failed for ",
+                    unique(d$comparison),
+                    ": ",
+                    e$message
+                  )
+                  NULL
+                }
               )
-              if (sig_terms > 0) {
-                tryCatch(
-                  {
-                    enrichplot::dotplot(er, font.size = 14) +
-                      labs(
-                        title = row_data$comparison,
-                        subtitle = paste("Status:", row_data$status)
-                      ) +
-                      theme(
-                        plot.title = element_text(face = "bold", size = 16),
-                        plot.subtitle = element_text(size = 13),
-                        axis.text = element_text(size = 12, color = "black"),
-                        axis.title = element_text(size = 14, face = "bold"),
-                        legend.position = "right",
-                        legend.text = element_text(size = 12)
-                      )
-                  },
-                  error = function(e) {
-                    warning(
-                      "dotplot rendering failed for ",
-                      row_data$comparison,
-                      ": ",
-                      e$message
-                    )
-                    NULL
-                  }
-                )
-              } else {
-                NULL
-              }
-            } else {
-              NULL
-            }
-          })
+            })
           plots <- Filter(Negate(is.null), plots)
           if (length(plots) == 0) {
             return(
@@ -2692,15 +3055,20 @@ PwrQuant_server <- function(id) {
         req(!is.null(ora))
         temp_dir <- tempdir()
         files_to_zip <- c()
-        for (i in seq_len(nrow(ora))) {
-          row_data <- ora[i, ]
-          res_tbl <- row_data$enrich_result[[1]]@result
+        groups <- ora %>%
+          dplyr::distinct(comparison, Regulation)
+        for (i in seq_len(nrow(groups))) {
+          res_tbl <- ora %>%
+            dplyr::filter(
+              comparison == groups$comparison[i],
+              Regulation == groups$Regulation[i]
+            )
           fname <- paste0(
             temp_dir,
             "/ORA_",
-            row_data$comparison,
+            groups$comparison[i],
             "_",
-            row_data$status,
+            groups$Regulation[i],
             ".tsv"
           )
           data.table::fwrite(res_tbl, file = fname, sep = "\t", na = "NA")
@@ -3384,23 +3752,12 @@ PwrQuant_server <- function(id) {
           {
             ora <- ora_results_ev()
             if (!is.null(ora) && nrow(ora) > 0) {
-              plots <- lapply(seq_len(nrow(ora)), function(i) {
-                row_data <- ora[i, ]
-                er <- row_data$enrich_result[[1]]
-                if (!is.null(er) && nrow(er@result) > 0) {
-                  enrichplot::dotplot(er, font.size = 14) +
-                    labs(
-                      title = row_data$comparison,
-                      subtitle = paste("Status:", row_data$status)
-                    ) +
-                    theme(
-                      plot.title = element_text(face = "bold", size = 16),
-                      legend.position = "right"
-                    )
-                } else {
-                  NULL
-                }
-              })
+              plots <- ora %>%
+                dplyr::group_by(comparison, Regulation, Category) %>%
+                dplyr::group_split() %>%
+                purrr::map(function(d) {
+                  tryCatch(build_ora_dotplot(d), error = function(e) NULL)
+                })
               plots <- Filter(Negate(is.null), plots)
               if (length(plots) > 0) {
                 p <- patchwork::wrap_plots(plots, ncol = 2)

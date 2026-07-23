@@ -70,18 +70,11 @@ if (!requireNamespace("pcaMethods", quietly = TRUE)) {
 if (!requireNamespace("ComplexHeatmap", quietly = TRUE)) {
   BiocManager::install("ComplexHeatmap", update = FALSE, ask = FALSE)
 }
-if (!requireNamespace("clusterProfiler", quietly = TRUE)) {
-  BiocManager::install("clusterProfiler", update = FALSE, ask = FALSE)
+if (!requireNamespace("httr", quietly = TRUE)) {
+  install.packages("httr")
 }
-if (!requireNamespace("GO.db", quietly = TRUE)) {
-  BiocManager::install("GO.db", update = FALSE, ask = FALSE)
-}
-if (!requireNamespace("enrichplot", quietly = TRUE)) {
-  BiocManager::install("enrichplot", update = FALSE, ask = FALSE)
-}
-# ── Organism annotation DBs — install Human DB at startup; others loaded on demand ──
-if (!requireNamespace("org.Hs.eg.db", quietly = TRUE)) {
-  BiocManager::install("org.Hs.eg.db", update = FALSE, ask = FALSE)
+if (!requireNamespace("jsonlite", quietly = TRUE)) {
+  install.packages("jsonlite")
 }
 Sys.setenv(LIBARROW_MINIMAL = "false", ARROW_WITH_ZSTD = "ON")
 if (!requireNamespace("arrow", quietly = TRUE)) {
@@ -122,10 +115,10 @@ library(Biostrings)
 library(limma)
 library(lavaan)
 library(patchwork)
-library(enrichplot)
 library(ComplexHeatmap)
 library(compiler)
-library(org.Hs.eg.db)
+library(httr)
+library(jsonlite)
 
 # ── Session info & Logging ─────────────────────────────────────────────────
 cat("\n========== proteOmni Session Info ==========", "\n")

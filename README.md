@@ -333,12 +333,18 @@ A protein is called **significant** if:
 Proteins that are fully missing in one condition are flagged as `imputation_driven` and classified as *Not significant*, avoiding false positives driven by structural zeros.
 
 ### Step 9 — Functional enrichment (ORA)
-`clusterProfiler::enrichGO` is run on the significant reliable proteins from each contrast × direction combination. Supported organism databases include Human, Mouse, Rat, Zebrafish, *C. elegans*, Drosophila, Yeast, Arabidopsis, Bovine, Canine, Pig, Chicken, and Macaque.
+GO annotations (Biological Process, Cellular Component, Molecular Function) are fetched live from the UniProt REST API for the proteins in your abundance matrix, then tested with a custom hypergeometric test (`phyper()`) plus Benjamini-Hochberg FDR correction — no local organism database is required. An optional NCBI Taxonomy ID input disambiguates gene-symbol lookups across species (UniProt accessions are unambiguous and skip this filter).
+
+Users choose an **Enrichment Scope**:
+- **Combined** — test all significant & reliable proteins per contrast together, regardless of direction.
+- **Split** — test increased and decreased proteins separately for each contrast.
+
+Each result row is annotated with a `Regulation` column (`Combined`/`Increased`/`Decreased`) and a `geneID_Regulation` column listing each overlapping protein tagged with its individual up/down status.
 
 Protein identifiers are auto-parsed from three common formats:
-1. UniProt FASTA header with `GN=SYMBOL` tag (e.g. `sp|P04637|P53_HUMAN GN=TP53`)
-2. Pipe-separated UniProt ID with gene prefix (e.g. `sp|P04637|TP53_HUMAN`)
-3. Plain gene symbols (e.g. `TP53`)
+1. UniProt accession, plain or pipe-separated (e.g. `P04637` or `sp|P04637|TP53_HUMAN`)
+2. UniProt FASTA header with `GN=SYMBOL` tag (e.g. `sp|P04637|P53_HUMAN GN=TP53`)
+3. Plain gene symbols (e.g. `TP53`) — use the Organism Taxonomy ID field to disambiguate across species
 
 ---
 
@@ -453,11 +459,11 @@ If you selected **missForest** as the imputation method, imputation can take 30�
 
 This can happen for three reasons:
 
-1. **Protein identifiers are not gene symbols.** ORA requires gene symbols (e.g. `TP53`, `EGFR`). proteOmni attempts to parse them from UniProt FASTA headers (`GN=` tag) and pipe-separated IDs automatically, but if your matrix uses accession numbers only, no mapping will be found.
+1. **Protein identifiers can't be resolved by UniProt.** ORA requires UniProt accessions or gene symbols (e.g. `TP53`, `EGFR`). proteOmni attempts to parse them from UniProt FASTA headers (`GN=` tag), pipe-separated IDs, or accessions automatically, but if your matrix uses non-standard identifiers, no mapping will be found. Also check your internet connection, since GO annotations are fetched live from the UniProt REST API.
 
 2. **Too few significant proteins.** If there are fewer than ~5 significant reliable proteins in a contrast, the hypergeometric test is underpowered. Try relaxing the minimum valid value threshold or checking whether the experiment is adequately powered.
 
-3. **Wrong organism database.** Ensure the selected database in the sidebar matches your sample organism.
+3. **Wrong or missing organism taxonomy ID.** When your protein identifiers are plain gene symbols (not UniProt accessions), set the Organism Taxonomy ID field in the sidebar (e.g. `9606` for human) to avoid cross-species GO term contamination.
 
 </details>
 
