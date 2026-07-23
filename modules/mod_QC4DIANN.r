@@ -2051,7 +2051,11 @@ QC4DIANN_server <- function(id) {
             tibble::rownames_to_column(id_header),
           file = file,
           sep = ",",
-          na = "NA"
+          na = "NA",
+          # fwrite()'s default quote = "auto" wraps every character column
+          # (including the ID column) in double quotes even when unnecessary;
+          # disable quoting so downstream readers get plain, unquoted IDs.
+          quote = FALSE
         )
       }
     )
