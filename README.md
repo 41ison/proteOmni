@@ -158,6 +158,8 @@ Visual QC for FragPipe DDA results. Requires `psm.tsv` and `combined_protein.tsv
 
 ### 2. QC4DIANN — *DIA-NN / DIA*
 
+**Observation:** From version 2.6.0 DIA-NN have a nice `Analyze` module to help you process your data.
+
 Diagnostics for DIA-NN `.parquet` report files. Optionally integrates a FASTA file for sequence-level coverage.
 
 **Tabs:**
@@ -189,6 +191,8 @@ End-to-end differential abundance and statistical power analysis pipeline. Accep
 ---
 
 ### 4. Casanovo — *de novo*
+
+**Observation:** Starting from July 2026, Casanovo have a dedicated GUI built in Java language. Please, use the [CasanovoGUI app](https://github.com/Noble-Lab/CasanovoGUI).
 
 Visualiser for [Casanovo](https://github.com/Noble-Lab/casanovo) *de novo* sequencing output. Loads all `.mztab` files from a user-specified directory.
 
@@ -222,7 +226,7 @@ Aggregates and explores EncyclopeDIA DIA results. Reads all `.txt` result files 
 
 ---
 
-### 7. Sage — *Sage / DDA/DIA*
+### 7. Sage — *Sage / DDA*
 
 QC dashboard for [Sage](https://github.com/lazear/sage) search engine results. Accepts `results.sage.tsv` or `.parquet` format.
 
@@ -515,17 +519,8 @@ This line tells R which browser to open, without it, it doesn't know where to op
 
 ## Citation
 
-If you use proteOmni in your research, please cite the following:
-
-- Chaves AFA. PSManalyst: A Dashboard for Visual Quality Control of FragPipe Results. *J Proteome Res.* 2025;24(9):4344-4346. doi: [10.1021/acs.jproteome.5c00557](https://doi.org/10.1021/acs.jproteome.5c00557).
-- Moschem JDC, de Barros BCSC, Serrano SMT, Chaves AFA. Decoding the Impact of Isolation Window Selection and QuantUMS Filtering in DIA-NN for DIA Quantification of Peptides and Proteins. *J Proteome Res.* 2025;24(8):3860-3873. doi: [10.1021/acs.jproteome.5c00009](https://doi.org/10.1021/acs.jproteome.5c00009).
-
----
-
-<p align="center">
-Made by the proteOmni team &nbsp;·&nbsp; <a href="https://github.com/41ison/proteOmni">github.com/41ison/proteOmni</a>
-</p>
-
-<p align="center">
-Alison FA Chaves | Pedro G Castro | André A Tchakerian
-</p>
+If you use proteOmni in your research, consider to cite the following:
+- **PSManalyst:**
+> Chaves AFA. PSManalyst: A Dashboard for Visual Quality Control of FragPipe Results. *J Proteome Res.* 2025;24(9):4344-4346. doi: [10.1021/acs.jproteome.5c00557](https://doi.org/10.1021/acs.jproteome.5c00557).
+- **QC4DIANN:**
+> Moschem JDC, de Barros BCSC, Serrano SMT, Chaves AFA. Decoding the Impact of Isolation Window Selection and QuantUMS Filtering in DIA-NN for DIA Quantification of Peptides and Proteins. *J Proteome Res.* 2025;24(8):3860-3873. doi: [10.1021/acs.jproteome.5c00009](https://doi.org/10.1021/acs.jproteome.5c00009).
