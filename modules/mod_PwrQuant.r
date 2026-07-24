@@ -190,7 +190,7 @@ extract_power_stats <- function(contrast_fit, pwr_calc) {
     ) |>
       tibble::rownames_to_column("Protein") |>
       dplyr::mutate(
-        Sigma = contrast_fit$sigma,
+        Sigma = sqrt(contrast_fit$s2.post),
         Min_Detectable_Log2FC = pwr_calc$d * Sigma,
         Is_reliable = abs(logFC) >= Min_Detectable_Log2FC,
         comparison = coef
@@ -2873,7 +2873,7 @@ PwrQuant_server <- function(id) {
               linewidth = 1
             ) +
             labs(
-              x = "Residual standard deviation (Sigma)",
+              x = "eBayes posterior variance (s2.post)",
               y = "Observed |log₂FC|",
               color = "Significant difference with 80% power"
             ) +
@@ -3544,7 +3544,7 @@ PwrQuant_server <- function(id) {
                   linewidth = 1
                 ) +
                 labs(
-                  x = "Residual standard deviation (Sigma)",
+                  x = "eBayes posterior variance (s2.post)",
                   y = "Observed |log₂FC|",
                   color = "80% power"
                 ) +

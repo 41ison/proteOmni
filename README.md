@@ -184,7 +184,7 @@ End-to-end differential abundance and statistical power analysis pipeline. Accep
 | **Pre-processing QC** | CV distributions per condition, mean–variance relationship (loess trend), raw and normalized abundance boxplots |
 | **Differential Abundance** | MA/Bland-Altman plots, volcano plots, top-20 DAP bar mirror chart, raw p-value histograms per contrast |
 | **Correlation** | Inter-contrast logFC scatter with Spearman ρ and concordant/inverse/mismatch classification |
-| **Power Statistics** | Sigma vs. |logFC| reliability map — proteins above the minimum detectable fold-change at 80% power are flagged as reliable |
+| **Power Statistics** | eBayes posterior variance vs. |logFC| reliability map — proteins above the minimum detectable fold-change at 80% power are flagged as reliable |
 | **Enrichment** | ORA dotplots generated with `clusterProfiler::enrichGO`, supporting 13 organism databases |
 | **UpSet Plots** | Visualize intersections of proteins across multiple sample groups |
 
