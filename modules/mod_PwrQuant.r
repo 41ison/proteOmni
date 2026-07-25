@@ -227,11 +227,15 @@ extract_uniprot_lookup_id <- function(protein_ids) {
   ifelse(is.na(lookup) | lookup == "", protein_ids, lookup)
 }
 
-fetch_uniprot_go <- function(ids, taxon_id = NULL, batch_size = 150) {
+fetch_uniprot_go <- function(ids, taxon_id = NULL, batch_size = 100) {
   ids <- unique(ids[!is.na(ids) & ids != ""])
   if (length(ids) == 0) {
     return(NULL)
   }
+  # UniProt's REST API rejects queries with more than 100 OR clauses
+  # (HTTP 400 "Too many OR conditions"); cap batch_size defensively so a
+  # misconfigured caller can't silently drop most of the background.
+  batch_size <- min(batch_size, 100)
   is_acc <- is_uniprot_accession(ids)
 
   build_query <- function(batch_ids, by_accession) {
@@ -264,9 +268,34 @@ fetch_uniprot_go <- function(ids, taxon_id = NULL, batch_size = 150) {
           ),
           httr::timeout(60)
         ),
-        error = function(e) NULL
+        error = function(e) e
       )
-      if (is.null(resp) || httr::status_code(resp) != 200) {
+      if (inherits(resp, "error") || is.null(resp)) {
+        warning(
+          "UniProt GO fetch: request failed for a batch of ",
+          length(b),
+          " ID(s) (",
+          conditionMessage(
+            if (inherits(resp, "error")) resp else simpleError("no response")
+          ),
+          "); ",
+          "this batch was skipped and its proteins will be missing from the ",
+          "GO background.",
+          call. = FALSE
+        )
+        return(NULL)
+      }
+      status <- httr::status_code(resp)
+      if (status != 200) {
+        warning(
+          "UniProt GO fetch: a batch of ",
+          length(b),
+          " ID(s) failed with HTTP ",
+          status,
+          " and was skipped; ",
+          "its proteins will be missing from the GO background.",
+          call. = FALSE
+        )
         return(NULL)
       }
       txt <- httr::content(resp, as = "text", encoding = "UTF-8")
@@ -410,6 +439,190 @@ run_hypergeom_ora <- function(
         overlap_proteins
       )
   })
+}
+
+# ── STRINGdb interaction network helpers ────────────────────────────────────
+
+# STRING database version used throughout this module; kept as a single
+# constant so the species-coverage check and the actual STRINGdb$new() call
+# always agree on which version's species list / downloads to use.
+STRING_DB_VERSION <- "12.0"
+
+# In-memory, app-wide (not per-session) cache for STRING's official species
+# list. This is static reference data shared across every user session, so
+# re-downloading it for every network build (or every Shiny session) would
+# be wasteful; it's fetched once per R process and reused thereafter.
+.string_species_cache <- new.env(parent = emptyenv())
+
+# Downloads (and caches) STRING's species list for a given database version.
+# Columns are: taxon_id, STRING_type, STRING_name_compact, official_name_NCBI,
+# domain. Throws on failure so callers can decide how to degrade.
+fetch_string_species_table <- function(version = STRING_DB_VERSION) {
+  cache_key <- paste0("v", version)
+  cached <- .string_species_cache[[cache_key]]
+  if (!is.null(cached)) {
+    return(cached)
+  }
+  resp <- httr::GET(
+    sprintf("https://stringdb-downloads.org/download/species.v%s.txt", version),
+    httr::timeout(60)
+  )
+  if (httr::status_code(resp) != 200) {
+    stop(
+      "Could not download the STRING species list (HTTP ",
+      httr::status_code(resp),
+      ")."
+    )
+  }
+  txt <- httr::content(resp, as = "text", encoding = "UTF-8")
+  tbl <- readr::read_tsv(txt, show_col_types = FALSE)
+  colnames(tbl)[1] <- "taxon_id"
+  .string_species_cache[[cache_key]] <- tbl
+  tbl
+}
+
+# Checks whether a taxon ID is covered by the STRING database for the given
+# version, and (if not) tries to suggest related organisms that ARE covered,
+# by looking up the taxon's scientific name via the UniProt taxonomy API and
+# grep-matching its genus against STRING's species list. Returns:
+#   - NULL if the check itself could not be performed (e.g. offline) — callers
+#     should fall back to attempting the real STRINGdb call in that case,
+#     rather than blocking the user on a secondary network failure.
+#   - list(valid = TRUE) if the taxon is covered.
+#   - list(valid = FALSE, taxon_species=, org_name=, suggestions=) otherwise,
+#     where `suggestions` is a data.frame of candidate rows from the species
+#     list (or NULL if none were found).
+validate_string_species <- function(taxon_species, version = STRING_DB_VERSION) {
+  species_tbl <- tryCatch(
+    fetch_string_species_table(version),
+    error = function(e) NULL
+  )
+  if (is.null(species_tbl)) {
+    return(NULL)
+  }
+
+  if (as.character(taxon_species) %in% as.character(species_tbl$taxon_id)) {
+    return(list(valid = TRUE))
+  }
+
+  org_name <- tryCatch(
+    {
+      resp <- httr::GET(
+        sprintf("https://rest.uniprot.org/taxonomy/%d.json", taxon_species),
+        httr::timeout(15)
+      )
+      if (httr::status_code(resp) == 200) {
+        jsonlite::fromJSON(
+          httr::content(resp, as = "text", encoding = "UTF-8")
+        )$scientificName
+      } else {
+        NA_character_
+      }
+    },
+    error = function(e) NA_character_
+  )
+
+  suggestions <- NULL
+  if (!is.na(org_name) && nzchar(org_name)) {
+    genus <- strsplit(org_name, "\\s+")[[1]][1]
+    matches <- species_tbl[
+      grepl(genus, species_tbl$official_name_NCBI, ignore.case = TRUE),
+      ,
+      drop = FALSE
+    ]
+    if (nrow(matches) > 0) {
+      suggestions <- utils::head(matches, 5)
+    }
+  }
+
+  list(
+    valid = FALSE,
+    taxon_species = taxon_species,
+    org_name = org_name,
+    suggestions = suggestions
+  )
+}
+
+# Builds a human-readable stop() message for an unsupported STRING species,
+# including nearby-genus suggestions when available.
+format_unsupported_species_error <- function(species_check, version = STRING_DB_VERSION) {
+  org_label <- if (!is.na(species_check$org_name) && nzchar(species_check$org_name)) {
+    paste0(species_check$org_name, " (taxon ", species_check$taxon_species, ")")
+  } else {
+    paste0("taxon ", species_check$taxon_species)
+  }
+
+  if (!is.null(species_check$suggestions)) {
+    suggestion_lines <- paste0(
+      species_check$suggestions$official_name_NCBI,
+      " (taxon ", species_check$suggestions$taxon_id, ")"
+    )
+    suggestion_msg <- paste0(
+      " Related organisms covered by STRING v", version, ": ",
+      paste(suggestion_lines, collapse = "; "), "."
+    )
+  } else {
+    suggestion_msg <- " No closely related organism was found in STRING's species list either."
+  }
+
+  paste0(
+    "STRING does not cover ", org_label, ". This is not a network or app error \u2014 ",
+    "the STRING database (v", version, ") simply has no interaction data for this ",
+    "organism/strain.", suggestion_msg,
+    " Try a different (more commonly studied) organism, or use the species-level ",
+    "taxon ID instead of a strain-specific one."
+  )
+}
+
+# Builds (or returns a cached) STRINGdb instance for a given species/score
+# threshold. STRINGdb$new() downloads and caches metadata files to
+# input_directory the first time it's called for a given (version, species,
+# score_threshold) combination, so we point it at tempdir() to avoid polluting
+# the working directory, and let the caller cache the returned object across
+# reactive invocations.
+build_string_db <- function(species, score_threshold, version = STRING_DB_VERSION) {
+  STRINGdb::STRINGdb$new(
+    version = version,
+    species = species,
+    score_threshold = score_threshold,
+    input_directory = tempdir()
+  )
+}
+
+# Maps a data.frame with a lookup-ID column onto STRING identifiers via
+# STRINGdb$map(). Returns a list with the mapped data.frame (including a
+# STRING_id column) and a character vector of original protein IDs that
+# failed to map, so the caller can surface a coverage diagnostic like the
+# UniProt GO background fetch does.
+map_proteins_to_string <- function(string_db, protein_df, id_col = "Lookup_ID") {
+  mapped <- tryCatch(
+    string_db$map(protein_df, id_col, removeUnmappedRows = FALSE),
+    error = function(e) {
+      stop(
+        "STRINGdb mapping failed (",
+        e$message,
+        "). Check your internet connection and the selected organism taxon.",
+        call. = FALSE
+      )
+    }
+  )
+  unmapped <- mapped[is.na(mapped$STRING_id), , drop = FALSE]
+  list(
+    mapped = mapped[!is.na(mapped$STRING_id), , drop = FALSE],
+    unmapped = unmapped
+  )
+}
+
+# Returns a color vector (same length/order as status_vec) so increased /
+# decreased proteins are visually distinguishable on the network plot via
+# STRINGdb's payload/halo mechanism, mirroring the "Regulation" flagging
+# already used for ORA results.
+string_halo_colors <- function(status_vec) {
+  dplyr::case_when(
+    status_vec == "Increased" ~ "#d62728",
+    status_vec == "Decreased" ~ "#1f77b4",
+    TRUE ~ "#7f7f7f"
+  )
 }
 
 # ── Color palette options (ggsci, viridis, RColorBrewer) ───────────────────
@@ -677,6 +890,47 @@ PwrQuant_sidebar_ui <- function(id) {
       tags$hr(style = "border-color:#2d3741;margin:4px 0;"),
       tags$div(
         style = "padding:12px 16px 4px;color:#adb5bd;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:1px;",
+        "Interaction Network (STRING)"
+      ),
+      selectInput(
+        ns("string_contrast"),
+        "Contrast",
+        choices = NULL
+      ),
+      radioButtons(
+        ns("string_scope"),
+        "Protein Set",
+        choices = c(
+          "Combined (all significant)" = "combined",
+          "Increased only" = "Increased",
+          "Decreased only" = "Decreased"
+        ),
+        selected = "combined"
+      ),
+      numericInput(
+        ns("string_score_threshold"),
+        "Min. combined score (0-1000)",
+        value = 400,
+        min = 0,
+        max = 1000,
+        step = 50
+      ),
+      tags$p(
+        style = "padding:0 8px;color:#adb5bd;font-size:12px;",
+        "Uses the Organism Taxonomy ID set above for Overrepresentation Analysis."
+      ),
+      tags$div(
+        style = "padding:0 8px;text-align:center;",
+        actionButton(
+          ns("run_string"),
+          "Build Network",
+          class = "btn-primary",
+          style = "width:80%;font-weight:bold;margin-top:10px;margin-bottom:10px;"
+        )
+      ),
+      tags$hr(style = "border-color:#2d3741;margin:4px 0;"),
+      tags$div(
+        style = "padding:12px 16px 4px;color:#adb5bd;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:1px;",
         "Selected Proteins"
       ),
       selectizeInput(
@@ -736,6 +990,15 @@ PwrQuant_sidebar_ui <- function(id) {
           downloadButton(
             ns("download_ora"),
             "⬇ Download ORA Results",
+            class = "dl-btn",
+            style = "width:100%;text-align:left;"
+          )
+        ),
+        div(
+          style = "margin-bottom:8px;",
+          downloadButton(
+            ns("download_string_network"),
+            "⬇ Download Network Plot",
             class = "dl-btn",
             style = "width:100%;text-align:left;"
           )
@@ -1152,6 +1415,64 @@ PwrQuant_body_ui <- function(id) {
       )
     ),
     tabPanel(
+      "Interaction Network",
+      fluidRow(
+        box(
+          title = "Protein-Protein Interaction Network (STRING)",
+          status = "primary",
+          solidHeader = TRUE,
+          width = 12,
+          tags$div(
+            style = "padding:10px 14px;margin-bottom:8px;background:#2a3f54;border-radius:6px;color:#ddd;font-size:13px;",
+            icon("info-circle", style = "color:#5bc0de;"),
+            tags$b(" STRINGdb network: "),
+            "Proteins from the selected contrast (significant & reliable, same logic as the ",
+            "Overrepresentation Analysis tab) are mapped live to ",
+            tags$a(
+              "STRING",
+              href = "https://string-db.org/",
+              target = "_blank"
+            ),
+            " identifiers via the ",
+            tags$code("STRINGdb"),
+            " Bioconductor package, and rendered with ",
+            tags$code("plot_network()"),
+            ". Nodes are halo-colored ",
+            tags$b(style = "color:#d62728;", "red"),
+            " for increased and ",
+            tags$b(style = "color:#1f77b4;", "blue"),
+            " for decreased proteins. The organism taxon reuses the ",
+            tags$b("Organism Taxonomy ID"),
+            " field from the Overrepresentation Analysis section above; the ",
+            tags$b("Min. combined score"),
+            " slider filters STRING edges by confidence (0-1000, STRING default is 400)."
+          ),
+          div(
+            class = "plot-wrap",
+            tags$div(
+              class = "spinner-overlay",
+              id = ns("sp_string"),
+              icon("spinner", class = "fa-spin")
+            ),
+            plotOutput(ns("string_network_plot"), height = 700)
+          ),
+          tags$hr(style = "border-color:#2d3741;margin:12px 0;"),
+          tags$div(
+            style = "display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;",
+            tags$b("Proteins that could not be mapped to STRING")
+          ),
+          p(
+            style = "color:#adb5bd;font-size:13px;",
+            "Listed for transparency \u2014 these proteins are excluded from the network above."
+          ),
+          div(
+            class = "plot-wrap",
+            DT::dataTableOutput(ns("string_unmapped_table"))
+          )
+        )
+      )
+    ),
+    tabPanel(
       "Selected Proteins",
       fluidRow(
         box(
@@ -1371,6 +1692,7 @@ PwrQuant_server <- function(id) {
       "sp_corr",
       "sp_pwr",
       "sp_ora",
+      "sp_string",
       "sp_pca_raw",
       "sp_pca_proc",
       "sp_plsda_raw",
@@ -1464,6 +1786,10 @@ PwrQuant_server <- function(id) {
     # + taxon filter used to build it, so re-running ORA doesn't re-query UniProt
     # unless the input matrix or organism filter actually changed.
     go_background_cache <- reactiveVal(NULL)
+    # Cache for the STRINGdb instance, keyed on (species, score_threshold), so
+    # switching contrasts/scope doesn't re-instantiate (and re-download) STRING
+    # metadata unless the organism or score threshold actually changed.
+    string_db_cache <- reactiveVal(NULL)
 
     observeEvent(metadata_base(), {
       meta_edit_df(metadata_base())
@@ -1887,6 +2213,30 @@ PwrQuant_server <- function(id) {
             )
           }
 
+          # Coverage diagnostic: how many of the proteins in the matrix
+          # actually received a GO annotation from UniProt. Low coverage
+          # (e.g. from batched-request failures) silently shrinks the
+          # hypergeometric universe/overlap and can hide real enrichment,
+          # so surface it to the user before the test is run.
+          n_total_proteins <- length(unique(lr$Protein))
+          n_annotated_proteins <- length(intersect(
+            unique(lr$Protein),
+            background$Protein
+          ))
+          coverage_pct <- 100 * n_annotated_proteins / n_total_proteins
+          coverage_msg <- sprintf(
+            "GO background coverage: %d of %d proteins (%.1f%%) annotated by UniProt.",
+            n_annotated_proteins,
+            n_total_proteins,
+            coverage_pct
+          )
+          incProgress(0.5, detail = coverage_msg)
+          showNotification(
+            coverage_msg,
+            type = if (coverage_pct < 50) "warning" else "message",
+            duration = 10
+          )
+
           sig_reliable <- lr %>%
             dplyr::filter(status != "Not significant" & Is_reliable == TRUE)
 
@@ -2001,6 +2351,177 @@ PwrQuant_server <- function(id) {
 
           incProgress(1.0, detail = "Rendering Outputs")
           ora_results
+        }
+      )
+    })
+
+    # ── STRINGdb Interaction Network ────────────────────────────────────────
+    string_network_ev <- eventReactive(input$run_string, {
+      req(limma_results_ev(), input$string_contrast)
+
+      withProgress(
+        message = "Building STRING interaction network...",
+        value = 0.1,
+        {
+          lr <- limma_results_ev()$limma_results
+          taxon_id <- trimws(input$uniprot_taxon %||% "")
+          taxon_species <- suppressWarnings(as.integer(taxon_id))
+          if (is.na(taxon_species)) {
+            taxon_species <- 9606L
+          }
+          score_threshold <- input$string_score_threshold %||% 400
+          scope <- input$string_scope %||% "combined"
+
+          incProgress(0.15, detail = "Checking STRING species coverage")
+          species_check <- tryCatch(
+            validate_string_species(taxon_species),
+            error = function(e) NULL
+          )
+          if (!is.null(species_check) && isFALSE(species_check$valid)) {
+            incProgress(1.0, detail = "Organism not covered by STRING")
+            stop(format_unsupported_species_error(species_check), call. = FALSE)
+          }
+
+          incProgress(0.2, detail = "Filtering significant & reliable proteins")
+          filtered <- lr %>%
+            dplyr::filter(comparison == input$string_contrast) %>%
+            dplyr::filter(status != "Not significant" & Is_reliable == TRUE)
+          if (scope != "combined") {
+            filtered <- filtered %>% dplyr::filter(status == scope)
+          }
+
+          if (nrow(filtered) == 0) {
+            incProgress(1.0, detail = "No significant & reliable proteins")
+            stop(
+              "No significant & reliable proteins found for contrast '",
+              input$string_contrast,
+              "' with scope '",
+              scope,
+              "'. Try a different contrast, scope, or re-check your limma settings.",
+              call. = FALSE
+            )
+          }
+
+          incProgress(0.35, detail = "Resolving lookup IDs")
+          protein_df <- data.frame(
+            Protein = filtered$Protein,
+            status = filtered$status,
+            logFC = filtered$logFC,
+            Lookup_ID = extract_uniprot_lookup_id(filtered$Protein),
+            stringsAsFactors = FALSE
+          ) %>%
+            dplyr::distinct(Protein, .keep_all = TRUE)
+
+          # Reuse the cached STRINGdb instance unless species/score changed.
+          cache_key <- list(species = taxon_species, score = score_threshold)
+          cached <- string_db_cache()
+          if (!is.null(cached) && identical(cached$key, cache_key)) {
+            string_db <- cached$db
+          } else {
+            incProgress(
+              0.5,
+              detail = paste0(
+                "Initializing STRINGdb (species ",
+                taxon_species,
+                ")... \u2601"
+              )
+            )
+            string_db <- tryCatch(
+              build_string_db(taxon_species, score_threshold),
+              error = function(e) {
+                stop(
+                  "Could not initialize STRINGdb for species ",
+                  taxon_species,
+                  " (",
+                  e$message,
+                  "). The taxon passed STRING's species-coverage check, so this is ",
+                  "likely a transient network issue \u2014 check your internet connection ",
+                  "and try again.",
+                  call. = FALSE
+                )
+              }
+            )
+            string_db_cache(list(key = cache_key, db = string_db))
+          }
+
+          incProgress(0.65, detail = "Mapping proteins to STRING identifiers")
+          mapping <- map_proteins_to_string(string_db, protein_df, "Lookup_ID")
+
+          n_total <- nrow(protein_df)
+          n_mapped <- nrow(mapping$mapped)
+          coverage_pct <- 100 * n_mapped / n_total
+          coverage_msg <- sprintf(
+            "STRING mapping coverage: %d of %d proteins (%.1f%%) mapped.",
+            n_mapped,
+            n_total,
+            coverage_pct
+          )
+          incProgress(0.8, detail = coverage_msg)
+          showNotification(
+            coverage_msg,
+            type = if (coverage_pct < 50) "warning" else "message",
+            duration = 10
+          )
+
+          if (n_mapped == 0) {
+            incProgress(1.0, detail = "No proteins mapped to STRING")
+            stop(
+              "None of the ",
+              n_total,
+              " protein identifier(s) in the selected set could be mapped to ",
+              "STRING. This usually means the identifiers aren't recognized as ",
+              "UniProt accessions/gene symbols, or the Organism Taxonomy ID doesn't ",
+              "match your samples.",
+              call. = FALSE
+            )
+          }
+
+          # Cap the network size defensively; STRING's plotting API can be slow
+          # or fail outright on very large gene lists.
+          max_hits <- 300L
+          mapped <- mapping$mapped
+          if (nrow(mapped) > max_hits) {
+            showNotification(
+              paste0(
+                "Significant protein set (",
+                nrow(mapped),
+                ") exceeds ",
+                max_hits,
+                "; showing the top ",
+                max_hits,
+                " by |logFC| for readability."
+              ),
+              type = "warning",
+              duration = 10
+            )
+            mapped <- mapped %>%
+              dplyr::arrange(dplyr::desc(abs(logFC))) %>%
+              dplyr::slice_head(n = max_hits)
+          }
+
+          incProgress(0.9, detail = "Requesting halo colors from STRING")
+          payload_id <- tryCatch(
+            string_db$post_payload(
+              mapped$STRING_id,
+              colors = string_halo_colors(mapped$status)
+            ),
+            error = function(e) {
+              warning(
+                "STRING payload (halo coloring) request failed, ",
+                "rendering network without color highlighting: ",
+                e$message
+              )
+              NULL
+            }
+          )
+
+          incProgress(1.0, detail = "Rendering network")
+          list(
+            string_db = string_db,
+            mapped = mapped,
+            unmapped = mapping$unmapped,
+            payload_id = payload_id
+          )
         }
       )
     })
@@ -2375,7 +2896,6 @@ PwrQuant_server <- function(id) {
               label = ifelse(Protein %in% label_ids, Protein, NA_character_)
             )
 
-          # Count annotations per facet
           count_ann <- lr |>
             dplyr::filter(status != "Not significant") |>
             dplyr::count(comparison, status)
@@ -2663,6 +3183,12 @@ PwrQuant_server <- function(id) {
           choices = contrasts,
           selected = if (length(contrasts) >= 2) contrasts[2] else contrasts[1]
         )
+        updateSelectInput(
+          session,
+          "string_contrast",
+          choices = contrasts,
+          selected = contrasts[1]
+        )
       }
     })
 
@@ -2935,8 +3461,6 @@ PwrQuant_server <- function(id) {
       plotOutput(ns("ora_plot"), height = paste0(dynamic_h, "px"))
     })
 
-    # Builds one GO-term dotplot (top 15 terms by adj. p-value) for a single
-    # (comparison, Regulation) group of the flat ORA results tibble.
     build_ora_dotplot <- function(d) {
       d <- d %>%
         dplyr::arrange(p.adjust) %>%
@@ -3031,6 +3555,37 @@ PwrQuant_server <- function(id) {
       )
     })
 
+    # ── STRING Network Rendering ─────────────────────────────────────────────
+    output$string_network_plot <- renderPlot({
+      rh(
+        function() {
+          res <- string_network_ev()
+          hits <- res$mapped$STRING_id
+          req(length(hits) > 0)
+          res$string_db$plot_network(hits, payload_id = res$payload_id)
+        },
+        "sp_string"
+      )
+    })
+
+    output$string_unmapped_table <- DT::renderDataTable({
+      res <- string_network_ev()
+      tbl <- res$unmapped %>%
+        dplyr::select(Protein, Lookup_ID, status) %>%
+        dplyr::distinct()
+      DT::datatable(
+        tbl,
+        colnames = c("Protein", "Lookup ID used for mapping", "Status"),
+        rownames = FALSE,
+        options = list(
+          dom = "t",
+          paging = FALSE,
+          scrollX = TRUE
+        ),
+        class = "display compact"
+      )
+    })
+
     # ── Downloads ────────────────────────────────────────────────────────────
     output$download_limma <- downloadHandler(
       filename = function() {
@@ -3075,6 +3630,20 @@ PwrQuant_server <- function(id) {
           files_to_zip <- c(files_to_zip, fname)
         }
         zip::zipr(file, files_to_zip)
+      }
+    )
+
+    output$download_string_network <- downloadHandler(
+      filename = function() {
+        paste0("STRING_network_", input$string_contrast, "_", Sys.Date(), ".png")
+      },
+      content = function(file) {
+        res <- string_network_ev()
+        hits <- res$mapped$STRING_id
+        req(length(hits) > 0)
+        grDevices::png(file, width = 1600, height = 1600, res = 200)
+        res$string_db$plot_network(hits, payload_id = res$payload_id)
+        grDevices::dev.off()
       }
     )
     # ── Download All Plots ──────────────────────────────────────────────────
@@ -3660,7 +4229,6 @@ PwrQuant_server <- function(id) {
                         data.frame(
                           class = cl,
                           label = paste0(cl, ": \u03c1 = ", round(r, 3)),
-                          vjust_pos = 0.5 + (i - 1) * 1.8,
                           stringsAsFactors = FALSE
                         )
                       } else {
@@ -3668,6 +4236,25 @@ PwrQuant_server <- function(id) {
                       }
                     })
                   )
+
+                  # Position \u03c1 labels using data-relative coordinates so they
+                  # always sit INSIDE the panel (the previous Inf/vjust stacking
+                  # clipped labels), matching the on-screen p_corr plot.
+                  if (!is.null(rho_ann_dl) && nrow(rho_ann_dl) > 0) {
+                    x_rng_dl <- range(merged$logFC_x, na.rm = TRUE)
+                    y_rng_dl <- range(merged$logFC_y, na.rm = TRUE)
+                    x_span_dl <- diff(x_rng_dl)
+                    y_span_dl <- diff(y_rng_dl)
+                    if (!is.finite(x_span_dl) || x_span_dl == 0) {
+                      x_span_dl <- 1
+                    }
+                    if (!is.finite(y_span_dl) || y_span_dl == 0) {
+                      y_span_dl <- 1
+                    }
+                    rho_ann_dl$x_pos <- x_rng_dl[1] + 0.02 * x_span_dl
+                    rho_ann_dl$y_pos <- y_rng_dl[2] -
+                      (seq_len(nrow(rho_ann_dl)) - 1) * 0.07 * y_span_dl
+                  }
 
                   corr_colors_dl <- c(
                     "Concordant" = "#1ca957",
@@ -3706,6 +4293,10 @@ PwrQuant_server <- function(id) {
                       linewidth = 0.3
                     ) +
                     scale_color_manual(values = corr_colors_dl) +
+                    scale_y_continuous(
+                      expand = expansion(mult = c(0.05, 0.08))
+                    ) +
+                    coord_cartesian(clip = "off") +
                     labs(
                       title = paste(cx, "vs", cy),
                       x = paste0("log\u2082FC: ", cx),
@@ -3725,10 +4316,9 @@ PwrQuant_server <- function(id) {
                     p_dl <- p_dl +
                       geom_text(
                         data = rho_ann_dl,
-                        aes(label = label, color = class, vjust = vjust_pos),
-                        x = Inf,
-                        y = Inf,
-                        hjust = 1.1,
+                        aes(x = x_pos, y = y_pos, label = label, color = class),
+                        hjust = 0,
+                        vjust = 1,
                         size = 4.5,
                         fontface = "bold",
                         inherit.aes = FALSE,
@@ -4068,7 +4658,6 @@ PwrQuant_server <- function(id) {
       mat_z <- t(scale(t(mat)))
       mat_z[is.nan(mat_z)] <- 0
 
-      # Drop rows that are completely NA
       keep <- rowSums(!is.na(mat_z)) > 0
       mat_z[keep, , drop = FALSE]
     })
@@ -4083,16 +4672,13 @@ PwrQuant_server <- function(id) {
       meta <- meta_edit_df()
       disp_names <- get_display_names()
 
-      # Order columns by condition factor
       col_order <- order(factor(
         meta$Condition[match(colnames(mat_z), meta$Sample)]
       ))
       mat_z <- mat_z[, col_order, drop = FALSE]
 
-      # Column labels use display names
       col_labels <- disp_names[colnames(mat_z)]
 
-      # Condition annotation
       cond_vec <- meta$Condition[match(colnames(mat_z), meta$Sample)]
       col_ha <- ComplexHeatmap::HeatmapAnnotation(
         Condition = cond_vec,
@@ -4106,7 +4692,6 @@ PwrQuant_server <- function(id) {
         )
       )
 
-      # Color scale
       col_fun <- circlize::colorRamp2(
         c(-2, 0, 2),
         c("#2166AC", "white", "#B2182B")

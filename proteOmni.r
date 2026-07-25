@@ -70,6 +70,9 @@ if (!requireNamespace("pcaMethods", quietly = TRUE)) {
 if (!requireNamespace("ComplexHeatmap", quietly = TRUE)) {
   BiocManager::install("ComplexHeatmap", update = FALSE, ask = FALSE)
 }
+if (!requireNamespace("STRINGdb", quietly = TRUE)) {
+  BiocManager::install("STRINGdb", update = FALSE, ask = FALSE)
+}
 if (!requireNamespace("httr", quietly = TRUE)) {
   install.packages("httr")
 }
@@ -116,6 +119,7 @@ library(limma)
 library(lavaan)
 library(patchwork)
 library(ComplexHeatmap)
+library(STRINGdb)
 library(compiler)
 library(httr)
 library(jsonlite)
@@ -147,6 +151,7 @@ writeLines(
   "ggplot2",
   "limma",
   "sva",
+  "STRINGdb",
   "clusterProfiler",
   "enrichplot",
   "patchwork",
