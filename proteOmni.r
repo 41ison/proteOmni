@@ -73,6 +73,20 @@ if (!requireNamespace("ComplexHeatmap", quietly = TRUE)) {
 if (!requireNamespace("STRINGdb", quietly = TRUE)) {
   BiocManager::install("STRINGdb", update = FALSE, ask = FALSE)
 }
+if (!requireNamespace("clusterProfiler", quietly = TRUE)) {
+  BiocManager::install("clusterProfiler", update = FALSE, ask = FALSE)
+}
+if (!requireNamespace("enrichplot", quietly = TRUE)) {
+  BiocManager::install("enrichplot", update = FALSE, ask = FALSE)
+}
+if (!requireNamespace("AnnotationDbi", quietly = TRUE)) {
+  BiocManager::install("AnnotationDbi", update = FALSE, ask = FALSE)
+}
+# Baseline OrgDb (human); other organisms are installed on demand by the
+# PwrQuant enrichment module via ensure_orgdb().
+if (!requireNamespace("org.Hs.eg.db", quietly = TRUE)) {
+  BiocManager::install("org.Hs.eg.db", update = FALSE, ask = FALSE)
+}
 if (!requireNamespace("httr", quietly = TRUE)) {
   install.packages("httr")
 }
@@ -120,6 +134,8 @@ library(lavaan)
 library(patchwork)
 library(ComplexHeatmap)
 library(STRINGdb)
+library(clusterProfiler)
+library(enrichplot)
 library(compiler)
 library(httr)
 library(jsonlite)
