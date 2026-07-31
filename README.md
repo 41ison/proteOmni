@@ -42,7 +42,8 @@
 - **Interactive Visualization** — Explore 3D QuantUMS score distributions, interactive PCA plots, sample correlation matrices, cosine/Euclidean/Jaccard similarity heatmaps, and annotated MS/MS fragmentation spectra directly in the browser.
 - **Peptide-to-Protein Mapping** — Map identified peptides onto user-provided FASTA sequences with a colour-coded protein sequence viewer.
 - **Differential Abundance Analysis** — Full limma-based workflow with normalization, batch correction (ComBat/SVA), flexible missing value imputation (KNN, MinProb, or missForest), MA plots, volcano plots, and statistical power mapping.
-- **Functional Enrichment** — Over-representation analysis (ORA) with gene-set annotation using clusterProfiler and enrichplot.
+- **Functional Enrichment** — GO over-representation analysis (ORA) with `clusterProfiler::enrichGO`, run per contrast and split by regulation direction, using Bioconductor OrgDb annotation packages for 20 supported organisms.
+- **Protein-Protein Interaction Networks** — STRING interaction networks for the significant proteins of any contrast via the `STRINGdb` package, with nodes halo-coloured by up/down regulation and confidence-score edge filtering.
 - **Publication-Ready Output** — Download filtered result matrices and universally formatted plots (PNG/ZIP) ready for reporting and publication.
 - **Session Logging** — Automatic session and console logging with a one-click log download for full reproducibility.
 
@@ -65,9 +66,11 @@
 
 proteOmni auto-installs all required packages on first launch. The key dependencies are:
 
-**CRAN packages:** `shiny`, `shinydashboard`, `shinyjs`, `fresh`, `tidyverse`, `tidytext`, `janitor`, `ggpointdensity`, `ggtext`, `ggrepel`, `ggseqlogo`, `lsa`, `vegan`, `plotly`, `viridis`, `ggfortify`, `seqinr`, `zip`, `DT`, `colourpicker`, `R6`, `gridExtra`, `scales`, `lavaan`, `naniar`, `patchwork`, `pwr`, `missForest`, `data.table`, `GGally`, `arrow`
+**CRAN packages:** `shiny`, `shinydashboard`, `shinyjs`, `fresh`, `tidyverse`, `tidytext`, `janitor`, `ggpointdensity`, `ggtext`, `ggrepel`, `ggseqlogo`, `lsa`, `vegan`, `plotly`, `viridis`, `ggfortify`, `seqinr`, `zip`, `DT`, `colourpicker`, `R6`, `gridExtra`, `scales`, `lavaan`, `naniar`, `patchwork`, `pwr`, `missForest`, `data.table`, `GGally`, `arrow`, `httr`, `jsonlite`, `BiocManager`
 
-**Bioconductor packages:** `limma`, `Biostrings`, `sva`, `impute`, `ComplexHeatmap`, `clusterProfiler`, `GO.db`, `enrichplot`
+**Bioconductor packages:** `limma`, `Biostrings`, `sva`, `impute`, `ComplexHeatmap`, `clusterProfiler`, `GO.db`, `enrichplot`, `AnnotationDbi`, `STRINGdb`
+
+**OrgDb annotation packages (auto-installed on demand):** the organism selected in the PwrQuant *GO Enrichment* dropdown determines which Bioconductor `org.*` package is required (e.g. `org.Hs.eg.db` for human, `org.Mm.eg.db` for mouse). proteOmni installs the matching package via `BiocManager` the first time that organism is used. 20 organisms are supported — see [Step 9](#step-9--functional-enrichment-ora-with-clusterprofiler).
 
 **GitHub packages:** `diann` ([vdemichev/diann-rpackage](https://github.com/vdemichev/diann-rpackage))
 
@@ -185,7 +188,8 @@ End-to-end differential abundance and statistical power analysis pipeline. Accep
 | **Differential Abundance** | MA/Bland-Altman plots, volcano plots, top-20 DAP bar mirror chart, raw p-value histograms per contrast |
 | **Correlation** | Inter-contrast logFC scatter with Spearman ρ and concordant/inverse/mismatch classification |
 | **Power Statistics** | eBayes posterior variance vs. |logFC| reliability map — proteins above the minimum detectable fold-change at 80% power are flagged as reliable |
-| **Enrichment** | ORA dotplots generated with `clusterProfiler::enrichGO`, supporting 13 organism databases |
+| **Enrichment** | GO over-representation analysis with `clusterProfiler::enrichGO`, run per contrast and split by up/down direction; results shown as a dotplot (top terms per contrast) and a Manhattan plot (all enriched terms), across 20 supported OrgDb organisms |
+| **Interaction Network** | STRING protein-protein interaction network (`STRINGdb`) for a selected contrast, with nodes halo-coloured by regulation and edges filtered by a confidence score; unmapped proteins are listed for transparency |
 | **UpSet Plots** | Visualize intersections of proteins across multiple sample groups |
 
 ---
@@ -332,19 +336,41 @@ A protein is called **significant** if:
 
 Proteins that are fully missing in one condition are flagged as `imputation_driven` and classified as *Not significant*, avoiding false positives driven by structural zeros.
 
-### Step 9 — Functional enrichment (ORA)
-GO annotations (Biological Process, Cellular Component, Molecular Function) are fetched live from the UniProt REST API for the proteins in your abundance matrix, then tested with a custom hypergeometric test (`phyper()`) plus Benjamini-Hochberg FDR correction — no local organism database is required. An optional NCBI Taxonomy ID input disambiguates gene-symbol lookups across species (UniProt accessions are unambiguous and skip this filter).
+### Step 9 — Functional enrichment (ORA with clusterProfiler)
+GO over-representation analysis is performed with `clusterProfiler::enrichGO()`. For every selected contrast, the significant & reliable proteins are split by regulation direction (**Increased** / **Decreased**) and each gene set is tested separately against the shared background (*universe*) of all quantified proteins in the matrix. Enriched terms across contrasts are stacked into a single result and rendered as:
+- a **dotplot** — top terms per contrast (count on the x-axis, size = gene count, colour = adjusted p-value), and
+- a **Manhattan plot** — every enriched term per contrast, height = −log10 adjusted p-value.
 
-Users choose an **Enrichment Scope**:
-- **Combined** — test all significant & reliable proteins per contrast together, regardless of direction.
-- **Split** — test increased and decreased proteins separately for each contrast.
+Annotations come from a Bioconductor OrgDb (`org.*`) package rather than a live web lookup, so no per-run network fetch is required once the package is installed. The **Organism (OrgDb)** dropdown selects the package and its NCBI taxon ID; the matching package is auto-installed via `BiocManager` on first use. 20 organisms are supported, including:
 
-Each result row is annotated with a `Regulation` column (`Combined`/`Increased`/`Decreased`) and a `geneID_Regulation` column listing each overlapping protein tagged with its individual up/down status.
+| Organism | OrgDb package | Taxon |
+|---|---|---|
+| *Homo sapiens* (human) | `org.Hs.eg.db` | 9606 |
+| *Mus musculus* (mouse) | `org.Mm.eg.db` | 10090 |
+| *Rattus norvegicus* (rat) | `org.Rn.eg.db` | 10116 |
+| *Drosophila melanogaster* | `org.Dm.eg.db` | 7227 |
+| *Danio rerio* (zebrafish) | `org.Dr.eg.db` | 7955 |
+| *Saccharomyces cerevisiae* | `org.Sc.sgd.db` | 559292 |
+| *Arabidopsis thaliana* | `org.At.tair.db` | 3702 |
+| *Escherichia coli* K-12 | `org.EcK12.eg.db` | 83333 |
+
+*(showing 8 of 20; the remaining organisms include cow, pig, dog, chicken, rhesus, chimpanzee, frog, mosquito, worm, and others.)*
+
+Sidebar controls let you choose the contrasts to test, the **GO Category** (ALL / BP / CC / MF), the **GO term FDR cutoff**, and how many terms are shown per contrast. Protein identifiers are auto-detected as either UniProt accessions or gene symbols (setting the `enrichGO` keyType to `UNIPROT` or `SYMBOL`); a coverage notification reports how many significant IDs are annotated in the chosen OrgDb.
 
 Protein identifiers are auto-parsed from three common formats:
 1. UniProt accession, plain or pipe-separated (e.g. `P04637` or `sp|P04637|TP53_HUMAN`)
 2. UniProt FASTA header with `GN=SYMBOL` tag (e.g. `sp|P04637|P53_HUMAN GN=TP53`)
-3. Plain gene symbols (e.g. `TP53`) — use the Organism Taxonomy ID field to disambiguate across species
+3. Plain gene symbols (e.g. `TP53`)
+
+### Step 10 — Protein-protein interaction network (STRING)
+The *Interaction Network* tab maps the significant & reliable proteins of a chosen contrast onto the [STRING](https://string-db.org/) database (v12.0) with the `STRINGdb` package and renders the network via `plot_network()`. The organism reuses the taxon selected for GO enrichment in Step 9.
+
+Controls:
+- **Protein Set** — build the network from all significant proteins (*Combined*), or restrict to *Increased only* or *Decreased only*.
+- **Min. combined score (0–1000)** — filters STRING edges by confidence (STRING's default is 400).
+
+Nodes are halo-coloured **red** for increased and **blue** for decreased proteins, mirroring the regulation flagging used elsewhere in the module. Before building, proteOmni checks the selected taxon against STRING's official species list; if the organism is not covered it reports closely related covered organisms as suggestions instead of failing silently. Proteins that cannot be mapped to a STRING identifier are listed separately for transparency and excluded from the plotted network.
 
 ---
 
@@ -457,13 +483,25 @@ If you selected **missForest** as the imputation method, imputation can take 30�
 
 <summary><b>ORA returns no enriched terms</b></summary>
 
-This can happen for three reasons:
+This can happen for a few reasons:
 
-1. **Protein identifiers can't be resolved by UniProt.** ORA requires UniProt accessions or gene symbols (e.g. `TP53`, `EGFR`). proteOmni attempts to parse them from UniProt FASTA headers (`GN=` tag), pipe-separated IDs, or accessions automatically, but if your matrix uses non-standard identifiers, no mapping will be found. Also check your internet connection, since GO annotations are fetched live from the UniProt REST API.
+1. **Protein identifiers aren't annotated in the OrgDb.** `enrichGO` needs UniProt accessions or gene symbols (e.g. `TP53`, `EGFR`) that exist in the selected `org.*` package. proteOmni parses them from UniProt FASTA headers (`GN=` tag), pipe-separated IDs, or accessions automatically, but non-standard identifiers won't map. Check the annotation-coverage notification shown when ORA runs — a low percentage means most IDs weren't recognised.
 
-2. **Too few significant proteins.** If there are fewer than ~5 significant reliable proteins in a contrast, the hypergeometric test is underpowered. Try relaxing the minimum valid value threshold or checking whether the experiment is adequately powered.
+2. **Wrong organism selected.** Pick the organism that matches your data in the **Organism (OrgDb)** dropdown. A mismatched OrgDb will annotate few or no proteins.
 
-3. **Wrong or missing organism taxonomy ID.** When your protein identifiers are plain gene symbols (not UniProt accessions), set the Organism Taxonomy ID field in the sidebar (e.g. `9606` for human) to avoid cross-species GO term contamination.
+3. **Too few significant proteins.** If a contrast × direction gene set has only a handful of proteins, the over-representation test is underpowered and may return nothing. Try relaxing the minimum valid-value threshold, loosening the GO term FDR cutoff, or checking whether the experiment is adequately powered.
+
+4. **OrgDb package couldn't be installed.** The first use of a new organism triggers a `BiocManager::install()` of its `org.*` package — check your internet connection and the session log if enrichment fails to start.
+
+</details>
+
+<details>
+
+<summary><b>STRING network is empty or the organism is unsupported</b></summary>
+
+The *Interaction Network* tab reuses the organism selected for GO enrichment. If STRING (v12.0) does not cover that taxon, proteOmni reports it explicitly and suggests closely related organisms that *are* covered — this is a coverage limitation of STRING, not an app error. Try a more commonly studied organism, or use a species-level taxon ID instead of a strain-specific one.
+
+An empty network with a covered organism usually means too few proteins mapped to STRING identifiers (see the "could not be mapped" list under the plot) or that the **Min. combined score** threshold is too high — lower it toward STRING's default of 400 to retain more edges.
 
 </details>
 
