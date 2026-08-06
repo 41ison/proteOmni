@@ -427,18 +427,18 @@ ui <- dashboardPage(
         )
       ),
       menuItem("Home", tabName = "home", icon = icon("house")),
+      menuItem("PwrQuant", tabName = "pwr_tab", icon = icon("calculator")),
       menuItem(
         "PSManalyst",
         tabName = "psm_tab",
         icon = icon("barcode", lib = "glyphicon")
       ),
       menuItem("QC4DIANN", tabName = "qc_tab", icon = icon("circle-nodes")),
-      menuItem("PwrQuant", tabName = "pwr_tab", icon = icon("calculator")),
+      menuItem("MaxQuant", tabName = "mqt_tab", icon = icon("table")),
       menuItem("Casanovo", tabName = "dnv_tab", icon = icon("fingerprint")),
       menuItem("InstaNovo", tabName = "ins_tab", icon = icon("brain")),
       menuItem("EncyclopeDIA", tabName = "enc_tab", icon = icon("book-open")),
-      menuItem("Sage", tabName = "sag_tab", icon = icon("leaf")),
-      menuItem("MaxQuant", tabName = "mqt_tab", icon = icon("table"))
+      menuItem("Sage", tabName = "sag_tab", icon = icon("leaf"))
     ),
     tags$hr(style = "border-color:#2d3741;margin:4px 0;"),
     uiOutput("active_sidebar_controls"),
