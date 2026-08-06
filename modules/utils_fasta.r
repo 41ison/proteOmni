@@ -388,7 +388,7 @@ plot_2d_gel <- function(
   d,
   pi_col = "pI",
   mw_col = "MW",
-  title = "2D gel electrophoresis simulation (pI vs MW)",
+  title = "Virtual 2D gel (pI vs MW)",
   facet_col = NULL,
   ncol = 3
 ) {
