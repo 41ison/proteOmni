@@ -202,7 +202,7 @@ plot_ev_mz_rt <- function(df) {
     scale_color_viridis_c(option = "D", direction = -1) +
     scale_y_continuous(breaks = scales::pretty_breaks(n = 10)) +
     facet_wrap(~`Raw file`, ncol = 3) +
-    labs(x = "Retention time (min)", y = "*m/z*", color = "Density") +
+    labs(x = "Retention time (min)", y = "m/z", color = "Density") +
     theme_mq()
 }
 
@@ -228,7 +228,7 @@ plot_ev_ndp_mz <- function(df) {
     scale_x_continuous(breaks = scales::pretty_breaks(n = 10)) +
     scale_y_continuous(breaks = scales::pretty_breaks(n = 10)) +
     facet_wrap(~`Raw file`, ncol = 3) +
-    labs(x = "*m/z*", y = "Number of data points", color = "Density") +
+    labs(x = "m/z", y = "Number of data points", color = "Density") +
     theme_mq() +
     theme(axis.text.x = element_text(angle = 65, hjust = 1))
 }

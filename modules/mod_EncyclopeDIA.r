@@ -274,7 +274,8 @@ EncyclopeDIA_server <- function(id, fasta_digest) {
       d <- enc_data() |> dplyr::filter(`q-value` <= input$qval_filter)
       safe_seqs <- str_remove_all(d$stripped_peptide, "[^ACDEFGHIKLMNPQRSTVWY]")
       d$gravy <- sapply(safe_seqs, GRAVY)
-      d$pI <- sapply(safe_seqs, calculate_pI)
+      d$pI <- calculate_pI(safe_seqs)
+      d$MW <- calculate_MW(safe_seqs)
       d
     })
 
@@ -549,12 +550,12 @@ EncyclopeDIA_server <- function(id, fasta_digest) {
     plot_pi_obj <- reactive({
       d <- mapped_data()
       req(nrow(d) > 0, "pI" %in% names(d))
-      plot_annotated_density_faceted_enc(
+      plot_2d_gel(
         d,
-        "pI",
-        "Isoelectric Point (pI)",
-        "pI",
-        input$line_color
+        pi_col = "pI",
+        mw_col = "MW",
+        title = "Virtual 2D Gel",
+        facet_col = "filename"
       )
     })
 

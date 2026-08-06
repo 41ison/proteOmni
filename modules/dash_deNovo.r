@@ -145,7 +145,8 @@ read_mztab <- function(path) {
         USE.NAMES = FALSE
       ),
       gravy = sapply(stripped_sequence, GRAVY, USE.NAMES = FALSE),
-      pI = sapply(stripped_sequence, calculate_pI, USE.NAMES = FALSE)
+      pI = calculate_pI(stripped_sequence),
+      MW = calculate_MW(stripped_sequence)
     )
 
   list(metadata = meta, psm = psm)
@@ -771,7 +772,7 @@ deNovo_server <- function(id) {
         geom_vline(xintercept = 0, color = "red", linetype = "dashed") +
         labs(
           title = "m/z error distribution",
-          x = "m/z error  (exp m/z − calc m/z)",
+          x = "m/z error in Da (exp m/z − calc m/z)",
           y = "Count",
           caption = "Distribution centred at 0 indicates good mass accuracy"
         ) +
@@ -891,7 +892,7 @@ deNovo_server <- function(id) {
         labs(
           title = "Retention time vs. m/z error",
           x = "Retention time",
-          y = "m/z error (exp − calc)"
+          y = "m/z error in Da (exp − calc)"
         ) +
         facet_wrap(~filename, ncol = 3) +
         theme_dn() +
@@ -1110,65 +1111,17 @@ deNovo_server <- function(id) {
             theme_void()
         )
       }
-      med_pi <- round(median(d$pI, na.rm = TRUE), 2)
-      pct_acid <- round(mean(d$pI < 7, na.rm = TRUE) * 100, 1)
-      pct_bas <- round(mean(d$pI > 7, na.rm = TRUE) * 100, 1)
-      ggplot(d, aes(x = pI, fill = after_stat(x))) +
-        geom_histogram(bins = 40, color = "black") +
-        scale_fill_gradient2(
-          low = "#e74c3c",
-          mid = "#f0e6ff",
-          high = "#2980b9",
-          midpoint = 7,
-          name = "pI"
-        ) +
-        geom_vline(
-          xintercept = 7,
-          color = "gray40",
-          linetype = "dashed",
-          linewidth = 0.7
-        ) +
-        geom_vline(
-          xintercept = med_pi,
-          color = "orange",
-          linetype = "dotted",
-          linewidth = 0.9
-        ) +
-        annotate(
-          "text",
-          x = med_pi,
-          y = Inf,
-          vjust = 1.5,
-          hjust = ifelse(med_pi >= 7, -0.1, 1.1),
-          label = paste0("median pI=", med_pi),
-          color = "orange",
-          size = 3.5,
-          fontface = "bold"
-        ) +
-        labs(
-          title = "Isoelectric point (pI) distribution",
-          x = "Isoelectric point (pI)",
-          y = "Count",
-          caption = paste0(
-            "Acidic (pI < 7): ",
-            pct_acid,
-            "%  |  Basic (pI > 7): ",
-            pct_bas,
-            "%\n",
-            "Red = acidic end; Blue = basic end; dashed grey line = pI 7 (neutral)"
-          )
-        ) +
-        facet_wrap(~filename, ncol = 3) +
-        theme_dn() +
+      plot_2d_gel(
+        d,
+        pi_col = "pI",
+        mw_col = "MW",
+        title = "Virtual 2D Gel",
+        facet_col = "filename"
+      ) +
         theme(
           legend.position = "bottom",
           legend.key.width = unit(2, "cm"),
-          legend.key.height = unit(0.25, "cm"),
-          plot.caption = element_text(
-            size = 10,
-            color = "gray30",
-            hjust = 0
-          )
+          legend.key.height = unit(0.25, "cm")
         )
     })
 
@@ -1214,7 +1167,7 @@ deNovo_server <- function(id) {
         labs(
           title = "m/z error vs Casanovo score",
           x = "Casanovo score",
-          y = "m/z error (exp − calc)"
+          y = "m/z error in Da (exp − calc)"
         ) +
         facet_wrap(~filename, ncol = 3) +
         theme_dn() +
@@ -1609,7 +1562,7 @@ deNovo_server <- function(id) {
               geom_vline(xintercept = 0, color = "red", linetype = "dashed") +
               labs(
                 title = "m/z error distribution",
-                x = "EXP − CALC m/z",
+                x = "Exp − Calc m/z (Da)",
                 y = "Count"
               ) +
               facet_wrap(~filename, ncol = 3) +
@@ -1652,7 +1605,7 @@ deNovo_server <- function(id) {
               labs(
                 title = "Retention time vs. m/z error",
                 x = "RT",
-                y = "m/z error"
+                y = "m/z error (Da)"
               ) +
               facet_wrap(~filename, ncol = 3) +
               theme_dn()
@@ -1766,21 +1719,13 @@ deNovo_server <- function(id) {
                   theme_dn()
               )
             }
-            ggplot(td, aes(x = pI, fill = after_stat(x))) +
-              geom_histogram(bins = 40, color = "black") +
-              scale_fill_gradient2(
-                low = "#e74c3c",
-                mid = "#f0e6ff",
-                high = "#2980b9",
-                midpoint = 7
-              ) +
-              geom_vline(
-                xintercept = 7,
-                color = "gray40",
-                linetype = "dashed"
-              ) +
-              labs(title = "Isoelectric point (pI)", x = "pI", y = "Count") +
-              facet_wrap(~filename, ncol = 3) +
+            plot_2d_gel(
+              td,
+              pi_col = "pI",
+              mw_col = "MW",
+              title = "2D Gel View: pI vs Molecular Weight",
+              facet_col = "filename"
+            ) +
               theme_dn()
           })
           incProgress(1 / 18)
@@ -1827,7 +1772,11 @@ deNovo_server <- function(id) {
               ggpointdensity::geom_pointdensity() +
               viridis::scale_color_viridis(option = "plasma") +
               geom_hline(yintercept = 0, color = "red", linetype = "dashed") +
-              labs(title = "m/z error vs score", x = "Score", y = "m/z error") +
+              labs(
+                title = "m/z error vs score",
+                x = "Score",
+                y = "m/z error (Da)"
+              ) +
               facet_wrap(~filename, ncol = 3) +
               theme_dn()
           })

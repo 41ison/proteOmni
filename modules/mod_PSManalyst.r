@@ -57,7 +57,8 @@ extract_matrix_per_sample <- function(data) {
 
         mat <- matrix(unlist(fp), ncol = 8, byrow = TRUE)
         mat <- mat[
-          !apply(mat, 1, function(x) any(x %in% c("B", "X", "Z", "U", "O"))), ,
+          !apply(mat, 1, function(x) any(x %in% c("B", "X", "Z", "U", "O"))),
+          ,
           drop = FALSE
         ]
 
@@ -107,9 +108,10 @@ extract_matrix_per_sample <- function(data) {
 }
 
 analyze_terminus_cooccurrence <- function(
-    df,
-    peptide_col,
-    show_values = FALSE) {
+  df,
+  peptide_col,
+  show_values = FALSE
+) {
   aas <- c(
     "A",
     "C",
@@ -990,7 +992,8 @@ PSManalyst_server <- function(id) {
             calculated_m_z *
             1e6,
           gravy = sapply(peptide, GRAVY),
-          isoelectric_point = sapply(peptide, calculate_pI),
+          isoelectric_point = calculate_pI(peptide),
+          molecular_weight = calculate_MW(peptide),
           specificity = dplyr::case_when(
             prev_aa %in%
               c("K", "R") &
@@ -1361,12 +1364,13 @@ PSManalyst_server <- function(id) {
 
     psm_fns$plot09 <- function() {
       req(data())
-      data() %>%
-        ggplot(aes(x = isoelectric_point, fill = after_stat(x))) +
-        geom_histogram(color = "black") +
-        scale_fill_viridis_c(name = "Isoelectric Point (pI)", option = "C") +
-        labs(x = NULL, y = "Count") +
-        facet_wrap(~sample_name, ncol = 3) +
+      plot_2d_gel(
+        data(),
+        pi_col = "isoelectric_point",
+        mw_col = "molecular_weight",
+        title = "Virtual 2D Gel",
+        facet_col = "sample_name"
+      ) +
         theme(
           legend.position = "bottom",
           legend.key.width = unit(2.5, "cm"),
@@ -1869,7 +1873,11 @@ PSManalyst_server <- function(id) {
 
     combined_protein_data <- reactive({
       req(input$combined_protein)
-      data.table::fread(input$combined_protein$datapath, sep = "\t", header = TRUE) %>%
+      data.table::fread(
+        input$combined_protein$datapath,
+        sep = "\t",
+        header = TRUE
+      ) %>%
         janitor::clean_names() %>%
         dplyr::select(protein_id, ends_with("max_lfq_intensity")) %>%
         column_to_rownames("protein_id") %>%
@@ -1879,7 +1887,11 @@ PSManalyst_server <- function(id) {
 
     combined_protein_raw <- reactive({
       req(input$combined_protein)
-      raw <- data.table::fread(input$combined_protein$datapath, sep = "\t", header = TRUE) %>%
+      raw <- data.table::fread(
+        input$combined_protein$datapath,
+        sep = "\t",
+        header = TRUE
+      ) %>%
         janitor::clean_names()
       keep <- c(
         "entry_name",

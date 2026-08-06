@@ -387,7 +387,8 @@ InstaNovo_server <- function(id, fasta_digest) {
         "[^ACDEFGHIKLMNPQRSTVWY]"
       )
       d$gravy <- sapply(safe_seqs, GRAVY)
-      d$pI <- sapply(safe_seqs, calculate_pI)
+      d$pI <- calculate_pI(safe_seqs)
+      d$MW <- calculate_MW(safe_seqs)
       d
     })
 
@@ -735,12 +736,12 @@ InstaNovo_server <- function(id, fasta_digest) {
             theme_void()
         )
       }
-      plot_annotated_density(
+      plot_2d_gel(
         d,
-        "pI",
-        "Isoelectric Point (pI) Distribution",
-        "pI",
-        input$plot_color
+        pi_col = "pI",
+        mw_col = "MW",
+        title = "Virtual 2D Gel",
+        facet_col = "filename"
       )
     })
 
