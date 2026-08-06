@@ -1860,15 +1860,20 @@ PSManalyst_server <- function(id) {
     protein_data <- reactive({
       folder <- loaded_psm_folder()
       req(folder)
-      prot_file <- list.files(
+      prot_files <- list.files(
         folder,
         pattern = "^protein\\.tsv$",
         full.names = TRUE,
         recursive = TRUE
       )
-      req(length(prot_file) > 0)
-      data.table::fread(prot_file[1], sep = "\t", header = TRUE) %>%
-        janitor::clean_names()
+      req(length(prot_files) > 0)
+      # Read every protein.tsv and tag each with a sample_name derived from its
+      # parent folder so that plots can be faceted / filtered by sample.
+      purrr::map_dfr(prot_files, function(f) {
+        data.table::fread(f, sep = "\t", header = TRUE) %>%
+          janitor::clean_names() %>%
+          dplyr::mutate(sample_name = basename(dirname(f)))
+      })
     })
 
     combined_protein_data <- reactive({
@@ -1923,11 +1928,12 @@ PSManalyst_server <- function(id) {
       )
     })
 
-    # Sample selector for protein view
-    observeEvent(raw_psm_data(), {
-      d <- raw_psm_data()
-      req(d)
-      samples <- unique(d$sample_name)
+    # Sample selector for protein view (populated from protein_data so the
+    # selected value always matches a sample_name present in the plots)
+    observeEvent(protein_data(), {
+      d <- protein_data()
+      req(d, "sample_name" %in% names(d))
+      samples <- sort(unique(d$sample_name))
       updateSelectInput(
         session,
         "protein_sample_select",
@@ -2165,9 +2171,29 @@ PSManalyst_server <- function(id) {
     # ════════════════════════════════════════════════════════════════════════
     # F2. PROTEIN PLOTS
     # ════════════════════════════════════════════════════════════════════════
+
+    # Protein data restricted to the selected sample (all samples when "all").
+    prot_plot_data <- function() {
+      d <- protein_data()
+      req(d, "sample_name" %in% names(d))
+      sel <- input$protein_sample_select
+      if (!is.null(sel) && sel != "all") {
+        d <- dplyr::filter(d, sample_name == sel)
+      }
+      d
+    }
+
+    # Facet a protein plot by sample only when "All samples" is selected.
+    add_prot_facet <- function(p) {
+      sel <- input$protein_sample_select
+      if (is.null(sel) || sel == "all") {
+        p <- p + facet_wrap(~sample_name, ncol = 3)
+      }
+      p
+    }
+
     prot_fns$plot01p <- function() {
-      req(protein_data())
-      protein_data() %>%
+      p <- prot_plot_data() %>%
         ggplot() +
         geom_histogram(
           aes(x = coverage),
@@ -2175,12 +2201,12 @@ PSManalyst_server <- function(id) {
           color = "black"
         ) +
         labs(x = "Protein coverage (%)", y = "Count")
+      add_prot_facet(p)
     }
 
     prot_fns$plot02p <- function() {
-      req(protein_data())
-      protein_data() %>%
-        dplyr::count(organism) %>%
+      p <- prot_plot_data() %>%
+        dplyr::count(sample_name, organism) %>%
         ggplot() +
         geom_bar(
           aes(x = n, y = reorder(organism, n)),
@@ -2195,11 +2221,11 @@ PSManalyst_server <- function(id) {
         ) +
         labs(x = "Number of proteins", y = NULL) +
         theme(axis.text.y = element_text(face = "italic"))
+      add_prot_facet(p)
     }
 
     prot_fns$plot03p <- function() {
-      req(protein_data())
-      protein_data() %>%
+      p <- prot_plot_data() %>%
         dplyr::mutate(
           protein_existence = stringr::str_remove(protein_existence, ".*\\:"),
           protein_existence = factor(
@@ -2229,11 +2255,11 @@ PSManalyst_server <- function(id) {
           fontface = "bold"
         ) +
         labs(y = NULL, x = "Count")
+      add_prot_facet(p)
     }
 
     prot_fns$plot04p <- function() {
-      req(protein_data())
-      protein_data() %>%
+      p <- prot_plot_data() %>%
         ggplot() +
         geom_histogram(
           aes(x = protein_probability),
@@ -2241,11 +2267,11 @@ PSManalyst_server <- function(id) {
           color = "black"
         ) +
         labs(x = "Protein Probability", y = "Count")
+      add_prot_facet(p)
     }
 
     prot_fns$plot05p <- function() {
-      req(protein_data())
-      protein_data() %>%
+      p <- prot_plot_data() %>%
         ggplot() +
         geom_histogram(
           aes(x = top_peptide_probability),
@@ -2253,11 +2279,11 @@ PSManalyst_server <- function(id) {
           color = "black"
         ) +
         labs(x = "Peptide Probability", y = "Count")
+      add_prot_facet(p)
     }
 
     prot_fns$plot06p <- function() {
-      req(protein_data())
-      protein_data() %>%
+      p <- prot_plot_data() %>%
         ggplot() +
         geom_histogram(
           aes(x = total_peptides),
@@ -2265,11 +2291,11 @@ PSManalyst_server <- function(id) {
           color = "black"
         ) +
         labs(x = "Total peptides mapped to proteins", y = "Count")
+      add_prot_facet(p)
     }
 
     prot_fns$plot07p <- function() {
-      req(protein_data())
-      protein_data() %>%
+      p <- prot_plot_data() %>%
         ggplot() +
         geom_histogram(
           aes(x = razor_spectral_count),
@@ -2277,11 +2303,11 @@ PSManalyst_server <- function(id) {
           color = "black"
         ) +
         labs(x = "Razor Spectral Count", y = "Count")
+      add_prot_facet(p)
     }
 
     prot_fns$plot08p <- function() {
-      req(protein_data())
-      protein_data() %>%
+      p <- prot_plot_data() %>%
         ggplot() +
         geom_histogram(
           aes(x = razor_intensity),
@@ -2289,6 +2315,7 @@ PSManalyst_server <- function(id) {
           color = "black"
         ) +
         labs(x = "Razor Intensity", y = "Count")
+      add_prot_facet(p)
     }
 
     prot_fns$plot10p <- function() {
