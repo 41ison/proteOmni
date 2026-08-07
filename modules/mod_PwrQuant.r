@@ -81,7 +81,20 @@ groupwise_imputation <- function(
       g_mat <- data[, g_cols, drop = FALSE]
       k_use <- min(5L, ncol(g_mat) - 1L)
       result <- tryCatch(
-        impute::impute.knn(g_mat, k = k_use)$data,
+        {
+          # impute.knn writes cluster traces straight to stdout. Silence them
+          # unless asked: the MDD simulation imputes hundreds of matrices and
+          # would otherwise flood the console and the Shiny log.
+          knn_out <- NULL
+          if (verbose) {
+            knn_out <- impute::impute.knn(g_mat, k = k_use)$data
+          } else {
+            utils::capture.output(
+              knn_out <- impute::impute.knn(g_mat, k = k_use)$data
+            )
+          }
+          knn_out
+        },
         error = function(e) {
           warning(
             "KNN imputation failed for group '",
@@ -178,25 +191,566 @@ groupwise_imputation <- function(
   )
 }
 
-extract_power_stats <- function(contrast_fit, pwr_calc) {
+# ── Sensitivity / minimum detectable difference (MDD) ───────────────────────
+#
+# Two distinct quantities are computed, and they answer different questions:
+#
+#   1. `extract_power_stats()` - a *conditional* (data-dependent) MDD, per
+#      protein. It states how large a log2 fold change would have had to be,
+#      given that protein's posterior variance, to be called at the FDR
+#      criterion actually used. It is a descriptive diagnostic and must NOT be
+#      used as a second significance filter (doing so is the observed-power
+#      fallacy, and is algebraically just a hidden extra cutoff on the
+#      moderated t statistic).
+#
+#   2. `simulate_pipeline_mdd()` - a *prospective* MDD for the whole pipeline,
+#      obtained by simulating fresh data from the empirical Bayes prior,
+#      spiking in known effects, and running the real design/contrasts through
+#      lmFit -> eBayes -> BH. This one is a genuine power statement.
+
+#' Per-test alpha implied by a Benjamini-Hochberg FDR criterion
+#'
+#' Significance is called on BH-adjusted p-values, so the nominal 0.05 of a
+#' classical two-sample power calculation is not the operating threshold. At
+#' the BH boundary the largest rejected raw p-value is `fdr * R / m`, with R
+#' rejections out of m tests. With no rejections the criterion degenerates to
+#' the Bonferroni-like floor `fdr / m`.
+bh_effective_alpha <- function(p, fdr = 0.05) {
+  p <- p[is.finite(p)]
+  m <- length(p)
+  if (m == 0L) {
+    return(NA_real_)
+  }
+  n_rejected <- sum(stats::p.adjust(p, method = "BH") <= fdr)
+  if (n_rejected == 0L) fdr / m else fdr * n_rejected / m
+}
+
+#' Non-centrality parameter attaining `power` for a two-sided t-test
+#'
+#' Solved from the non-central t distribution rather than a normal
+#' approximation, because moderated denominator degrees of freedom can still be
+#' modest. Results are cached over unique (alpha, df) pairs, since df is
+#' typically constant across proteins.
+solve_ncp <- function(alpha, df, power = 0.80) {
+  n <- max(length(alpha), length(df))
+  alpha <- rep_len(alpha, n)
+  # pt(..., ncp = ) is unstable at df = Inf; 1e6 df is numerically equivalent.
+  df <- pmin(pmax(rep_len(df, n), 1), 1e6)
+
+  key <- paste(signif(alpha, 10), signif(df, 10))
+  idx <- match(key, unique(key))
+  uniq <- !duplicated(key)
+
+  solved <- mapply(
+    function(a, d) {
+      if (!is.finite(a) || !is.finite(d) || a <= 0 || a >= 1) {
+        return(NA_real_)
+      }
+      crit <- stats::qt(1 - a / 2, d)
+      f <- function(ncp) {
+        stats::pt(crit, d, ncp, lower.tail = FALSE) +
+          stats::pt(-crit, d, ncp) -
+          power
+      }
+      if (f(0) >= 0) {
+        return(0)
+      }
+      hi <- crit + 20
+      if (f(hi) < 0) {
+        return(NA_real_)
+      }
+      stats::uniroot(f, c(0, hi), tol = 1e-6)$root
+    },
+    alpha[uniq],
+    df[uniq],
+    USE.NAMES = FALSE
+  )
+  solved[idx]
+}
+
+#' Conditional per-protein MDD from a fitted limma contrast model
+#'
+#' @param contrast_fit An `eBayes()`-processed contrast fit.
+#' @param fdr FDR level used to call significance downstream.
+#' @param target_power Power the MDD is defined at.
+extract_power_stats <- function(
+  contrast_fit,
+  fdr = 0.05,
+  target_power = 0.80
+) {
   coef_names <- colnames(contrast_fit$coefficients)
+  sigma_post <- sqrt(contrast_fit$s2.post)
+  # Moderated denominator df: eBayes borrows `df.prior` from the prior, so the
+  # classical 2n-2 understates the df that the reported p-values actually use.
+  df_total <- contrast_fit$df.residual + contrast_fit$df.prior
+
   purrr::map(coef_names, \(coef) {
-    limma::topTable(
+    tt <- limma::topTable(
       contrast_fit,
       coef = coef,
       number = Inf,
       sort.by = "none",
       adjust.method = "BH"
     ) |>
-      tibble::rownames_to_column("Protein") |>
+      tibble::rownames_to_column("Protein")
+
+    alpha_eff <- bh_effective_alpha(tt$P.Value, fdr = fdr)
+
+    # stdev.unscaled already encodes the design, so unbalanced group sizes and
+    # non-pairwise contrasts are handled without reconstructing n per group.
+    se <- sigma_post * contrast_fit$stdev.unscaled[, coef]
+
+    tt |>
       dplyr::mutate(
-        Sigma = sqrt(contrast_fit$s2.post),
-        Min_Detectable_Log2FC = pwr_calc$d * Sigma,
-        Is_reliable = abs(logFC) >= Min_Detectable_Log2FC,
+        Sigma = sigma_post,
+        SE = se,
+        df_total = df_total,
+        alpha_eff = alpha_eff,
+        Conditional_MDD_Log2FC = solve_ncp(
+          alpha_eff,
+          df_total,
+          target_power
+        ) *
+          se,
+        Above_MDD = abs(logFC) >= Conditional_MDD_Log2FC,
         comparison = coef
       )
   }) |>
     dplyr::bind_rows()
+}
+
+#' Estimate an abundance-dependent (MNAR) missingness model from real data
+#'
+#' Proteomics missingness is strongly intensity-dependent: low-abundance
+#' proteins drop out more often. A binomial GLM of missing-value counts on mean
+#' log2 abundance captures that dependence with two parameters, which can then
+#' be replayed onto simulated matrices. Returns NULL for complete data.
+#'
+#' @param log2_matrix Proteins x samples log2 matrix, NAs = missing.
+estimate_missingness_model <- function(log2_matrix) {
+  log2_matrix <- as.matrix(log2_matrix)
+  present <- !is.na(log2_matrix)
+  n_obs <- rowSums(present)
+  n_mis <- rowSums(!present)
+  # Mean of the observed values is the only abundance summary estimable for a
+  # partly missing row; this is the standard MNAR intensity model.
+  abundance <- rowMeans(log2_matrix, na.rm = TRUE)
+
+  usable <- is.finite(abundance) & n_obs > 0
+  if (!any(usable) || sum(n_mis[usable]) == 0) {
+    return(NULL)
+  }
+
+  model <- tryCatch(
+    stats::glm(
+      cbind(n_mis[usable], n_obs[usable]) ~ abundance[usable],
+      family = stats::binomial()
+    ),
+    error = function(e) NULL
+  )
+  if (is.null(model)) {
+    return(NULL)
+  }
+
+  list(
+    coefficients = unname(stats::coef(model)),
+    overall_rate = sum(n_mis) / length(log2_matrix),
+    abundance_range = range(abundance[usable])
+  )
+}
+
+#' Replay a fitted missingness model onto a complete simulated matrix
+#'
+#' Cells are knocked out independently with a protein-specific probability from
+#' the intensity model. Rows that fall below `min_valid` observations in any
+#' group have values restored at random, mirroring the `min_valid_pct` filter
+#' applied to the real data and keeping the group means estimable.
+apply_simulated_missingness <- function(
+  complete_mat,
+  miss_model,
+  group_labels,
+  min_valid = 2L
+) {
+  n_row <- nrow(complete_mat)
+  n_col <- ncol(complete_mat)
+  abundance <- rowMeans(complete_mat)
+  p_miss <- stats::plogis(
+    miss_model$coefficients[1] + miss_model$coefficients[2] * abundance
+  )
+
+  # rep(p, times = n_col) matches the column-major layout, so each cell of row
+  # g is drawn with that row's probability.
+  drop <- matrix(
+    stats::runif(n_row * n_col) < rep(p_miss, times = n_col),
+    nrow = n_row,
+    ncol = n_col
+  )
+  # Cap the number of drops per row within each group. The drop indicators are
+  # already iid within a row, so keeping the first `cap` of them in column
+  # order is an unbiased way to enforce the cap - and costs one vectorised pass
+  # per column instead of a loop over proteins.
+  for (g in unique(group_labels)) {
+    cols <- which(group_labels == g)
+    cap <- max(0L, length(cols) - min(min_valid, length(cols)))
+    n_dropped <- integer(n_row)
+    for (j in cols) {
+      allowed <- drop[, j] & (n_dropped < cap)
+      drop[, j] <- allowed
+      n_dropped <- n_dropped + allowed
+    }
+  }
+
+  holed <- complete_mat
+  holed[drop] <- NA_real_
+  holed
+}
+
+#' Prospective MDD by parametric simulation from the fitted eBayes priors
+#'
+#' Draws protein variances from the scaled inverse chi-squared prior estimated
+#' by `eBayes()` (`sigma^2_g ~ d0 * s0^2 / chisq(d0)`), builds fresh abundance
+#' matrices, spikes in known two-sided fold changes, and pushes them through
+#' the real design and contrast matrix. Power is then measured against the same
+#' BH-FDR criterion used on the real data, so the resulting MDD is a prospective
+#' property of the pipeline rather than a re-description of the observed effects.
+#'
+#' Note the honest caveat: the priors are still estimated from these data, so
+#' this is a design-level sensitivity *given the estimated noise structure*.
+#' What it removes is the observed-power fallacy, not data-dependence per se.
+#'
+#' @param contrast_fit An `eBayes()`-processed contrast fit (supplies priors).
+#' @param design The design matrix used for `lmFit()`.
+#' @param contrast_matrix The contrast matrix used for `contrasts.fit()`.
+#' @param trend Whether `eBayes(trend = )` was used; propagated to the simulation.
+#' @param pi1 Assumed proportion of truly differential proteins.
+#' @param n_sim Simulation replicates per fold-change grid point.
+#' @param miss_model Optional `estimate_missingness_model()` output. When given,
+#'   values are knocked out of each simulated matrix before fitting, so the
+#'   sensitivity cost of missing data is included.
+#' @param impute_method Imputation passed to `groupwise_imputation()` when
+#'   missingness is simulated. NULL leaves NAs in place, matching the module's
+#'   least-squares path where limma handles them directly.
+#' @param group_labels Sample group labels, needed for groupwise imputation.
+#'   Derived from `design` when omitted.
+#' @param min_valid_per_group Minimum observed values per group to retain.
+#' @param search "grid" evaluates every point in `lfc_grid` and returns a full
+#'   power curve. "bisect" uses only the endpoints of `lfc_grid` as a bracket
+#'   and bisects to the target power, which is far cheaper when the MDD number
+#'   matters more than the curve (as in the replicate sweep).
+#' @param bisect_iter,bisect_tol Iteration cap and log2FC tolerance for "bisect".
+#' @param progress Optional zero-argument callback invoked once per replicate.
+simulate_pipeline_mdd <- function(
+  contrast_fit,
+  design,
+  contrast_matrix,
+  trend = TRUE,
+  pi1 = 0.10,
+  fdr_cutoff = 0.05,
+  target_power = 0.80,
+  lfc_grid = seq(0.2, 2.0, by = 0.2),
+  n_sim = 5L,
+  seed = NULL,
+  miss_model = NULL,
+  impute_method = NULL,
+  group_labels = NULL,
+  min_valid_per_group = 2L,
+  search = c("grid", "bisect"),
+  bisect_iter = 8L,
+  bisect_tol = 0.02,
+  progress = NULL
+) {
+  search <- match.arg(search)
+  if (!is.null(seed) && is.finite(seed)) {
+    set.seed(as.integer(seed))
+  }
+
+  n_proteins <- nrow(contrast_fit$coefficients)
+  n_samples <- nrow(design)
+
+  if (is.null(group_labels)) {
+    # The module builds designs as ~ 0 + group, so each row is an indicator.
+    group_labels <- colnames(design)[apply(design, 1, which.max)]
+  }
+
+  amean <- contrast_fit$Amean
+  if (is.null(amean) || length(amean) != n_proteins) {
+    amean <- rep(0, n_proteins)
+  }
+
+  # With trend = TRUE, s2.prior is a per-protein function of abundance; keeping
+  # it as a vector preserves the mean-variance trend in the simulated data.
+  # df.prior is a vector only under robust = TRUE, but rep_len covers both.
+  s2_prior <- rep_len(contrast_fit$s2.prior, n_proteins)
+  df_prior <- rep_len(contrast_fit$df.prior, n_proteins)
+
+  draw_sigma <- function() {
+    v <- s2_prior
+    estimable <- is.finite(df_prior) & df_prior > 0
+    # As d0 -> Inf the prior collapses to a point mass at s0^2, which is the
+    # correct limit; substituting an arbitrary finite df would fabricate spread.
+    if (any(estimable)) {
+      v[estimable] <- (df_prior[estimable] * s2_prior[estimable]) /
+        stats::rchisq(sum(estimable), df = df_prior[estimable])
+    }
+    sqrt(v)
+  }
+
+  num_de <- max(1L, floor(n_proteins * pi1))
+  coef_names <- colnames(contrast_matrix)
+
+  curve <- purrr::map_dfr(coef_names, function(cf) {
+    w <- contrast_matrix[, cf]
+    # Any group-mean vector beta with w'beta = lfc yields the same test
+    # statistic, so this construction generalises past simple pairwise
+    # contrasts while reducing to "shift group A" for A - B.
+    offset_vec <- as.numeric(design %*% w) / sum(w^2)
+    cm <- contrast_matrix[, cf, drop = FALSE]
+
+    eval_point <- function(true_lfc) {
+      reps <- vapply(
+        seq_len(n_sim),
+        function(i) {
+          if (is.function(progress)) {
+            progress()
+          }
+          sim_sd <- draw_sigma()
+          de_idx <- sample.int(n_proteins, num_de)
+          signed <- numeric(n_proteins)
+          # Two-sided spike-in: real experiments regulate in both directions.
+          signed[de_idx] <- true_lfc *
+            sample(c(-1, 1), num_de, replace = TRUE)
+
+          # rnorm fills column-major, so the length-n_proteins sd vector is
+          # recycled once per sample column - i.e. row-wise variances.
+          sim_data <- amean +
+            matrix(
+              stats::rnorm(n_proteins * n_samples, mean = 0, sd = sim_sd),
+              nrow = n_proteins,
+              ncol = n_samples
+            ) +
+            outer(signed, offset_vec)
+
+          # Optional missing-data arm: knock out values with the intensity
+          # dependence measured on the real matrix, then run the same
+          # imputation the module applies before fitting.
+          miss_rate <- 0
+          if (!is.null(miss_model)) {
+            sim_data <- apply_simulated_missingness(
+              sim_data,
+              miss_model,
+              group_labels,
+              min_valid = min_valid_per_group
+            )
+            miss_rate <- mean(is.na(sim_data))
+            if (!is.null(impute_method)) {
+              # Imputers warn per sparse row. Across hundreds of simulated
+              # matrices that is thousands of identical notes about synthetic
+              # data, so mute them here; the realised NA rate is reported in
+              # `settings` instead. Warnings on the user's real matrix, raised
+              # in the main pipeline, are untouched.
+              sim_data <- suppressWarnings(groupwise_imputation(
+                sim_data,
+                group_labels,
+                method = impute_method,
+                verbose = FALSE
+              ))
+              # Mirror the module's downshift for regions imputation left empty.
+              still_na <- which(is.na(sim_data))
+              if (length(still_na) > 0) {
+                sim_data[still_na] <- stats::rnorm(
+                  length(still_na),
+                  mean = min(sim_data, na.rm = TRUE) - 1,
+                  sd = 0.3
+                )
+              }
+            }
+          }
+
+          is_de <- logical(n_proteins)
+          is_de[de_idx] <- TRUE
+
+          cfit <- limma::contrasts.fit(limma::lmFit(sim_data, design), cm)
+          # Missingness can leave a protein unestimable; eBayes(trend = ) also
+          # requires finite sigma and Amean. Drop those rows from the fit but
+          # keep them in the power denominator - a protein that cannot be
+          # tested is a protein that was not detected.
+          estimable <- is.finite(cfit$sigma) &
+            !is.na(cfit$coefficients[, 1]) &
+            cfit$df.residual > 0
+          if (trend) {
+            estimable <- estimable & is.finite(cfit$Amean)
+          }
+          if (!all(estimable)) {
+            cfit <- cfit[estimable, ]
+            is_de <- is_de[estimable]
+          }
+
+          sim_fit <- limma::eBayes(cfit, trend = trend)
+          adj <- stats::p.adjust(sim_fit$p.value[, 1], method = "BH")
+          called <- adj <= fdr_cutoff
+
+          c(
+            power = sum(called & is_de) / num_de,
+            # Realised false discovery proportion: a sanity check that the BH
+            # machinery behaves as advertised under these priors.
+            fdp = if (sum(called) == 0L) {
+              0
+            } else {
+              sum(called & !is_de) / sum(called)
+            },
+            miss = miss_rate
+          )
+        },
+        numeric(3)
+      )
+
+      data.frame(
+        comparison = cf,
+        True_LFC = true_lfc,
+        Power = mean(reps["power", ]),
+        Power_SE = stats::sd(reps["power", ]) / sqrt(n_sim),
+        FDP = mean(reps["fdp", ]),
+        Missing_Rate = mean(reps["miss", ])
+      )
+    }
+
+    if (identical(search, "grid")) {
+      return(purrr::map_dfr(lfc_grid, eval_point))
+    }
+
+    # Bisection. Power is monotone in the true effect, so the target crossing
+    # can be bracketed in ~log2(range / tol) evaluations rather than scanning
+    # the whole grid. This matters because simulating missingness makes each
+    # evaluation roughly ten times more expensive: lmFit falls back to a
+    # per-row fit as soon as NAs are present.
+    lo <- min(lfc_grid)
+    hi <- max(lfc_grid)
+    visited <- list(eval_point(lo), eval_point(hi))
+
+    if (
+      visited[[1]]$Power < target_power && visited[[2]]$Power >= target_power
+    ) {
+      for (it in seq_len(bisect_iter)) {
+        if ((hi - lo) < bisect_tol) {
+          break
+        }
+        mid <- (lo + hi) / 2
+        point <- eval_point(mid)
+        visited[[length(visited) + 1L]] <- point
+        if (point$Power < target_power) {
+          lo <- mid
+        } else {
+          hi <- mid
+        }
+      }
+    }
+    dplyr::bind_rows(visited) |> dplyr::arrange(True_LFC)
+  })
+
+  mdd <- curve |>
+    dplyr::group_by(comparison) |>
+    dplyr::group_modify(function(d, k) {
+      d <- d[order(d$True_LFC), ]
+      # Monte Carlo noise can make the curve locally non-monotone; power is
+      # monotone in the true effect, so enforce it before interpolating.
+      pw <- cummax(d$Power)
+      if (pw[1] >= target_power) {
+        return(data.frame(
+          MDD_Log2FC = d$True_LFC[1],
+          note = "target power already reached at the smallest LFC tested"
+        ))
+      }
+      if (max(pw) < target_power) {
+        return(data.frame(
+          MDD_Log2FC = NA_real_,
+          note = "target power not reached within the tested LFC range"
+        ))
+      }
+      keep <- !duplicated(pw)
+      data.frame(
+        MDD_Log2FC = stats::approx(
+          pw[keep],
+          d$True_LFC[keep],
+          xout = target_power
+        )$y,
+        note = NA_character_
+      )
+    }) |>
+    dplyr::ungroup()
+
+  list(
+    curve = curve,
+    mdd = mdd,
+    settings = list(
+      pi1 = pi1,
+      fdr_cutoff = fdr_cutoff,
+      target_power = target_power,
+      n_sim = n_sim,
+      n_proteins = n_proteins,
+      n_samples = n_samples,
+      trend = trend,
+      seed = seed,
+      s2_prior_median = stats::median(s2_prior),
+      df_prior = stats::median(df_prior),
+      missingness = !is.null(miss_model),
+      impute_method = impute_method,
+      realised_missing = mean(curve$Missing_Rate),
+      target_missing = if (is.null(miss_model)) {
+        NA_real_
+      } else {
+        miss_model$overall_rate
+      }
+    )
+  )
+}
+
+#' Prospective MDD as a function of replicates per group
+#'
+#' Rebuilds a balanced design at each replicate count and reruns
+#' `simulate_pipeline_mdd()`, holding the variance prior fixed. That prior is a
+#' property of the assay rather than of the sample size, but note it was
+#' estimated at the residual df of the observed design, so the small-n end of
+#' the sweep is somewhat optimistic about how well eBayes would shrink.
+#'
+#' @param n_grid Replicates per group to evaluate.
+#' @param ... Passed to `simulate_pipeline_mdd()`.
+simulate_mdd_by_replicates <- function(
+  contrast_fit,
+  design,
+  contrast_matrix,
+  n_grid = c(3, 4, 5, 6, 8, 10, 12, 15),
+  progress = NULL,
+  ...
+) {
+  groups <- colnames(design)
+  contrast_specs <- colnames(contrast_matrix)
+
+  purrr::map_dfr(sort(unique(n_grid)), function(n) {
+    labels_n <- rep(groups, each = n)
+    design_n <- stats::model.matrix(
+      ~ 0 + factor(labels_n, levels = groups)
+    )
+    colnames(design_n) <- groups
+    contrast_n <- limma::makeContrasts(
+      contrasts = contrast_specs,
+      levels = design_n
+    )
+
+    sim <- simulate_pipeline_mdd(
+      contrast_fit = contrast_fit,
+      design = design_n,
+      contrast_matrix = contrast_n,
+      group_labels = labels_n,
+      progress = progress,
+      ...
+    )
+    sim$mdd |>
+      dplyr::mutate(
+        n_per_group = n,
+        n_samples = n * length(groups),
+        realised_missing = sim$settings$realised_missing
+      )
+  })
 }
 
 # compiled version of helper functions
@@ -844,6 +1398,28 @@ PwrQuant_sidebar_ui <- function(id) {
         max = 100,
         step = 5
       ),
+      numericInput(
+        ns("sig_fdr"),
+        "Significance FDR (BH adj. p-value)",
+        value = 0.05,
+        min = 0.001,
+        max = 0.5,
+        step = 0.01
+      ),
+      numericInput(
+        ns("sig_lfc"),
+        "Minimum |log\u2082FC| for significance",
+        value = 0,
+        min = 0,
+        max = 5,
+        step = 0.1
+      ),
+      tags$p(
+        style = "padding:0 16px;color:#adb5bd;font-size:11px;",
+        "Significance is called on the BH-adjusted p-value plus this explicit ",
+        "effect-size cutoff. The per-protein minimum detectable difference is ",
+        "reported as a diagnostic only \u2014 it is not used as a filter."
+      ),
       uiOutput(ns("contrasts_ui")),
       tags$div(
         style = "padding:0 8px;text-align:center;",
@@ -852,6 +1428,98 @@ PwrQuant_sidebar_ui <- function(id) {
           "Start limma",
           class = "btn-primary",
           style = "width:80%;font-weight:bold;margin-top:10px;margin-bottom:10px;"
+        )
+      ),
+      tags$hr(style = "border-color:#2d3741;margin:4px 0;"),
+      tags$div(
+        style = "padding:12px 16px 4px;color:#adb5bd;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:1px;",
+        "Prospective MDD (simulation)"
+      ),
+      tags$p(
+        style = "padding:0 16px;color:#adb5bd;font-size:11px;",
+        "Simulates fresh datasets from the fitted empirical Bayes priors with ",
+        "known spiked-in effects, then measures power at the same FDR ",
+        "criterion. Runs on demand \u2014 it is the slow part of this module."
+      ),
+      numericInput(
+        ns("mdd_pi1"),
+        "Assumed proportion differential (\u03C0\u2081)",
+        value = 0.10,
+        min = 0.001,
+        max = 0.9,
+        step = 0.05
+      ),
+      numericInput(
+        ns("mdd_target_power"),
+        "Target power",
+        value = 0.80,
+        min = 0.5,
+        max = 0.99,
+        step = 0.05
+      ),
+      numericInput(
+        ns("mdd_lfc_max"),
+        "Max log\u2082FC tested",
+        value = 2,
+        min = 0.5,
+        max = 6,
+        step = 0.5
+      ),
+      numericInput(
+        ns("mdd_lfc_step"),
+        "log\u2082FC grid step",
+        value = 0.2,
+        min = 0.05,
+        max = 1,
+        step = 0.05
+      ),
+      numericInput(
+        ns("mdd_nsim"),
+        "Simulations per grid point",
+        value = 5,
+        min = 1,
+        max = 50,
+        step = 1
+      ),
+      numericInput(
+        ns("mdd_seed"),
+        "Random seed",
+        value = 4817,
+        min = 1,
+        step = 1
+      ),
+      checkboxInput(
+        ns("mdd_missing"),
+        "Include missingness + imputation",
+        value = TRUE
+      ),
+      tags$p(
+        style = "padding:0 16px;color:#adb5bd;font-size:11px;",
+        "Knocks values out of each simulated matrix using the intensity-",
+        "dependent dropout measured on your data, then runs the same ",
+        "imputation as the main pipeline. Slower, but closer to reality."
+      ),
+      tags$div(
+        style = "padding:0 8px;text-align:center;",
+        actionButton(
+          ns("run_mdd"),
+          "Run MDD simulation",
+          class = "btn-primary",
+          style = "width:80%;font-weight:bold;margin-top:10px;margin-bottom:10px;"
+        )
+      ),
+      textInput(
+        ns("mdd_n_grid"),
+        "Replicates per group to sweep",
+        value = "3,4,5,6,8,10,12,15"
+      ),
+      tags$div(
+        style = "padding:0 8px;text-align:center;",
+        actionButton(
+          ns("run_mdd_design"),
+          "Run replicate sweep",
+          class = "btn-primary",
+          style = "width:80%;font-weight:bold;margin-top:4px;margin-bottom:10px;"
         )
       ),
       tags$hr(style = "border-color:#2d3741;margin:4px 0;"),
@@ -1367,10 +2035,85 @@ PwrQuant_body_ui <- function(id) {
       "Power Statistics",
       fluidRow(
         box(
-          title = "Statistical power and reliability mapping",
+          title = "Prospective MDD \u2014 simulated power curve",
           status = "primary",
           solidHeader = TRUE,
           width = 12,
+          tags$p(
+            style = "color:#6c757d;font-size:12px;margin-bottom:8px;",
+            "Fresh datasets are simulated from the empirical Bayes prior ",
+            tags$code(
+              "\u03C3\u00B2 ~ d\u2080s\u2080\u00B2/\u03C7\u00B2(d\u2080)"
+            ),
+            ", known fold changes are spiked in, and the real design and ",
+            "contrasts are run through lmFit \u2192 eBayes \u2192 BH. The MDD is the ",
+            "fold change at which the pipeline reaches the target power. ",
+            "Press ",
+            tags$b("Run MDD simulation"),
+            " in the sidebar."
+          ),
+          div(
+            class = "plot-wrap",
+            tags$div(
+              class = "spinner-overlay",
+              id = ns("sp_mdd"),
+              icon("spinner", class = "fa-spin")
+            ),
+            plotOutput(ns("mdd_curve_plot"), height = 480)
+          ),
+          tags$hr(),
+          DT::dataTableOutput(ns("mdd_summary_table"))
+        )
+      ),
+      fluidRow(
+        box(
+          title = "Experimental design \u2014 MDD vs replicates per group",
+          status = "primary",
+          solidHeader = TRUE,
+          width = 12,
+          tags$p(
+            style = "color:#6c757d;font-size:12px;margin-bottom:8px;",
+            "Reruns the simulation on balanced designs of increasing size, ",
+            "holding the estimated variance prior fixed. Use it to judge how ",
+            "many replicates a target fold change would need. The prior was ",
+            "estimated at the residual df of the current design, so the ",
+            "small-n end is somewhat optimistic. Press ",
+            tags$b("Run replicate sweep"),
+            " in the sidebar."
+          ),
+          div(
+            class = "plot-wrap",
+            tags$div(
+              class = "spinner-overlay",
+              id = ns("sp_mdd_design"),
+              icon("spinner", class = "fa-spin")
+            ),
+            plotOutput(ns("mdd_design_plot"), height = 480)
+          ),
+          tags$hr(),
+          DT::dataTableOutput(ns("mdd_design_table"))
+        )
+      ),
+      fluidRow(
+        box(
+          title = "Conditional sensitivity (diagnostic only)",
+          status = "warning",
+          solidHeader = TRUE,
+          width = 12,
+          tags$p(
+            style = "color:#6c757d;font-size:12px;margin-bottom:8px;",
+            "Per-protein minimum detectable difference at the moderated ",
+            "degrees of freedom (",
+            tags$code("df.residual + df.prior"),
+            ") and the per-test alpha implied by the BH criterion ",
+            "(",
+            tags$code("FDR \u00D7 R / m"),
+            "). This is conditional on the ",
+            "observed variances, so it describes sensitivity after the fact ",
+            "and is ",
+            tags$b("not"),
+            " used to call significance."
+          ),
           div(
             class = "plot-wrap",
             tags$div(
@@ -2132,16 +2875,21 @@ PwrQuant_server <- function(id) {
 
         contrast_fit <- limma::eBayes(contrast_fit, trend = use_trend)
 
-        # 7. Power Analysis
-        incProgress(0.8, detail = "Calculating power metrics")
-        n_repl <- median(table(group_labels))
-        pwr_calc <- pwr::pwr.t.test(
-          n = n_repl,
-          sig.level = 0.05,
-          power = 0.80,
-          type = "two.sample"
+        # 7. Conditional sensitivity (diagnostic; see extract_power_stats)
+        incProgress(0.8, detail = "Calculating conditional MDD")
+        sig_fdr <- input$sig_fdr %||% 0.05
+        if (!is.numeric(sig_fdr) || is.na(sig_fdr) || sig_fdr <= 0) {
+          sig_fdr <- 0.05
+        }
+        sig_lfc <- input$sig_lfc %||% 0
+        if (!is.numeric(sig_lfc) || is.na(sig_lfc) || sig_lfc < 0) {
+          sig_lfc <- 0
+        }
+        power_stats <- extract_power_stats_fast(
+          contrast_fit,
+          fdr = sig_fdr,
+          target_power = 0.80
         )
-        power_stats <- extract_power_stats_fast(contrast_fit, pwr_calc)
 
         # 8. Results Mapping
         incProgress(0.9, detail = "Isolating significance mappings")
@@ -2163,10 +2911,16 @@ PwrQuant_server <- function(id) {
           ) %>%
           ungroup() %>%
           dplyr::mutate(
+            # Significance = FDR criterion + an explicit, user-set effect-size
+            # cutoff. The conditional MDD is deliberately excluded: gating on it
+            # would impose a second, undisclosed threshold on the same moderated
+            # t statistic rather than adding information.
             status = case_when(
               imputation_driven == TRUE ~ "Not significant",
-              logFC > 0 & adj.P.Val <= 0.05 & Is_reliable == TRUE ~ "Increased",
-              logFC < 0 & adj.P.Val <= 0.05 & Is_reliable == TRUE ~ "Decreased",
+              logFC > 0 & adj.P.Val <= sig_fdr & abs(logFC) >= sig_lfc ~
+                "Increased",
+              logFC < 0 & adj.P.Val <= sig_fdr & abs(logFC) >= sig_lfc ~
+                "Decreased",
               TRUE ~ "Not significant"
             ),
             status = factor(
@@ -2181,9 +2935,177 @@ PwrQuant_server <- function(id) {
           log2_mat = log2_matrix,
           batch_mat = mtx_batch_correct,
           norm_mat = limma_mtx,
-          limma_results = limma_results
+          limma_results = limma_results,
+          # Retained so the prospective MDD simulation can reuse the exact
+          # design, contrasts and eBayes priors of this run.
+          contrast_fit = contrast_fit,
+          design = design,
+          contrast_matrix = contrast_matrix,
+          group_labels = group_labels,
+          trend = use_trend,
+          sig_fdr = sig_fdr,
+          sig_lfc = sig_lfc,
+          min_valid_pct = input$min_valid_pct %||% 0,
+          # NULL in least-squares mode, where limma handles NAs directly.
+          impute_method = if (reg_method == "robust") {
+            input$imputation_method %||% "knn"
+          } else {
+            NULL
+          }
         )
       })
+    })
+
+    # ── Prospective MDD simulation ─────────────────────────────────────────
+
+    # Intensity-dependent dropout measured once per limma run, then replayed
+    # onto every simulated matrix.
+    missingness_model <- reactive({
+      res <- limma_results_ev()
+      req(res$log2_mat)
+      estimate_missingness_model(as.matrix(res$log2_mat))
+    })
+
+    # Shared arguments for both the single-design run and the replicate sweep.
+    mdd_common_args <- function(res) {
+      mm <- if (isTRUE(input$mdd_missing)) missingness_model() else NULL
+      if (isTRUE(input$mdd_missing) && is.null(mm)) {
+        showNotification(
+          "No missing values detected: simulating complete data.",
+          type = "message",
+          duration = 6
+        )
+      }
+      min_valid <- max(
+        2L,
+        ceiling((res$min_valid_pct %||% 0) / 100 * min(table(res$group_labels)))
+      )
+      list(
+        trend = res$trend,
+        pi1 = input$mdd_pi1 %||% 0.10,
+        fdr_cutoff = res$sig_fdr,
+        target_power = input$mdd_target_power %||% 0.80,
+        n_sim = max(1L, as.integer(input$mdd_nsim %||% 5)),
+        seed = input$mdd_seed %||% 4817,
+        miss_model = mm,
+        impute_method = res$impute_method,
+        min_valid_per_group = min_valid
+      )
+    }
+
+    mdd_lfc_grid <- function() {
+      lfc_step <- input$mdd_lfc_step %||% 0.2
+      if (!is.numeric(lfc_step) || is.na(lfc_step) || lfc_step <= 0) {
+        lfc_step <- 0.2
+      }
+      seq(lfc_step, input$mdd_lfc_max %||% 2, by = lfc_step)
+    }
+
+    mdd_sim_ev <- eventReactive(input$run_mdd, {
+      res <- limma_results_ev()
+      req(res$contrast_fit, res$design, res$contrast_matrix)
+
+      args <- mdd_common_args(res)
+      lfc_grid <- mdd_lfc_grid()
+      n_steps <- length(lfc_grid) * args$n_sim * ncol(res$contrast_matrix)
+
+      withProgress(
+        message = "Simulating power from eBayes priors...",
+        value = 0,
+        {
+          done <- 0
+          tick <- function() {
+            done <<- done + 1
+            if (done %% 5 == 0 || done == n_steps) {
+              setProgress(
+                value = done / n_steps,
+                detail = sprintf("%d / %d simulations", done, n_steps)
+              )
+            }
+          }
+          do.call(
+            simulate_pipeline_mdd,
+            c(
+              list(
+                contrast_fit = res$contrast_fit,
+                design = res$design,
+                contrast_matrix = res$contrast_matrix,
+                group_labels = res$group_labels,
+                lfc_grid = lfc_grid,
+                progress = tick
+              ),
+              args
+            )
+          )
+        }
+      )
+    })
+
+    # ── Replicate sweep for experimental design ────────────────────────────
+    mdd_design_ev <- eventReactive(input$run_mdd_design, {
+      res <- limma_results_ev()
+      req(res$contrast_fit, res$design, res$contrast_matrix)
+
+      n_grid <- suppressWarnings(as.integer(trimws(strsplit(
+        as.character(input$mdd_n_grid %||% "3,4,5,6,8,10,12,15"),
+        "[,;[:space:]]+"
+      )[[1]])))
+      n_grid <- sort(unique(n_grid[is.finite(n_grid) & n_grid >= 2]))
+      # Fully qualified: the app attaches jsonlite, whose validate() masks
+      # shiny's and rejects the NULL that need() returns on success.
+      shiny::validate(shiny::need(
+        length(n_grid) > 1,
+        "Enter at least two replicate counts (>= 2), e.g. 3,4,6,8,12"
+      ))
+
+      args <- mdd_common_args(res)
+      # The sweep only needs the crossing point, not the whole curve, so it
+      # bisects over a wide bracket instead of scanning a grid. That keeps the
+      # cost near-constant per replicate count even with missingness enabled.
+      bisect_iter <- 8L
+      lfc_grid <- c(0.05, 3.0)
+      n_steps <- length(n_grid) *
+        (2L + bisect_iter) *
+        args$n_sim *
+        ncol(res$contrast_matrix)
+
+      withProgress(
+        message = "Sweeping replicate counts...",
+        value = 0,
+        {
+          done <- 0
+          tick <- function() {
+            done <<- done + 1
+            if (done %% 20 == 0 || done == n_steps) {
+              setProgress(
+                value = done / n_steps,
+                detail = sprintf("%d / %d simulations", done, n_steps)
+              )
+            }
+          }
+          sweep <- do.call(
+            simulate_mdd_by_replicates,
+            c(
+              list(
+                contrast_fit = res$contrast_fit,
+                design = res$design,
+                contrast_matrix = res$contrast_matrix,
+                n_grid = n_grid,
+                lfc_grid = lfc_grid,
+                search = "bisect",
+                bisect_iter = bisect_iter,
+                progress = tick
+              ),
+              args
+            )
+          )
+          list(
+            sweep = sweep,
+            current_n = min(table(res$group_labels)),
+            settings = args
+          )
+        }
+      )
     })
 
     ora_results_ev <- eventReactive(input$run_ora, {
@@ -2227,7 +3149,7 @@ PwrQuant_server <- function(id) {
           selected_contrasts <- input$ora_contrasts
           sig_reliable <- lr %>%
             dplyr::filter(
-              status %in% c("Increased", "Decreased") & Is_reliable == TRUE
+              status %in% c("Increased", "Decreased")
             )
           if (!is.null(selected_contrasts) && length(selected_contrasts) > 0) {
             contrasts <- selected_contrasts
@@ -2378,7 +3300,7 @@ PwrQuant_server <- function(id) {
           incProgress(0.2, detail = "Filtering significant & reliable proteins")
           filtered <- lr %>%
             dplyr::filter(comparison == input$string_contrast) %>%
-            dplyr::filter(status != "Not significant" & Is_reliable == TRUE)
+            dplyr::filter(status != "Not significant")
           if (scope != "combined") {
             filtered <- filtered %>% dplyr::filter(status == scope)
           }
@@ -3048,20 +3970,20 @@ PwrQuant_server <- function(id) {
         function() {
           lr <- limma_results_ev()$limma_results
           sig <- lr %>%
-            dplyr::filter(status != "Not significant" & Is_reliable == TRUE)
+            dplyr::filter(status != "Not significant")
 
           if (nrow(sig) == 0) {
             return(NULL)
           }
 
           top_up <- sig %>%
-            dplyr::filter(status == "Increased" & Is_reliable == TRUE) %>%
+            dplyr::filter(status == "Increased") %>%
             group_by(comparison) %>%
             dplyr::slice_max(order_by = logFC, n = 20) %>%
             ungroup()
 
           top_down <- sig %>%
-            dplyr::filter(status == "Decreased" & Is_reliable == TRUE) %>%
+            dplyr::filter(status == "Decreased") %>%
             group_by(comparison) %>%
             dplyr::slice_min(order_by = logFC, n = 20) %>%
             ungroup()
@@ -3385,22 +4307,256 @@ PwrQuant_server <- function(id) {
       )
     })
 
+    output$mdd_curve_plot <- renderPlot({
+      rh(
+        function() {
+          sim <- mdd_sim_ev()
+          req(sim)
+          st <- sim$settings
+
+          ggplot(sim$curve, aes(x = True_LFC, y = Power)) +
+            geom_hline(
+              yintercept = st$target_power,
+              linetype = "dashed",
+              colour = "grey40"
+            ) +
+            geom_ribbon(
+              aes(
+                ymin = pmax(0, Power - 1.96 * Power_SE),
+                ymax = pmin(1, Power + 1.96 * Power_SE)
+              ),
+              fill = "#0072B2",
+              alpha = 0.18
+            ) +
+            geom_line(colour = "#0072B2", linewidth = 1) +
+            geom_point(colour = "#0072B2", size = 2) +
+            geom_vline(
+              data = sim$mdd[!is.na(sim$mdd$MDD_Log2FC), ],
+              aes(xintercept = MDD_Log2FC),
+              linetype = "dashed",
+              colour = "#D55E00",
+              linewidth = 0.9
+            ) +
+            geom_text(
+              data = sim$mdd[!is.na(sim$mdd$MDD_Log2FC), ],
+              aes(
+                x = MDD_Log2FC,
+                y = 0.06,
+                label = sprintf(
+                  "MDD = %.2f",
+                  MDD_Log2FC
+                )
+              ),
+              hjust = -0.1,
+              colour = "#D55E00",
+              fontface = "bold",
+              size = 4.5
+            ) +
+            scale_y_continuous(limits = c(0, 1)) +
+            facet_wrap(~comparison, ncol = 2) +
+            labs(
+              title = "Prospective power curve from simulated data",
+              subtitle = sprintf(
+                paste0(
+                  "FDR = %.3g | target power = %.2f | \u03C0\u2081 = %.3g | ",
+                  "%d proteins \u00D7 %d samples | %d sims/point | ",
+                  "trend = %s | s\u00B2\u2080 (median) = %.3g, d\u2080 = %.1f\n%s"
+                ),
+                st$fdr_cutoff,
+                st$target_power,
+                st$pi1,
+                st$n_proteins,
+                st$n_samples,
+                st$n_sim,
+                st$trend,
+                st$s2_prior_median,
+                st$df_prior,
+                if (!st$missingness) {
+                  "Complete data simulated (no missingness arm)"
+                } else {
+                  sprintf(
+                    paste0(
+                      "Missingness simulated: %.1f%% of cells dropped ",
+                      "(observed %.1f%%), imputation = %s"
+                    ),
+                    100 * st$realised_missing,
+                    100 * st$target_missing,
+                    st$impute_method %||% "none (NAs kept)"
+                  )
+                }
+              ),
+              x = "True spiked-in log\u2082 fold change",
+              y = "Power (proportion of true effects called at FDR)"
+            ) +
+            theme_bw(base_size = 15) +
+            theme(
+              plot.subtitle = element_text(size = 11, colour = "grey30"),
+              strip.background = element_blank(),
+              strip.text = element_text(face = "bold", colour = "black"),
+              axis.text = element_text(face = "bold", color = "black"),
+              axis.title = element_text(face = "bold", colour = "black")
+            )
+        },
+        "sp_mdd"
+      )
+    })
+
+    output$mdd_summary_table <- DT::renderDataTable({
+      sim <- mdd_sim_ev()
+      req(sim)
+      # Mean realised false discovery proportion at the target power is a
+      # sanity check that BH is calibrated under the simulated priors.
+      fdp <- sim$curve |>
+        dplyr::group_by(comparison) |>
+        dplyr::summarise(Mean_FDP = mean(FDP), .groups = "drop")
+
+      sim$mdd |>
+        dplyr::left_join(fdp, by = "comparison") |>
+        dplyr::mutate(
+          `MDD (log2FC)` = round(MDD_Log2FC, 3),
+          `MDD (fold change)` = round(2^MDD_Log2FC, 3),
+          `Mean realised FDP` = round(Mean_FDP, 4)
+        ) |>
+        dplyr::select(
+          Contrast = comparison,
+          `MDD (log2FC)`,
+          `MDD (fold change)`,
+          `Mean realised FDP`,
+          Note = note
+        ) |>
+        DT::datatable(
+          rownames = FALSE,
+          options = list(dom = "t", scrollX = TRUE)
+        )
+    })
+
+    output$mdd_design_plot <- renderPlot({
+      rh(
+        function() {
+          d <- mdd_design_ev()
+          req(d)
+          sweep <- d$sweep[!is.na(d$sweep$MDD_Log2FC), ]
+          # See note above: jsonlite::validate masks shiny::validate here.
+          shiny::validate(shiny::need(
+            nrow(sweep) > 0,
+            "No replicate count reached the target power within the tested range."
+          ))
+
+          # Reuse the sidebar palette so the module keeps one colour
+          # vocabulary. The levels here are contrasts rather than conditions,
+          # so index the palette directly instead of reusing cond_colors().
+          contrast_levels <- unique(sweep$comparison)
+          contrast_cols <- setNames(
+            get_palette_colors(
+              input$cond_palette %||% "npg",
+              length(contrast_levels)
+            ),
+            contrast_levels
+          )
+
+          ref <- sweep[sweep$n_per_group == d$current_n, ]
+
+          p <- ggplot(
+            sweep,
+            aes(x = n_per_group, y = MDD_Log2FC, colour = comparison)
+          ) +
+            geom_line(linewidth = 0.9) +
+            geom_point(size = 2.5)
+
+          if (nrow(ref) > 0) {
+            p <- p +
+              geom_vline(
+                xintercept = d$current_n,
+                linetype = "dotted",
+                colour = "grey40"
+              ) +
+              geom_hline(
+                yintercept = mean(ref$MDD_Log2FC),
+                linetype = "dotted",
+                colour = "grey40"
+              )
+          }
+
+          p +
+            scale_colour_manual(values = contrast_cols) +
+            scale_x_continuous(breaks = unique(sweep$n_per_group)) +
+            scale_y_continuous(
+              sec.axis = sec_axis(~ 2^., name = "MDD (linear fold change)")
+            ) +
+            labs(
+              title = "Prospective MDD vs replicates per group",
+              subtitle = sprintf(
+                paste0(
+                  "%.0f%% power at BH FDR %.3g | \u03C0\u2081 = %.3g | ",
+                  "%d sims/point | missingness: %s\n",
+                  "Dotted lines mark the current design (n = %d)"
+                ),
+                100 * d$settings$target_power,
+                d$settings$fdr_cutoff,
+                d$settings$pi1,
+                d$settings$n_sim,
+                if (is.null(d$settings$miss_model)) {
+                  "not simulated"
+                } else {
+                  paste0(
+                    "simulated, imputation = ",
+                    d$settings$impute_method %||% "none (NAs kept)"
+                  )
+                },
+                d$current_n
+              ),
+              x = "Replicates per group",
+              y = "Minimum detectable difference (log\u2082FC)",
+              colour = "Contrast"
+            ) +
+            theme_bw(base_size = 15) +
+            theme(
+              plot.subtitle = element_text(size = 10, colour = "grey30"),
+              axis.title = element_text(size = 12, colour = "black"),
+              axis.text = element_text(size = 10, colour = "black"),
+              legend.title = element_text(size = 10, colour = "black"),
+              legend.text = element_text(size = 10, colour = "black")
+            )
+        },
+        "sp_mdd_design"
+      )
+    })
+
+    output$mdd_design_table <- DT::renderDataTable({
+      d <- mdd_design_ev()
+      req(d)
+      d$sweep |>
+        dplyr::mutate(
+          `MDD (log2FC)` = round(MDD_Log2FC, 3),
+          `MDD (fold change)` = round(2^MDD_Log2FC, 3),
+          `Simulated missing %` = round(100 * realised_missing, 1)
+        ) |>
+        dplyr::select(
+          Contrast = comparison,
+          `n per group` = n_per_group,
+          `Total samples` = n_samples,
+          `MDD (log2FC)`,
+          `MDD (fold change)`,
+          `Simulated missing %`,
+          Note = note
+        ) |>
+        dplyr::arrange(Contrast, `n per group`) |>
+        DT::datatable(
+          rownames = FALSE,
+          options = list(pageLength = 10, scrollX = TRUE)
+        )
+    })
+
     output$limma_power_plot <- renderPlot({
       rh(
         function() {
           pw <- limma_results_ev()$limma_results
           ggplot(pw, aes(x = Sigma, y = abs(logFC))) +
-            geom_point(aes(color = Is_reliable), alpha = 0.3) +
-            geom_line(
-              aes(y = Min_Detectable_Log2FC),
-              color = "red",
-              linetype = "dashed",
-              linewidth = 1
-            ) +
+            geom_point(aes(color = status), alpha = 0.3) +
             labs(
-              x = "eBayes posterior variance (s2.post)",
+              x = "eBayes posterior SD (√s2.post)",
               y = "Observed |log₂FC|",
-              color = "Significant difference with 80% power"
+              color = "Significance call (FDR + |log₂FC| cutoff)"
             ) +
             scale_color_brewer(palette = "Dark2") +
             guides(
@@ -3411,7 +4567,10 @@ PwrQuant_server <- function(id) {
             theme(
               text = element_text(size = 16),
               legend.position = "bottom",
-              axis.title = element_markdown(face = "bold"),
+              legend.title = element_text(face = "bold", color = "black", hjust = 0.5),
+              legend.title.position = "top",
+              axis.title = element_text(face = "bold", color = "black"),
+              axis.text = element_text(face = "bold", color = "black"),
               strip.text = element_text(face = "bold"),
               strip.background = element_blank()
             )
@@ -3570,7 +4729,6 @@ PwrQuant_server <- function(id) {
         dplyr::arrange(ONTOLOGY, p.adjust, .by_group = TRUE) |>
         dplyr::mutate(term_pos = dplyr::row_number()) |>
         dplyr::ungroup()
-      # Label the most significant terms within each contrast x direction panel.
       labels <- d |>
         dplyr::group_by(Contrast, Direction) |>
         dplyr::slice_min(p.adjust, n = label_n, with_ties = FALSE) |>
@@ -3953,7 +5111,7 @@ PwrQuant_server <- function(id) {
             )
         })
 
-        # 5-9. limma-dependent plots (may not exist yet)
+        # 5-9. limma-dependent plots
         tryCatch(
           {
             res <- limma_results_ev()
@@ -4170,18 +5328,18 @@ PwrQuant_server <- function(id) {
               function() {
                 sig <- lr %>%
                   dplyr::filter(
-                    status != "Not significant" & Is_reliable == TRUE
+                    status != "Not significant"
                   )
                 if (nrow(sig) == 0) {
                   return(NULL)
                 }
                 top_up <- sig %>%
-                  dplyr::filter(status == "Increased" & Is_reliable == TRUE) %>%
+                  dplyr::filter(status == "Increased") %>%
                   dplyr::group_by(comparison) %>%
                   dplyr::slice_max(order_by = logFC, n = 20) %>%
                   dplyr::ungroup()
                 top_down <- sig %>%
-                  dplyr::filter(status == "Decreased" & Is_reliable == TRUE) %>%
+                  dplyr::filter(status == "Decreased") %>%
                   dplyr::group_by(comparison) %>%
                   dplyr::slice_min(order_by = logFC, n = 20) %>%
                   dplyr::ungroup()
@@ -4226,35 +5384,27 @@ PwrQuant_server <- function(id) {
             # 9. Power plot
             safe_save("power_plot.png", function() {
               ggplot(lr, aes(x = Sigma, y = abs(logFC))) +
-                geom_point(aes(color = Is_reliable), alpha = 0.3) +
+                geom_point(aes(color = status), alpha = 0.3) +
                 guides(
                   color = guide_legend(override.aes = list(alpha = 1, size = 3))
                 ) +
-                geom_line(
-                  aes(y = Min_Detectable_Log2FC),
-                  color = "red",
-                  linetype = "dashed",
-                  linewidth = 1
-                ) +
                 labs(
-                  x = "eBayes posterior variance (s2.post)",
+                  x = "eBayes posterior SD (√s2.post)",
                   y = "Observed |log₂FC|",
-                  color = "80% power"
+                  color = "Significance call"
                 ) +
                 scale_color_brewer(palette = "Dark2") +
                 facet_wrap(~comparison, scales = "free", ncol = 2) +
                 theme_bw() +
                 theme(
-                  text = element_text(size = 16),
-                  legend.position = "bottom",
-                  axis.title = element_markdown(face = "bold", size = 16),
-                  axis.text = element_text(
-                    color = "black",
-                    face = "bold",
-                    size = 14
-                  ),
-                  strip.text = element_text(face = "bold", size = 14),
-                  strip.background = element_blank()
+              text = element_text(size = 16),
+              legend.position = "bottom",
+              legend.title = element_text(face = "bold", color = "black", hjust = 0.5),
+              legend.title.position = "top",
+              axis.title = element_text(face = "bold", color = "black"),
+              axis.text = element_text(face = "bold", color = "black"),
+              strip.text = element_text(face = "bold"),
+              strip.background = element_blank()
                 )
             })
 
@@ -4433,7 +5583,8 @@ PwrQuant_server <- function(id) {
                       plot.title = element_text(face = "bold", hjust = 0.5),
                       axis.text = element_text(color = "black", face = "bold"),
                       axis.title = element_text(face = "bold"),
-                      legend.position = "bottom"
+                      legend.position = "bottom",
+                      panel.grid = element_blank()
                     )
 
                   if (!is.null(rho_ann_dl) && nrow(rho_ann_dl) > 0) {
@@ -4766,7 +5917,7 @@ PwrQuant_server <- function(id) {
         req(res$norm_mat, res$limma_results)
         lr <- res$limma_results
         sig_proteins <- unique(lr$Protein[
-          lr$status != "Not significant" & lr$Is_reliable == TRUE
+          lr$status != "Not significant"
         ])
         mat <- as.matrix(res$norm_mat)
         mat <- mat[rownames(mat) %in% sig_proteins, , drop = FALSE]
