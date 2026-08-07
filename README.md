@@ -41,7 +41,7 @@
 - **Deep QC Insights** — Generate detailed metrics including protease fingerprints, sequence logos, mass accuracy (ppm), retention time prediction errors, charge state and peptide length distributions, missed cleavages, GRAVY index, and isoelectric point (pI) profiles.
 - **Interactive Visualization** — Explore 3D QuantUMS score distributions, interactive PCA plots, sample correlation matrices, cosine/Euclidean/Jaccard similarity heatmaps, and annotated MS/MS fragmentation spectra directly in the browser.
 - **Peptide-to-Protein Mapping** — Map identified peptides onto user-provided FASTA sequences with a colour-coded protein sequence viewer.
-- **Differential Abundance Analysis** — Full limma-based workflow with normalization, batch correction (ComBat/SVA), flexible missing value imputation (KNN, MinProb, or missForest), MA plots, volcano plots, and statistical power mapping.
+- **Differential Abundance Analysis** — Full limma-based workflow with normalization, batch correction (ComBat/SVA), flexible missing value imputation (KNN, MinProb, BPCA or missForest), MA plots, volcano plots, and statistical power simulation.
 - **Functional Enrichment** — GO over-representation analysis (ORA) with `clusterProfiler::enrichGO`, run per contrast and split by regulation direction, using Bioconductor OrgDb annotation packages for 20 supported organisms.
 - **Protein-Protein Interaction Networks** — STRING interaction networks for the significant proteins of any contrast via the `STRINGdb` package, with nodes halo-coloured by up/down regulation and confidence-score edge filtering.
 - **Publication-Ready Output** — Download filtered result matrices and universally formatted plots (PNG/ZIP) ready for reporting and publication.
@@ -187,10 +187,10 @@ End-to-end differential abundance and statistical power analysis pipeline. Accep
 | **Pre-processing QC** | CV distributions per condition, mean–variance relationship (loess trend), raw and normalized abundance boxplots |
 | **Differential Abundance** | MA/Bland-Altman plots, volcano plots, top-20 DAP bar mirror chart, raw p-value histograms per contrast |
 | **Correlation** | Inter-contrast logFC scatter with Spearman ρ and concordant/inverse/mismatch classification |
-| **Power Statistics** | eBayes posterior variance vs. |logFC| reliability map — proteins above the minimum detectable fold-change at 80% power are flagged as reliable |
+| **Power Statistics** | eBayes posterior variance vs. |logFC| reliability map — proteins above the minimum detectable fold-change at 80% power are reported for your control |
 | **Enrichment** | GO over-representation analysis with `clusterProfiler::enrichGO`, run per contrast and split by up/down direction; results shown as a dotplot (top terms per contrast) and a Manhattan plot (all enriched terms), across 20 supported OrgDb organisms |
 | **Interaction Network** | STRING protein-protein interaction network (`STRINGdb`) for a selected contrast, with nodes halo-coloured by regulation and edges filtered by a confidence score; unmapped proteins are listed for transparency |
-| **UpSet Plots** | Visualize intersections of proteins across multiple sample groups |
+| **UpSet Plots** | Visualize intersections of proteins across multiple sample groups; you can download the table |
 
 ---
 
@@ -257,7 +257,7 @@ QC module for MaxQuant results. Requires `msms.txt` and `evidence.txt` from a Ma
 
 | Module | Required files | Optional |
 |---|---|---|
-| **PSManalyst** | `psm.tsv`, `combined_protein.tsv` | FASTA file |
+| **PSManalyst** | `path/to/search_results`, `combined_protein.tsv` | FASTA file |
 | **QC4DIANN** | `report.parquet` (DIA-NN output) | FASTA file |
 | **PwrQuant** | Protein abundance matrix (`.tsv` / `.csv`, proteins × samples) | — |
 | **Casanovo** | Directory path containing `.mztab` files | — |
@@ -331,13 +331,13 @@ The **eBayes trend** parameter (sidebar toggle) controls whether the prior varia
 ### Step 8 — Results and significance calling
 A protein is called **significant** if:
 - `adj.P.Val ≤ 0.05`,
-- `Is_reliable == TRUE` (above the power-adjusted fold-change threshold), and
-- it is not imputation-driven (i.e. not completely absent in one of the contrast groups).
+- log2FC threshold user-defined,
+- Safeguard for not imputation-driven (i.e. not completely absent in one of the contrast groups).
 
-Proteins that are fully missing in one condition are flagged as `imputation_driven` and classified as *Not significant*, avoiding false positives driven by structural zeros.
+Proteins that are fully missing in one condition are flagged as `imputation_driven` and classified as *Not significant*, avoiding false positives driven by structural zeros. You still can extract valuable information from the proteins detected only in one condition by using the UpSet View in PwrQuant.
 
 ### Step 9 — Functional enrichment (ORA with clusterProfiler)
-GO over-representation analysis is performed with `clusterProfiler::enrichGO()`. For every selected contrast, the significant & reliable proteins are split by regulation direction (**Increased** / **Decreased**) and each gene set is tested separately against the shared background (*universe*) of all quantified proteins in the matrix. Enriched terms across contrasts are stacked into a single result and rendered as:
+GO over-representation analysis is performed with `clusterProfiler::enrichGO()`. For every selected contrast, the significant proteins are split by regulation direction (**Increased** / **Decreased**) and each gene set is tested separately against the shared background (*universe*) of all quantified proteins in the matrix. Enriched terms across contrasts are stacked into a single result and rendered as:
 - a **dotplot** — top terms per contrast (count on the x-axis, size = gene count, colour = adjusted p-value), and
 - a **Manhattan plot** — every enriched term per contrast, height = −log10 adjusted p-value.
 
@@ -364,7 +364,7 @@ Protein identifiers are auto-parsed from three common formats:
 3. Plain gene symbols (e.g. `TP53`)
 
 ### Step 10 — Protein-protein interaction network (STRING)
-The *Interaction Network* tab maps the significant & reliable proteins of a chosen contrast onto the [STRING](https://string-db.org/) database (v12.0) with the `STRINGdb` package and renders the network via `plot_network()`. The organism reuses the taxon selected for GO enrichment in Step 9.
+The *Interaction Network* tab maps the significant proteins of a chosen contrast onto the [STRING](https://string-db.org/) database (v12.0) with the `STRINGdb` package and renders the network via `plot_network()`. The organism reuses the taxon selected for GO enrichment in Step 9.
 
 Controls:
 - **Protein Set** — build the network from all significant proteins (*Combined*), or restrict to *Increased only* or *Decreased only*.
