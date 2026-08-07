@@ -269,6 +269,7 @@ source("modules/utils_fasta.r")
 source("modules/mod_PSManalyst.r")
 source("modules/mod_QC4DIANN.r")
 source("modules/mod_PwrQuant.r")
+source("modules/mod_PwrQuantDocs.r")
 OMNIVIEW_LOADED <- TRUE
 source("modules/dash_deNovo.r")
 source("modules/mod_InstaNovo.r")
@@ -438,7 +439,8 @@ ui <- dashboardPage(
       menuItem("Casanovo", tabName = "dnv_tab", icon = icon("fingerprint")),
       menuItem("InstaNovo", tabName = "ins_tab", icon = icon("brain")),
       menuItem("EncyclopeDIA", tabName = "enc_tab", icon = icon("book-open")),
-      menuItem("Sage", tabName = "sag_tab", icon = icon("leaf"))
+      menuItem("Sage", tabName = "sag_tab", icon = icon("leaf")),
+      menuItem("Documentation", tabName = "doc_tab", icon = icon("book"))
     ),
     tags$hr(style = "border-color:#2d3741;margin:4px 0;"),
     uiOutput("active_sidebar_controls"),
@@ -568,6 +570,21 @@ ui <- dashboardPage(
                     "Visual QC and validation for Sage search engine results."
                   ),
                   tags$span("Sage / DDA / DIA", class = "tool-badge")
+                )
+              ),
+              column(
+                4,
+                div(
+                  class = "tool-card",
+                  id = "card_doc",
+                  style = "background-color:#eaf4fb;border:2px solid #5FA8D3;",
+                  onclick = "Shiny.setInputValue('select_tool','doc',{priority:'event'})",
+                  div(class = "tool-icon", icon("book")),
+                  tags$h3("Documentation"),
+                  tags$p(
+                    "Complete PwrQuant guide: parameters, statistical rationale and interpretation."
+                  ),
+                  tags$span("Guide / Statistics", class = "tool-badge")
                 )
               )
             ),
@@ -727,6 +744,23 @@ ui <- dashboardPage(
           )
         )),
         MaxQuantMSMS_body_ui("mqt")
+      ),
+
+      # ── Documentation ─────────────────────────────────────────────────────
+      tabItem(
+        tabName = "doc_tab",
+        fluidRow(column(
+          12,
+          div(
+            class = "back-btn",
+            actionButton(
+              "back_to_home_doc",
+              "← Home",
+              class = "btn btn-default btn-sm"
+            )
+          )
+        )),
+        PwrQuantDocs_body_ui("doc")
       )
     )
   )
@@ -759,7 +793,8 @@ server <- function(input, output, session) {
       ins = "ins_tab",
       enc = "enc_tab",
       sag = "sag_tab",
-      mqt = "mqt_tab"
+      mqt = "mqt_tab",
+      doc = "doc_tab"
     )
     if (!is.null(tab)) updateTabItems(session, "main_menu", selected = tab)
   })
@@ -799,7 +834,8 @@ server <- function(input, output, session) {
     back_to_home_ins = "home",
     back_to_home_enc = "home",
     back_to_home_sag = "home",
-    back_to_home_mqt = "home"
+    back_to_home_mqt = "home",
+    back_to_home_doc = "home"
   )
   for (btn in names(back_buttons)) {
     local({
@@ -827,6 +863,13 @@ server <- function(input, output, session) {
       enc_tab = EncyclopeDIA_sidebar_ui("enc"),
       sag_tab = Sage_sidebar_ui("sag"),
       mqt_tab = MaxQuantMSMS_sidebar_ui("mqt"),
+      # The documentation tab is static and needs no controls of its own.
+      doc_tab = tags$div(
+        style = "padding:16px;color:#adb5bd;font-size:13px;",
+        icon("book", style = "margin-right:6px;"),
+        "Reference guide \u2014 no controls needed. Open PwrQuant to apply these ",
+        "settings."
+      ),
       tags$div(
         style = "padding:16px;color:#adb5bd;font-size:13px;",
         icon("arrow-left", style = "margin-right:6px;"),
