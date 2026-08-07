@@ -43,7 +43,6 @@ pq_table <- function(headers, rows) {
     tags$thead(tags$tr(lapply(headers, tags$th))),
     tags$tbody(lapply(rows, function(r) {
       tags$tr(lapply(r, function(cell) {
-        # cells may be raw HTML strings or already-built shiny tags
         tags$td(if (is.character(cell)) HTML(cell) else cell)
       }))
     }))
