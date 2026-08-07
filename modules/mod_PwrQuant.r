@@ -4307,95 +4307,101 @@ PwrQuant_server <- function(id) {
       )
     })
 
+    # Built once and reused by both the tab renderer and the plot export, so
+    # the downloaded PNG is exactly the figure shown in the app.
+    build_mdd_curve_plot <- function(sim) {
+      st <- sim$settings
+
+      ggplot(sim$curve, aes(x = True_LFC, y = Power)) +
+        geom_hline(
+          yintercept = st$target_power,
+          linetype = "dashed",
+          colour = "grey40"
+        ) +
+        geom_ribbon(
+          aes(
+            ymin = pmax(0, Power - 1.96 * Power_SE),
+            ymax = pmin(1, Power + 1.96 * Power_SE)
+          ),
+          fill = "#0072B2",
+          alpha = 0.18
+        ) +
+        geom_line(colour = "#0072B2", linewidth = 1) +
+        geom_point(colour = "#0072B2", size = 2) +
+        geom_vline(
+          data = sim$mdd[!is.na(sim$mdd$MDD_Log2FC), ],
+          aes(xintercept = MDD_Log2FC),
+          linetype = "dashed",
+          colour = "#D55E00",
+          linewidth = 0.9
+        ) +
+        geom_text(
+          data = sim$mdd[!is.na(sim$mdd$MDD_Log2FC), ],
+          aes(
+            x = MDD_Log2FC,
+            y = 0.06,
+            label = sprintf(
+              "MDD = %.2f",
+              MDD_Log2FC
+            )
+          ),
+          hjust = -0.1,
+          colour = "#D55E00",
+          fontface = "bold",
+          size = 4.5
+        ) +
+        scale_y_continuous(limits = c(0, 1)) +
+        facet_wrap(~comparison, ncol = 2) +
+        labs(
+          title = "Prospective power curve from simulated data",
+          subtitle = sprintf(
+            paste0(
+              "FDR = %.3g | target power = %.2f | \u03C0\u2081 = %.3g | ",
+              "%d proteins \u00D7 %d samples | %d sims/point | ",
+              "trend = %s | s\u00B2\u2080 (median) = %.3g, d\u2080 = %.1f\n%s"
+            ),
+            st$fdr_cutoff,
+            st$target_power,
+            st$pi1,
+            st$n_proteins,
+            st$n_samples,
+            st$n_sim,
+            st$trend,
+            st$s2_prior_median,
+            st$df_prior,
+            if (!st$missingness) {
+              "Complete data simulated (no missingness arm)"
+            } else {
+              sprintf(
+                paste0(
+                  "Missingness simulated: %.1f%% of cells dropped ",
+                  "(observed %.1f%%), imputation = %s"
+                ),
+                100 * st$realised_missing,
+                100 * st$target_missing,
+                st$impute_method %||% "none (NAs kept)"
+              )
+            }
+          ),
+          x = "True spiked-in log\u2082 fold change",
+          y = "Power (proportion of true effects called at FDR)"
+        ) +
+        theme_bw(base_size = 15) +
+        theme(
+          plot.subtitle = element_text(size = 11, colour = "grey30"),
+          strip.background = element_blank(),
+          strip.text = element_text(face = "bold", colour = "black"),
+          axis.text = element_text(face = "bold", color = "black"),
+          axis.title = element_text(face = "bold", colour = "black")
+        )
+    }
+
     output$mdd_curve_plot <- renderPlot({
       rh(
         function() {
           sim <- mdd_sim_ev()
           req(sim)
-          st <- sim$settings
-
-          ggplot(sim$curve, aes(x = True_LFC, y = Power)) +
-            geom_hline(
-              yintercept = st$target_power,
-              linetype = "dashed",
-              colour = "grey40"
-            ) +
-            geom_ribbon(
-              aes(
-                ymin = pmax(0, Power - 1.96 * Power_SE),
-                ymax = pmin(1, Power + 1.96 * Power_SE)
-              ),
-              fill = "#0072B2",
-              alpha = 0.18
-            ) +
-            geom_line(colour = "#0072B2", linewidth = 1) +
-            geom_point(colour = "#0072B2", size = 2) +
-            geom_vline(
-              data = sim$mdd[!is.na(sim$mdd$MDD_Log2FC), ],
-              aes(xintercept = MDD_Log2FC),
-              linetype = "dashed",
-              colour = "#D55E00",
-              linewidth = 0.9
-            ) +
-            geom_text(
-              data = sim$mdd[!is.na(sim$mdd$MDD_Log2FC), ],
-              aes(
-                x = MDD_Log2FC,
-                y = 0.06,
-                label = sprintf(
-                  "MDD = %.2f",
-                  MDD_Log2FC
-                )
-              ),
-              hjust = -0.1,
-              colour = "#D55E00",
-              fontface = "bold",
-              size = 4.5
-            ) +
-            scale_y_continuous(limits = c(0, 1)) +
-            facet_wrap(~comparison, ncol = 2) +
-            labs(
-              title = "Prospective power curve from simulated data",
-              subtitle = sprintf(
-                paste0(
-                  "FDR = %.3g | target power = %.2f | \u03C0\u2081 = %.3g | ",
-                  "%d proteins \u00D7 %d samples | %d sims/point | ",
-                  "trend = %s | s\u00B2\u2080 (median) = %.3g, d\u2080 = %.1f\n%s"
-                ),
-                st$fdr_cutoff,
-                st$target_power,
-                st$pi1,
-                st$n_proteins,
-                st$n_samples,
-                st$n_sim,
-                st$trend,
-                st$s2_prior_median,
-                st$df_prior,
-                if (!st$missingness) {
-                  "Complete data simulated (no missingness arm)"
-                } else {
-                  sprintf(
-                    paste0(
-                      "Missingness simulated: %.1f%% of cells dropped ",
-                      "(observed %.1f%%), imputation = %s"
-                    ),
-                    100 * st$realised_missing,
-                    100 * st$target_missing,
-                    st$impute_method %||% "none (NAs kept)"
-                  )
-                }
-              ),
-              x = "True spiked-in log\u2082 fold change",
-              y = "Power (proportion of true effects called at FDR)"
-            ) +
-            theme_bw(base_size = 15) +
-            theme(
-              plot.subtitle = element_text(size = 11, colour = "grey30"),
-              strip.background = element_blank(),
-              strip.text = element_text(face = "bold", colour = "black"),
-              axis.text = element_text(face = "bold", color = "black"),
-              axis.title = element_text(face = "bold", colour = "black")
-            )
+          build_mdd_curve_plot(sim)
         },
         "sp_mdd"
       )
@@ -4430,93 +4436,100 @@ PwrQuant_server <- function(id) {
         )
     })
 
+    # Returns NULL when no replicate count reached the target power; callers
+    # decide how to report that (validate() in the tab, skip on export).
+    build_mdd_design_plot <- function(d, palette = "npg") {
+      sweep <- d$sweep[!is.na(d$sweep$MDD_Log2FC), ]
+      if (nrow(sweep) == 0) {
+        return(NULL)
+      }
+
+      # Reuse the sidebar palette so the module keeps one colour
+      # vocabulary. The levels here are contrasts rather than conditions,
+      # so index the palette directly instead of reusing cond_colors().
+      contrast_levels <- unique(sweep$comparison)
+      contrast_cols <- setNames(
+        get_palette_colors(palette, length(contrast_levels)),
+        contrast_levels
+      )
+
+      ref <- sweep[sweep$n_per_group == d$current_n, ]
+
+      p <- ggplot(
+        sweep,
+        aes(x = n_per_group, y = MDD_Log2FC, colour = comparison)
+      ) +
+        geom_line(linewidth = 0.9) +
+        geom_point(size = 2.5)
+
+      if (nrow(ref) > 0) {
+        p <- p +
+          geom_vline(
+            xintercept = d$current_n,
+            linetype = "dotted",
+            colour = "grey40"
+          ) +
+          geom_hline(
+            yintercept = mean(ref$MDD_Log2FC),
+            linetype = "dotted",
+            colour = "grey40"
+          )
+      }
+
+      p +
+        scale_colour_manual(values = contrast_cols) +
+        scale_x_continuous(breaks = unique(sweep$n_per_group)) +
+        scale_y_continuous(
+          sec.axis = sec_axis(~ 2^., name = "MDD (linear fold change)")
+        ) +
+        labs(
+          title = "Prospective MDD vs replicates per group",
+          subtitle = sprintf(
+            paste0(
+              "%.0f%% power at BH FDR %.3g | \u03C0\u2081 = %.3g | ",
+              "%d sims/point | missingness: %s\n",
+              "Dotted lines mark the current design (n = %d)"
+            ),
+            100 * d$settings$target_power,
+            d$settings$fdr_cutoff,
+            d$settings$pi1,
+            d$settings$n_sim,
+            if (is.null(d$settings$miss_model)) {
+              "not simulated"
+            } else {
+              paste0(
+                "simulated, imputation = ",
+                d$settings$impute_method %||% "none (NAs kept)"
+              )
+            },
+            d$current_n
+          ),
+          x = "Replicates per group",
+          y = "Minimum detectable difference (log\u2082FC)",
+          colour = "Contrast"
+        ) +
+        theme_bw(base_size = 15) +
+        theme(
+          plot.subtitle = element_text(size = 10, colour = "grey30"),
+          axis.title = element_text(size = 12, colour = "black"),
+          axis.text = element_text(size = 10, colour = "black"),
+          legend.title = element_text(size = 10, colour = "black"),
+          legend.text = element_text(size = 10, colour = "black")
+        )
+    }
+
     output$mdd_design_plot <- renderPlot({
       rh(
         function() {
           d <- mdd_design_ev()
           req(d)
-          sweep <- d$sweep[!is.na(d$sweep$MDD_Log2FC), ]
+          p_design <- build_mdd_design_plot(d, input$cond_palette %||% "npg")
           # See note above: jsonlite::validate masks shiny::validate here.
           shiny::validate(shiny::need(
-            nrow(sweep) > 0,
+            !is.null(p_design),
             "No replicate count reached the target power within the tested range."
           ))
-
-          # Reuse the sidebar palette so the module keeps one colour
-          # vocabulary. The levels here are contrasts rather than conditions,
-          # so index the palette directly instead of reusing cond_colors().
-          contrast_levels <- unique(sweep$comparison)
-          contrast_cols <- setNames(
-            get_palette_colors(
-              input$cond_palette %||% "npg",
-              length(contrast_levels)
-            ),
-            contrast_levels
-          )
-
-          ref <- sweep[sweep$n_per_group == d$current_n, ]
-
-          p <- ggplot(
-            sweep,
-            aes(x = n_per_group, y = MDD_Log2FC, colour = comparison)
-          ) +
-            geom_line(linewidth = 0.9) +
-            geom_point(size = 2.5)
-
-          if (nrow(ref) > 0) {
-            p <- p +
-              geom_vline(
-                xintercept = d$current_n,
-                linetype = "dotted",
-                colour = "grey40"
-              ) +
-              geom_hline(
-                yintercept = mean(ref$MDD_Log2FC),
-                linetype = "dotted",
-                colour = "grey40"
-              )
-          }
-
-          p +
-            scale_colour_manual(values = contrast_cols) +
-            scale_x_continuous(breaks = unique(sweep$n_per_group)) +
-            scale_y_continuous(
-              sec.axis = sec_axis(~ 2^., name = "MDD (linear fold change)")
-            ) +
-            labs(
-              title = "Prospective MDD vs replicates per group",
-              subtitle = sprintf(
-                paste0(
-                  "%.0f%% power at BH FDR %.3g | \u03C0\u2081 = %.3g | ",
-                  "%d sims/point | missingness: %s\n",
-                  "Dotted lines mark the current design (n = %d)"
-                ),
-                100 * d$settings$target_power,
-                d$settings$fdr_cutoff,
-                d$settings$pi1,
-                d$settings$n_sim,
-                if (is.null(d$settings$miss_model)) {
-                  "not simulated"
-                } else {
-                  paste0(
-                    "simulated, imputation = ",
-                    d$settings$impute_method %||% "none (NAs kept)"
-                  )
-                },
-                d$current_n
-              ),
-              x = "Replicates per group",
-              y = "Minimum detectable difference (log\u2082FC)",
-              colour = "Contrast"
-            ) +
-            theme_bw(base_size = 15) +
-            theme(
-              plot.subtitle = element_text(size = 10, colour = "grey30"),
-              axis.title = element_text(size = 12, colour = "black"),
-              axis.text = element_text(size = 10, colour = "black"),
-              legend.title = element_text(size = 10, colour = "black"),
-              legend.text = element_text(size = 10, colour = "black")
-            )
+          p_design
         },
         "sp_mdd_design"
       )
@@ -4567,7 +4580,11 @@ PwrQuant_server <- function(id) {
             theme(
               text = element_text(size = 16),
               legend.position = "bottom",
-              legend.title = element_text(face = "bold", color = "black", hjust = 0.5),
+              legend.title = element_text(
+                face = "bold",
+                color = "black",
+                hjust = 0.5
+              ),
               legend.title.position = "top",
               axis.title = element_text(face = "bold", color = "black"),
               axis.text = element_text(face = "bold", color = "black"),
@@ -5397,14 +5414,18 @@ PwrQuant_server <- function(id) {
                 facet_wrap(~comparison, scales = "free", ncol = 2) +
                 theme_bw() +
                 theme(
-              text = element_text(size = 16),
-              legend.position = "bottom",
-              legend.title = element_text(face = "bold", color = "black", hjust = 0.5),
-              legend.title.position = "top",
-              axis.title = element_text(face = "bold", color = "black"),
-              axis.text = element_text(face = "bold", color = "black"),
-              strip.text = element_text(face = "bold"),
-              strip.background = element_blank()
+                  text = element_text(size = 16),
+                  legend.position = "bottom",
+                  legend.title = element_text(
+                    face = "bold",
+                    color = "black",
+                    hjust = 0.5
+                  ),
+                  legend.title.position = "top",
+                  axis.title = element_text(face = "bold", color = "black"),
+                  axis.text = element_text(face = "bold", color = "black"),
+                  strip.text = element_text(face = "bold"),
+                  strip.background = element_blank()
                 )
             })
 
@@ -5889,6 +5910,51 @@ PwrQuant_server <- function(id) {
           error = function(e) {
             warning(
               "Selected proteins plot not available for export: ",
+              e$message
+            )
+          }
+        )
+
+        # Prospective MDD simulation plots. These only exist once the user has
+        # run the (slow) simulations, so a missing result is expected rather
+        # than an error worth surfacing.
+        tryCatch(
+          {
+            sim <- mdd_sim_ev()
+            if (!is.null(sim)) {
+              safe_save(
+                "mdd_power_curve.png",
+                function() build_mdd_curve_plot(sim),
+                w = 14,
+                h = 10
+              )
+            }
+          },
+          error = function(e) {
+            warning(
+              "Prospective MDD power curve not available for export: ",
+              e$message
+            )
+          }
+        )
+
+        tryCatch(
+          {
+            d_mdd <- mdd_design_ev()
+            if (!is.null(d_mdd)) {
+              safe_save(
+                "mdd_experiment_design.png",
+                function() {
+                  build_mdd_design_plot(d_mdd, input$cond_palette %||% "npg")
+                },
+                w = 12,
+                h = 8
+              )
+            }
+          },
+          error = function(e) {
+            warning(
+              "MDD replicate-sweep plot not available for export: ",
               e$message
             )
           }
