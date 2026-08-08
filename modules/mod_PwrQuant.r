@@ -1183,6 +1183,41 @@ string_halo_colors <- function(status_vec) {
   )
 }
 
+# ── Z-score heatmap row clustering ─────────────────────────────────────────
+
+#' Hierarchical row clustering for the z-score heatmap
+#'
+#' NAs are replaced by 0 before computing distances. On a row-scaled matrix 0
+#' is that protein's own mean, so a missing sample contributes no apparent
+#' regulation - this mirrors the clustering callback the heatmap already used.
+#' Cluster labels are renumbered in dendrogram order, so cluster 1 is the top
+#' slice of the drawn heatmap and the table reads in the same order as the plot.
+#'
+#' @param mat_z Proteins x samples z-scored matrix.
+#' @param k Requested number of clusters; clamped to [2, nrow - 1].
+#' @return list(hc = hclust, k = integer, cluster = named factor).
+cluster_heatmap_rows <- function(mat_z, k = 4L) {
+  mat_z <- as.matrix(mat_z)
+  n <- nrow(mat_z)
+  if (n < 3L) {
+    return(NULL)
+  }
+  hc <- stats::hclust(stats::dist(replace(mat_z, is.na(mat_z), 0)))
+  k <- suppressWarnings(as.integer(k))
+  if (is.na(k)) {
+    k <- 4L
+  }
+  k <- max(2L, min(k, n - 1L))
+
+  groups <- stats::cutree(hc, k = k)
+  ord <- unique(groups[hc$order])
+  relabelled <- match(groups, ord)
+  cluster <- factor(relabelled, levels = seq_along(ord))
+  names(cluster) <- rownames(mat_z)
+
+  list(hc = hc, k = k, cluster = cluster)
+}
+
 # ── Color palette options (ggsci, viridis, RColorBrewer) ───────────────────
 pwrquant_palette_choices <- list(
   "ggsci" = c(
@@ -2317,6 +2352,48 @@ PwrQuant_body_ui <- function(id) {
             "Samples are grouped by condition. Grey cells indicate missing values. ",
             "Use the sidebar controls to select a filtering strategy."
           ),
+          fluidRow(
+            column(
+              4,
+              checkboxInput(
+                ns("heatmap_show_clusters"),
+                "Split proteins into clusters",
+                value = TRUE
+              )
+            ),
+            column(
+              4,
+              conditionalPanel(
+                condition = sprintf(
+                  "input['%s'] == true",
+                  ns("heatmap_show_clusters")
+                ),
+                numericInput(
+                  ns("heatmap_k"),
+                  "Number of clusters (k)",
+                  value = 4,
+                  min = 2,
+                  max = 20,
+                  step = 1
+                )
+              )
+            ),
+            column(
+              4,
+              conditionalPanel(
+                condition = sprintf(
+                  "input['%s'] == true",
+                  ns("heatmap_show_clusters")
+                ),
+                selectInput(
+                  ns("heatmap_cluster_palette"),
+                  "Cluster colour palette",
+                  choices = pwrquant_palette_choices,
+                  selected = "d3"
+                )
+              )
+            )
+          ),
           div(
             class = "plot-wrap",
             tags$div(
@@ -2325,6 +2402,136 @@ PwrQuant_body_ui <- function(id) {
               icon("spinner", class = "fa-spin")
             ),
             plotOutput(ns("zscore_heatmap"), height = 700)
+          )
+        ),
+        box(
+          title = "Protein clusters",
+          status = "primary",
+          solidHeader = TRUE,
+          width = 12,
+          p(
+            "Cluster membership from the same hierarchical clustering shown in the heatmap ",
+            "(cluster 1 is the top block). Use the column filters to isolate a cluster, then ",
+            "download either the filtered rows or the full table."
+          ),
+          div(
+            style = "margin-bottom:10px;",
+            downloadButton(
+              ns("download_cluster_table"),
+              "\u2b07 Download cluster table (TSV)",
+              class = "dl-btn"
+            )
+          ),
+          div(
+            class = "plot-wrap",
+            DT::dataTableOutput(ns("heatmap_cluster_table"))
+          )
+        ),
+        box(
+          title = "Cluster abundance profiles",
+          status = "primary",
+          solidHeader = TRUE,
+          width = 12,
+          p(
+            "Mean Z-score per condition for each cluster. Thin lines are individual ",
+            "proteins, the thick line is the cluster mean and the ribbon is \u00b1 1 SD. ",
+            "This is the shape that defines each block of the heatmap."
+          ),
+          div(
+            class = "plot-wrap",
+            tags$div(
+              class = "spinner-overlay",
+              id = ns("sp_cluster_profile"),
+              icon("spinner", class = "fa-spin")
+            ),
+            uiOutput(ns("cluster_profile_ui"))
+          )
+        ),
+        box(
+          title = "GO enrichment of selected clusters",
+          status = "primary",
+          solidHeader = TRUE,
+          width = 12,
+          p(
+            "Runs enrichGO on the proteins of the chosen clusters, one gene set per ",
+            "cluster, against all quantified proteins as the background universe. ",
+            "The organism (OrgDb) is the one selected in the sidebar."
+          ),
+          fluidRow(
+            column(
+              5,
+              selectizeInput(
+                ns("cluster_ora_clusters"),
+                "Clusters to enrich",
+                choices = NULL,
+                multiple = TRUE,
+                options = list(placeholder = "Select one or more clusters...")
+              )
+            ),
+            column(
+              3,
+              selectInput(
+                ns("cluster_ora_ontology"),
+                "GO category",
+                choices = c(
+                  "All (BP + CC + MF)" = "ALL",
+                  "Biological Process" = "BP",
+                  "Cellular Component" = "CC",
+                  "Molecular Function" = "MF"
+                ),
+                selected = "BP"
+              )
+            ),
+            column(
+              2,
+              numericInput(
+                ns("cluster_ora_fdr"),
+                "Term FDR cutoff",
+                value = 0.2,
+                min = 0.001,
+                max = 1,
+                step = 0.01
+              )
+            ),
+            column(
+              2,
+              numericInput(
+                ns("cluster_ora_top_n"),
+                "Terms per cluster",
+                value = 8,
+                min = 1,
+                max = 30,
+                step = 1
+              )
+            )
+          ),
+          div(
+            style = "margin-bottom:10px;",
+            actionButton(
+              ns("run_cluster_ora"),
+              "Run GO enrichment on clusters",
+              class = "btn-primary",
+              style = "font-weight:bold;"
+            ),
+            downloadButton(
+              ns("download_cluster_ora"),
+              "\u2b07 Download cluster GO results (TSV)",
+              class = "dl-btn",
+              style = "margin-left:8px;"
+            )
+          ),
+          div(
+            class = "plot-wrap",
+            tags$div(
+              class = "spinner-overlay",
+              id = ns("sp_cluster_ora"),
+              icon("spinner", class = "fa-spin")
+            ),
+            uiOutput(ns("cluster_ora_plot_ui"))
+          ),
+          div(
+            class = "plot-wrap",
+            DT::dataTableOutput(ns("cluster_ora_table"))
           )
         )
       )
@@ -2465,7 +2672,9 @@ PwrQuant_server <- function(id) {
       "sp_pca_proc",
       "sp_plsda_raw",
       "sp_plsda_proc",
-      "sp_heatmap"
+      "sp_heatmap",
+      "sp_cluster_profile",
+      "sp_cluster_ora"
     )
     show_spinners <- function() {
       lapply(spin_ids, function(s) shinyjs::show(id = s))
@@ -4307,8 +4516,6 @@ PwrQuant_server <- function(id) {
       )
     })
 
-    # Built once and reused by both the tab renderer and the plot export, so
-    # the downloaded PNG is exactly the figure shown in the app.
     build_mdd_curve_plot <- function(sim) {
       st <- sim$settings
 
@@ -4436,17 +4643,12 @@ PwrQuant_server <- function(id) {
         )
     })
 
-    # Returns NULL when no replicate count reached the target power; callers
-    # decide how to report that (validate() in the tab, skip on export).
     build_mdd_design_plot <- function(d, palette = "npg") {
       sweep <- d$sweep[!is.na(d$sweep$MDD_Log2FC), ]
       if (nrow(sweep) == 0) {
         return(NULL)
       }
 
-      # Reuse the sidebar palette so the module keeps one colour
-      # vocabulary. The levels here are contrasts rather than conditions,
-      # so index the palette directly instead of reusing cond_colors().
       contrast_levels <- unique(sweep$comparison)
       contrast_cols <- setNames(
         get_palette_colors(palette, length(contrast_levels)),
@@ -5819,17 +6021,41 @@ PwrQuant_server <- function(id) {
                     c(-2, 0, 2),
                     c("#2166AC", "white", "#B2182B")
                   )
+                  cl_dl <- if (isTRUE(input$heatmap_show_clusters)) {
+                    zscore_clusters()
+                  } else {
+                    NULL
+                  }
+                  left_ha_dl <- if (is.null(cl_dl)) {
+                    NULL
+                  } else {
+                    ComplexHeatmap::rowAnnotation(
+                      Cluster = cl_dl$cluster[rownames(mat_z_ord)],
+                      col = list(Cluster = zscore_cluster_colors()),
+                      annotation_name_gp = grid::gpar(
+                        fontsize = 11,
+                        fontface = "bold"
+                      )
+                    )
+                  }
                   ComplexHeatmap::draw(
                     ComplexHeatmap::Heatmap(
                       mat_z_ord,
                       name = "Z-score",
                       col = col_fun,
                       na_col = "grey",
-                      cluster_rows = function(m) {
-                        hclust(dist(replace(m, is.na(m), 0)))
+                      cluster_rows = if (is.null(cl_dl)) {
+                        function(m) hclust(dist(replace(m, is.na(m), 0)))
+                      } else {
+                        cl_dl$hc
                       },
+                      row_split = if (is.null(cl_dl)) NULL else cl_dl$k,
+                      cluster_row_slices = FALSE,
+                      row_title = if (is.null(cl_dl)) NULL else "Cluster %s",
+                      row_gap = grid::unit(2, "mm"),
                       cluster_columns = FALSE,
                       top_annotation = col_ha,
+                      left_annotation = left_ha_dl,
                       column_labels = col_labels,
                       column_names_rot = 45,
                       column_names_gp = grid::gpar(
@@ -5853,6 +6079,50 @@ PwrQuant_server <- function(id) {
           },
           error = function(e) {
             warning("Z-score heatmap not available for export: ", e$message)
+          }
+        )
+
+        # Cluster abundance profiles (skipped when clustering is unavailable)
+        tryCatch(
+          {
+            cl_prof <- zscore_clusters()
+            if (!is.null(cl_prof)) {
+              safe_save(
+                "cluster_abundance_profiles.png",
+                build_cluster_profile_plot,
+                w = 12,
+                h = max(5, ceiling(cl_prof$k / 3) * 3.2)
+              )
+            }
+          },
+          error = function(e) {
+            warning(
+              "Cluster abundance profiles not available for export: ",
+              e$message
+            )
+          }
+        )
+
+        # GO enrichment of selected clusters. This one is only in the zip if
+        # the user has actually run it; the eventReactive stays unevaluated
+        # otherwise and the tryCatch swallows the resulting silent error.
+        tryCatch(
+          {
+            cl_ora <- cluster_ora_top()
+            if (!is.null(cl_ora) && nrow(cl_ora) > 0) {
+              safe_save(
+                "cluster_GO_enrichment.png",
+                build_cluster_ora_plot,
+                w = 12,
+                h = max(6, nrow(cl_ora) * 0.3 + 1.5)
+              )
+            }
+          },
+          error = function(e) {
+            warning(
+              "Cluster GO enrichment not available for export: ",
+              e$message
+            )
           }
         )
 
@@ -6006,6 +6276,23 @@ PwrQuant_server <- function(id) {
       mat_z[keep, , drop = FALSE]
     })
 
+    # Row clustering shared by the heatmap, the cluster table and the export,
+    # so all three always report the same partition.
+    zscore_clusters <- reactive({
+      mat_z <- zscore_heatmap_data()
+      req(nrow(mat_z) > 0)
+      cluster_heatmap_rows(mat_z, input$heatmap_k %||% 4)
+    })
+
+    zscore_cluster_colors <- reactive({
+      cl <- zscore_clusters()
+      req(cl)
+      setNames(
+        get_palette_colors(input$heatmap_cluster_palette %||% "d3", cl$k),
+        levels(cl$cluster)
+      )
+    })
+
     output$zscore_heatmap <- renderPlot({
       shinyjs::show(id = "sp_heatmap")
       on.exit(shinyjs::hide(id = "sp_heatmap"), add = TRUE)
@@ -6041,18 +6328,51 @@ PwrQuant_server <- function(id) {
         c("#2166AC", "white", "#B2182B")
       )
 
+      cl <- if (isTRUE(input$heatmap_show_clusters)) zscore_clusters() else NULL
+
+      # ComplexHeatmap only accepts a single number for `row_split` when
+      # `cluster_rows` is a dendrogram, so the split is expressed as k and the
+      # dendrogram is cut internally. That cut is the same `cutree(hc, k)` used
+      # by `cluster_heatmap_rows()`, and our labels are numbered in dendrogram
+      # order, so slice i is cluster i and the left annotation stays aligned.
+      row_clust <- if (is.null(cl)) {
+        function(m) hclust(dist(replace(m, is.na(m), 0)))
+      } else {
+        cl$hc
+      }
+      row_split <- if (is.null(cl)) NULL else cl$k
+      left_ha <- if (is.null(cl)) {
+        NULL
+      } else {
+        ComplexHeatmap::rowAnnotation(
+          Cluster = cl$cluster[rownames(mat_z)],
+          col = list(Cluster = zscore_cluster_colors()),
+          annotation_name_gp = grid::gpar(fontsize = 11, fontface = "bold"),
+          annotation_legend_param = list(
+            Cluster = list(
+              title_gp = grid::gpar(fontsize = 11, fontface = "bold"),
+              labels_gp = grid::gpar(fontsize = 10)
+            )
+          )
+        )
+      }
+
       ComplexHeatmap::Heatmap(
         mat_z,
         name = "Z-score",
         col = col_fun,
         na_col = "grey",
-        cluster_rows = function(m) {
-          hclust(dist(replace(m, is.na(m), 0)))
-        },
+        cluster_rows = row_clust,
+        row_split = row_split,
+        cluster_row_slices = FALSE,
+        row_title = if (is.null(cl)) NULL else "Cluster %s",
+        row_title_gp = grid::gpar(fontsize = 11, fontface = "bold"),
+        row_gap = grid::unit(2, "mm"),
         cluster_columns = FALSE,
         show_row_dend = TRUE,
         show_column_dend = FALSE,
         top_annotation = col_ha,
+        left_annotation = left_ha,
         column_labels = col_labels,
         column_names_rot = 45,
         column_names_gp = grid::gpar(fontsize = 10, fontface = "bold"),
@@ -6067,6 +6387,485 @@ PwrQuant_server <- function(id) {
         column_title_gp = grid::gpar(fontsize = 14, fontface = "bold")
       )
     })
+
+    # Mean Z-score per protein per condition, shared by the cluster table and
+    # the profile plot so both describe the same summary.
+    zscore_cond_means <- reactive({
+      mat_z <- zscore_heatmap_data()
+      meta <- meta_edit_df()
+      cond_vec <- meta$Condition[match(colnames(mat_z), meta$Sample)]
+      conditions <- unique(cond_vec[!is.na(cond_vec)])
+      req(length(conditions) > 0)
+
+      cond_means <- vapply(
+        conditions,
+        function(g) {
+          rowMeans(mat_z[, which(cond_vec == g), drop = FALSE], na.rm = TRUE)
+        },
+        numeric(nrow(mat_z))
+      )
+      cond_means <- matrix(
+        cond_means,
+        nrow = nrow(mat_z),
+        dimnames = list(rownames(mat_z), conditions)
+      )
+      # A protein missing in every sample of a group yields NaN from rowMeans.
+      cond_means[!is.finite(cond_means)] <- NA_real_
+      cond_means
+    })
+
+    # ── Cluster membership table ─────────────────────────────────────────────
+    zscore_cluster_table <- reactive({
+      mat_z <- zscore_heatmap_data()
+      cl <- zscore_clusters()
+      req(cl)
+
+      cond_means <- zscore_cond_means()
+      conditions <- colnames(cond_means)
+      cluster <- cl$cluster[rownames(mat_z)]
+      df <- data.frame(
+        Protein = rownames(mat_z),
+        Cluster = as.integer(cluster),
+        Cluster_Size = as.integer(table(cluster)[as.character(cluster)]),
+        # Condition where the cluster member peaks: a compact summary of the
+        # abundance profile that the heatmap block shows visually.
+        Peak_Condition = colnames(cond_means)[max.col(
+          replace(cond_means, is.na(cond_means), -Inf),
+          ties.method = "first"
+        )],
+        stringsAsFactors = FALSE,
+        check.names = FALSE
+      )
+      df <- cbind(
+        df,
+        as.data.frame(
+          round(cond_means, 3),
+          check.names = FALSE
+        ) |>
+          setNames(paste0("mean_z_", conditions))
+      )
+
+      # Attach the strongest limma call per protein when a fit is available,
+      # so a downloaded cluster can be read alongside the statistics.
+      lr <- tryCatch(limma_results_ev()$limma_results, error = function(e) NULL)
+      if (!is.null(lr) && all(c("Protein", "adj.P.Val") %in% names(lr))) {
+        best <- lr |>
+          dplyr::filter(Protein %in% df$Protein, !is.na(adj.P.Val)) |>
+          dplyr::group_by(Protein) |>
+          dplyr::slice_min(adj.P.Val, n = 1, with_ties = FALSE) |>
+          dplyr::ungroup() |>
+          dplyr::transmute(
+            Protein,
+            Best_Contrast = comparison,
+            Best_logFC = round(logFC, 3),
+            Best_adj_P = signif(adj.P.Val, 3),
+            Status = status
+          )
+        df <- dplyr::left_join(df, best, by = "Protein")
+      }
+
+      df[order(df$Cluster, df$Protein), ] |>
+        `rownames<-`(NULL)
+    })
+
+    output$heatmap_cluster_table <- DT::renderDataTable({
+      req(zscore_cluster_table())
+      DT::datatable(
+        zscore_cluster_table(),
+        rownames = FALSE,
+        filter = "top",
+        extensions = "Buttons",
+        options = list(
+          pageLength = 15,
+          scrollX = TRUE,
+          dom = "Blfrtip",
+          buttons = list(
+            list(
+              extend = "csv",
+              text = "Download filtered (CSV)",
+              exportOptions = list(modifier = list(search = "applied"))
+            )
+          )
+        ),
+        class = "display compact"
+      )
+    })
+
+    output$download_cluster_table <- downloadHandler(
+      filename = function() {
+        paste0("zscore_protein_clusters_", Sys.Date(), ".tsv")
+      },
+      content = function(file) {
+        data.table::fwrite(
+          zscore_cluster_table(),
+          file = file,
+          sep = "\t",
+          na = "NA"
+        )
+      }
+    )
+
+    # ── Per-cluster abundance profiles ───────────────────────────────────────
+    cluster_profile_data <- reactive({
+      cm <- zscore_cond_means()
+      cl <- zscore_clusters()
+      req(cl)
+
+      df <- data.frame(
+        Protein = rep(rownames(cm), times = ncol(cm)),
+        Condition = factor(
+          rep(colnames(cm), each = nrow(cm)),
+          levels = colnames(cm)
+        ),
+        Mean_Z = as.vector(cm),
+        stringsAsFactors = FALSE
+      )
+      df$Cluster <- cl$cluster[df$Protein]
+      sizes <- table(cl$cluster)
+      df$Cluster_Label <- factor(
+        sprintf(
+          "Cluster %s (n = %d)",
+          df$Cluster,
+          sizes[as.character(df$Cluster)]
+        ),
+        levels = sprintf(
+          "Cluster %s (n = %d)",
+          levels(cl$cluster),
+          as.integer(sizes)
+        )
+      )
+      df
+    })
+
+    output$cluster_profile_ui <- renderUI({
+      cl <- zscore_clusters()
+      req(cl)
+      n_rows <- ceiling(cl$k / 3)
+      plotOutput(
+        ns("cluster_profile_plot"),
+        height = paste0(max(320L, n_rows * 260L), "px")
+      )
+    })
+
+    # Shared builder so the on-screen panel and the batch export render the
+    # same figure from the same clustering.
+    build_cluster_profile_plot <- function() {
+      df <- cluster_profile_data()
+      if (is.null(df) || nrow(df) == 0) {
+        return(NULL)
+      }
+
+      summ <- df |>
+        dplyr::group_by(Cluster, Cluster_Label, Condition) |>
+        dplyr::summarise(
+          Mean = mean(Mean_Z, na.rm = TRUE),
+          SD = stats::sd(Mean_Z, na.rm = TRUE),
+          .groups = "drop"
+        ) |>
+        dplyr::mutate(SD = dplyr::coalesce(SD, 0))
+
+      # Cluster is deliberately mapped to both facet and colour so the panels
+      # key back to the heatmap's cluster annotation.
+      ggplot(summ, aes(x = Condition, group = Cluster)) +
+        geom_hline(yintercept = 0, linetype = "dashed", colour = "grey60") +
+        geom_line(
+          data = df,
+          aes(y = Mean_Z, group = Protein),
+          colour = "grey70",
+          alpha = 0.35,
+          linewidth = 0.3
+        ) +
+        geom_ribbon(
+          aes(ymin = Mean - SD, ymax = Mean + SD, fill = Cluster),
+          alpha = 0.25
+        ) +
+        geom_line(aes(y = Mean, colour = Cluster), linewidth = 1.2) +
+        geom_point(aes(y = Mean, colour = Cluster), size = 2.5) +
+        facet_wrap(~Cluster_Label, ncol = 3) +
+        scale_colour_manual(values = zscore_cluster_colors()) +
+        scale_fill_manual(values = zscore_cluster_colors()) +
+        labs(x = NULL, y = "Mean Z-score") +
+        theme_bw() +
+        theme(
+          text = element_text(size = 14),
+          strip.text = element_text(face = "bold", size = 12),
+          strip.background = element_blank(),
+          axis.text.x = element_text(
+            angle = 45,
+            hjust = 1,
+            face = "bold",
+            colour = "black"
+          ),
+          axis.text.y = element_text(face = "bold", colour = "black"),
+          axis.title = element_text(face = "bold"),
+          legend.position = "none"
+        )
+    }
+
+    output$cluster_profile_plot <- renderPlot({
+      shinyjs::show(id = "sp_cluster_profile")
+      on.exit(shinyjs::hide(id = "sp_cluster_profile"), add = TRUE)
+      p <- build_cluster_profile_plot()
+      req(!is.null(p))
+      p
+    })
+
+    # ── GO enrichment on heatmap clusters ────────────────────────────────────
+    observe({
+      cl <- zscore_clusters()
+      req(cl)
+      sizes <- as.integer(table(cl$cluster))
+      choices <- setNames(
+        levels(cl$cluster),
+        sprintf("Cluster %s (n = %d)", levels(cl$cluster), sizes)
+      )
+      keep <- intersect(isolate(input$cluster_ora_clusters), choices)
+      updateSelectizeInput(
+        session,
+        "cluster_ora_clusters",
+        choices = choices,
+        selected = if (length(keep) > 0) keep else choices
+      )
+    })
+
+    cluster_ora_ev <- eventReactive(input$run_cluster_ora, {
+      cl <- zscore_clusters()
+      req(cl)
+      selected <- input$cluster_ora_clusters
+      if (is.null(selected) || length(selected) == 0) {
+        stop("Select at least one cluster to enrich.", call. = FALSE)
+      }
+
+      withProgress(
+        message = "GO enrichment on protein clusters...",
+        value = 0.1,
+        {
+          taxon_id <- trimws(input$uniprot_taxon %||% "")
+          ont <- input$cluster_ora_ontology %||% "BP"
+          fdr_cutoff <- input$cluster_ora_fdr %||% 0.2
+          if (!is.numeric(fdr_cutoff) || is.na(fdr_cutoff) || fdr_cutoff <= 0) {
+            fdr_cutoff <- 0.2
+          }
+          fdr_cutoff <- min(fdr_cutoff, 1)
+
+          incProgress(0.2, detail = "Resolving organism annotation (OrgDb)")
+          cached <- go_background_cache()
+          if (!is.null(cached) && identical(cached$taxon, taxon_id)) {
+            orgdb <- cached$orgdb
+          } else {
+            orgdb <- ensure_orgdb(taxon_id)
+            go_background_cache(list(taxon = taxon_id, orgdb = orgdb))
+          }
+
+          # Background is every quantified protein, not just the heatmap rows:
+          # the heatmap is already a variance- or significance-filtered subset,
+          # so using it as the universe would test the clusters against their
+          # own selection and inflate enrichment.
+          incProgress(0.35, detail = "Resolving protein identifiers")
+          universe <- unique(extract_uniprot_lookup_id(rownames(raw_matrix())))
+          keytype <- detect_go_keytype(universe)
+
+          gene_clusters <- lapply(selected, function(k) {
+            unique(extract_uniprot_lookup_id(
+              names(cl$cluster)[as.character(cl$cluster) == k]
+            ))
+          })
+          names(gene_clusters) <- paste("Cluster", selected)
+          gene_clusters <- gene_clusters[
+            vapply(gene_clusters, length, integer(1)) > 0
+          ]
+          if (length(gene_clusters) == 0) {
+            stop("The selected clusters contain no proteins.", call. = FALSE)
+          }
+
+          incProgress(0.6, detail = "Running enrichGO per cluster...")
+          enrich_df <- tryCatch(
+            run_per_contrast_enrichment(
+              gene_clusters = gene_clusters,
+              orgdb = orgdb,
+              keytype = keytype,
+              universe = universe,
+              ont = ont,
+              pvalue_cutoff = fdr_cutoff,
+              qvalue_cutoff = fdr_cutoff
+            ),
+            error = function(e) {
+              stop(
+                "clusterProfiler enrichment failed (",
+                conditionMessage(e),
+                "). Verify the organism and that the protein IDs map to the ",
+                "selected OrgDb keyType (",
+                keytype,
+                ").",
+                call. = FALSE
+              )
+            }
+          )
+
+          if (is.null(enrich_df)) {
+            stop(
+              "enrichGO found no GO terms passing the adj. p-value cutoff of ",
+              fdr_cutoff,
+              " for any selected cluster. Try raising the cutoff, changing the ",
+              "GO category, or using fewer/larger clusters.",
+              call. = FALSE
+            )
+          }
+
+          enrich_df$Cluster <- factor(
+            as.character(enrich_df$Group),
+            levels = names(gene_clusters)
+          )
+          enrich_df$Group <- NULL
+          enrich_df$GeneRatio_num <- parse_ratio_fraction(enrich_df$GeneRatio)
+
+          incProgress(1.0, detail = "Rendering outputs")
+          enrich_df
+        }
+      )
+    })
+
+    cluster_ora_top <- reactive({
+      df <- cluster_ora_ev()
+      req(!is.null(df))
+      top_n <- as.integer(input$cluster_ora_top_n %||% 8)
+      if (is.na(top_n) || top_n < 1) {
+        top_n <- 8L
+      }
+      df |>
+        dplyr::group_by(Cluster) |>
+        dplyr::slice_min(p.adjust, n = top_n, with_ties = FALSE) |>
+        dplyr::ungroup()
+    })
+
+    output$cluster_ora_plot_ui <- renderUI({
+      attempt <- tryCatch(
+        cluster_ora_ev(),
+        shiny.silent.error = function(e) "not_run",
+        error = function(e) {
+          showNotification(
+            paste("Cluster GO enrichment failed:", conditionMessage(e)),
+            type = "error",
+            duration = 10
+          )
+          "error"
+        }
+      )
+      if (identical(attempt, "not_run")) {
+        return(tags$p(
+          style = "color:#adb5bd;text-align:center;padding:20px;",
+          "Select clusters and click 'Run GO enrichment on clusters'."
+        ))
+      }
+      if (identical(attempt, "error")) {
+        return(tags$p(
+          style = "color:#e07070;text-align:center;padding:20px;",
+          "Cluster GO enrichment encountered an error. Check the notification for details."
+        ))
+      }
+      n_terms <- nrow(tryCatch(cluster_ora_top(), error = function(e) attempt))
+      plotOutput(
+        ns("cluster_ora_plot"),
+        height = paste0(max(400L, as.integer(n_terms) * 26L + 140L), "px")
+      )
+    })
+
+    build_cluster_ora_plot <- function() {
+      df <- cluster_ora_top()
+      if (is.null(df) || nrow(df) == 0) {
+        return(NULL)
+      }
+
+      df <- df |>
+        dplyr::mutate(
+          Description = tidytext::reorder_within(
+            Description,
+            GeneRatio_num,
+            Cluster
+          )
+        )
+
+      ggplot(
+        df,
+        aes(x = GeneRatio_num, y = Description, size = Count, colour = p.adjust)
+      ) +
+        geom_point() +
+        tidytext::scale_y_reordered() +
+        facet_wrap(~Cluster, scales = "free_y", ncol = 1) +
+        scale_colour_viridis_c(option = "plasma", direction = -1) +
+        labs(
+          x = "Gene ratio",
+          y = NULL,
+          colour = "adj. p-value",
+          size = "Count"
+        ) +
+        theme_bw() +
+        theme(
+          text = element_text(size = 13),
+          strip.text = element_text(face = "bold", size = 12),
+          strip.background = element_blank(),
+          axis.text.y = element_text(colour = "black"),
+          axis.title = element_text(face = "bold")
+        )
+    }
+
+    output$cluster_ora_plot <- renderPlot({
+      shinyjs::show(id = "sp_cluster_ora")
+      on.exit(shinyjs::hide(id = "sp_cluster_ora"), add = TRUE)
+      p <- build_cluster_ora_plot()
+      req(!is.null(p))
+      p
+    })
+
+    output$cluster_ora_table <- DT::renderDataTable({
+      df <- tryCatch(
+        cluster_ora_ev(),
+        shiny.silent.error = function(e) NULL,
+        error = function(e) NULL
+      )
+      req(!is.null(df), nrow(df) > 0)
+      keep <- intersect(
+        c(
+          "Cluster",
+          "ONTOLOGY",
+          "ID",
+          "Description",
+          "GeneRatio",
+          "BgRatio",
+          "pvalue",
+          "p.adjust",
+          "qvalue",
+          "Count",
+          "geneID"
+        ),
+        names(df)
+      )
+      out <- df[, keep, drop = FALSE]
+      for (col in intersect(c("pvalue", "p.adjust", "qvalue"), names(out))) {
+        out[[col]] <- signif(out[[col]], 3)
+      }
+      DT::datatable(
+        out,
+        rownames = FALSE,
+        filter = "top",
+        options = list(pageLength = 10, scrollX = TRUE),
+        class = "display compact"
+      )
+    })
+
+    output$download_cluster_ora <- downloadHandler(
+      filename = function() {
+        paste0("cluster_GO_enrichment_", Sys.Date(), ".tsv")
+      },
+      content = function(file) {
+        data.table::fwrite(
+          cluster_ora_ev(),
+          file = file,
+          sep = "\t",
+          na = "NA"
+        )
+      }
+    )
 
     # ── UpSet — Proteins by Condition ──────────────────────────────────────────────
     upset_sets <- reactive({
@@ -6089,8 +6888,6 @@ PwrQuant_server <- function(id) {
       sets[vapply(sets, length, integer(1)) > 0]
     })
 
-    # Build a tidy table mapping each protein to its exact intersection
-    # (the combination of conditions in which it was detected).
     upset_table_data <- reactive({
       sets <- upset_sets()
       req(length(sets) >= 1)
@@ -6098,7 +6895,6 @@ PwrQuant_server <- function(id) {
       all_proteins <- sort(unique(unlist(sets, use.names = FALSE)))
       cond_names <- names(sets)
 
-      # Presence matrix: proteins x conditions
       presence <- vapply(
         sets,
         function(members) all_proteins %in% members,
