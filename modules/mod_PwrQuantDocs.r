@@ -228,7 +228,7 @@ PwrQuantDocs_body_ui <- function(id) {
                 c("UpSet", "Detection overlap between conditions", "Upload"),
                 c(
                   "Z-Score Heatmap",
-                  "Clustered abundance heatmap",
+                  "Clustered abundance heatmap, cluster membership table, per-cluster profiles and cluster GO enrichment",
                   "Upload / limma"
                 )
               )
@@ -1149,13 +1149,12 @@ PwrQuantDocs_body_ui <- function(id) {
               tags$li(
                 tags$b("Z-Score Heatmap"),
                 " \u2014 row-scaled abundances with ",
-                "hierarchical clustering. ",
-                tags$code("sig_reliable"),
-                " restricts to significant proteins; ",
-                tags$code("top_n"),
-                " takes the most variable N. Note that clustering on ",
-                "significant proteins will always look clean, because those ",
-                "proteins were selected for separating the groups."
+                "hierarchical clustering, a cluster membership table, ",
+                "per-cluster abundance profiles and GO enrichment of ",
+                "individual clusters. See the ",
+                tags$b("Z-score heatmap"),
+                " tab of this guide for the scaling, the clustering and the ",
+                "circularity caveats."
               ),
               tags$li(
                 tags$b("Selected Proteins"),
@@ -1186,15 +1185,293 @@ PwrQuantDocs_body_ui <- function(id) {
                 c("Download STRING network", "PNG at 200 dpi"),
                 c("Download UpSet table", "Protein-to-intersection mapping"),
                 c(
+                  "Download cluster table (TSV)",
+                  "<code>zscore_protein_clusters_DATE.tsv</code> &mdash; the complete heatmap cluster table"
+                ),
+                c(
+                  "Download filtered (CSV) <i>(inside the cluster table)</i>",
+                  "Only the rows left by the active column filters &mdash; the quickest way to export a single cluster"
+                ),
+                c(
+                  "Download cluster GO results (TSV)",
+                  "<code>cluster_GO_enrichment_DATE.tsv</code> &mdash; every term that passed, for every selected cluster"
+                ),
+                c(
                   "Download all plots",
-                  "Zip of every figure in the module at 300 dpi"
+                  "Zip of every figure in the module at 300 dpi, including <code>zscore_heatmap.png</code>, <code>cluster_abundance_profiles.png</code> and (if it has been run) <code>cluster_GO_enrichment.png</code>"
                 )
               )
             )
           )
         ),
 
-        # ── 6. Troubleshooting ──────────────────────────────────────────────
+        # ── 6. Z-score heatmap & clusters ───────────────────────────────────
+        tabPanel(
+          "Z-score heatmap",
+          div(
+            class = "pq-doc",
+            tags$h3("What the colours mean"),
+            tags$p(
+              "Every row is scaled independently, so the heatmap shows ",
+              tags$i("relative"),
+              " abundance within each protein:"
+            ),
+            pq_eq(
+              "z[g,i]  =  ( x[g,i] \u2212 mean_i x[g,i] )  /  sd_i x[g,i]"
+            ),
+            tags$p(
+              "for protein ",
+              tags$code("g"),
+              " in sample ",
+              tags$code("i"),
+              ", computed with ",
+              tags$code("t(scale(t(mat)))"),
+              " over all samples in the plot. A cell therefore reads as ",
+              tags$i("standard deviations from that protein's own mean"),
+              ", and the colour scale saturates at \u00b12 (blue \u22122, white 0, ",
+              "red +2) \u2014 anything beyond \u00b12 SD is drawn in the same colour."
+            ),
+            pq_warn(
+              tags$b("Row scaling destroys magnitude."),
+              " A protein swinging ",
+              "10-fold and one swinging 5% look identical if their noise ",
+              "scales in proportion. Never read effect size off this plot; ",
+              "the volcano/MA plots and the ",
+              tags$b("Selected Proteins"),
+              " view are where fold changes live."
+            ),
+            tags$ul(
+              tags$li(
+                "A row with zero variance gives ",
+                tags$code("sd = 0"),
+                " and hence ",
+                tags$code("NaN"),
+                "; those cells are set to 0 and drawn neutral."
+              ),
+              tags$li(
+                "Rows with no observed value at all are dropped; remaining ",
+                "missing cells are drawn grey."
+              ),
+              tags$li(
+                "Columns are ",
+                tags$b("not"),
+                " clustered \u2014 samples are ordered by condition so the ",
+                "condition annotation reads as contiguous blocks."
+              ),
+              tags$li(
+                "Row names are only printed when 80 or fewer proteins are ",
+                "shown; the row dendrogram is always drawn."
+              )
+            ),
+
+            tags$h3("Which proteins are shown"),
+            pq_table(
+              c("Strategy", "Matrix used", "Selection"),
+              list(
+                c(
+                  "Top N Proteins <i>(default, N = 50)</i>",
+                  "<code>log2(raw + 1)</code> &mdash; <b>not</b> normalized, batch-corrected or imputed",
+                  "The N rows with the highest variance across all samples"
+                ),
+                c(
+                  "Significant &amp; Reliable",
+                  "The normalized, batch-corrected matrix produced by the limma run",
+                  "Any protein whose status is not <code>Not significant</code> in at least one contrast"
+                )
+              )
+            ),
+            pq_warn(
+              tags$b("The two strategies read different matrices."),
+              " Switching between them changes the protein set ",
+              tags$i("and"),
+              " the underlying values, so a block that appears or vanishes ",
+              "may be a preprocessing artefact rather than biology. ",
+              tags$code("top_n"),
+              " in particular shows uncorrected data: when batch effects are ",
+              "present, the highest-variance proteins are frequently the ",
+              "batch-driven ones. Compare against the PCA panels in ",
+              tags$b("Pre-processing QC"),
+              " before interpreting."
+            ),
+            pq_note(
+              tags$b("Significant proteins always cluster well."),
+              " Under ",
+              tags$code("sig_reliable"),
+              " the rows were selected precisely because they separate the ",
+              "groups, so clean blocks are guaranteed by construction. The ",
+              "heatmap displays that selection; it is not independent ",
+              "evidence for it."
+            ),
+
+            tags$h3("Row clustering"),
+            pq_table(
+              c("Step", "Implementation", "Consequence"),
+              list(
+                c(
+                  "Distance",
+                  "Euclidean on the z-scored rows, with <code>NA</code> replaced by 0 beforehand",
+                  "After scaling, 0 <i>is</i> the row mean, so a missing value reads as &ldquo;average&rdquo; and pulls sparse proteins toward flat profiles"
+                ),
+                c(
+                  "Linkage",
+                  "<code>hclust()</code> default, i.e. complete linkage",
+                  "Favours compact, similarly sized clusters; chaining is unlikely"
+                ),
+                c(
+                  "Cut",
+                  "<code>cutree(hc, k)</code>, k set in the tab (default 4, clamped to [2, n&minus;1])",
+                  "Labels are renumbered in dendrogram order, so cluster 1 is the top block and the table reads in plot order"
+                )
+              )
+            ),
+            tags$p(
+              "Because the cut is made on one tree, raising ",
+              tags$b("k"),
+              " subdivides existing blocks and never re-mixes them: k behaves ",
+              "as a zoom level on the same structure, not as a different ",
+              "model. There is no automatic criterion for it here \u2014 choosing ",
+              "k is a display decision, not an inference."
+            ),
+            pq_warn(
+              tags$b("Cluster numbers are not portable."),
+              " They are only ",
+              "meaningful within one configuration. Change the filtering ",
+              "strategy, N, or k and the numbering changes. Do not carry a ",
+              "cluster ID across runs or compare it with another dataset."
+            ),
+            pq_note(
+              "The clustering is fully deterministic \u2014 ",
+              tags$code("hclust"),
+              " and ",
+              tags$code("cutree"),
+              " have no random component, so identical settings reproduce ",
+              "identical clusters and no seed is involved. To make a figure ",
+              "reproducible, record the filtering strategy, N, k, and the ",
+              "distance/linkage above."
+            ),
+
+            tags$h3("Cluster table"),
+            pq_table(
+              c("Column", "Meaning"),
+              list(
+                c("<code>Protein</code>", "Row identifier as uploaded"),
+                c(
+                  "<code>Cluster</code>",
+                  "Cluster index; 1 is the top block of the heatmap"
+                ),
+                c(
+                  "<code>Cluster_Size</code>",
+                  "Number of proteins in that cluster"
+                ),
+                c(
+                  "<code>Peak_Condition</code>",
+                  "Condition with the highest mean z-score for that protein; ties resolve to the first"
+                ),
+                c(
+                  "<code>mean_z_&lt;Condition&gt;</code>",
+                  "Mean z-score across the replicates of that condition, rounded to 3 decimals; <code>NA</code> if the protein is absent from every sample of the group"
+                ),
+                c(
+                  "<code>Best_Contrast</code>, <code>Best_logFC</code>, <code>Best_adj_P</code>, <code>Status</code>",
+                  "Only present once limma has been run: the contrast with the <i>smallest</i> adjusted p-value for that protein, and its call"
+                )
+              )
+            ),
+            tags$p(
+              "The column filters at the top of the table isolate a cluster in ",
+              "one click. Two download routes are offered and they differ: ",
+              tags$b("Download filtered (CSV)"),
+              " inside the table exports exactly the rows left by the active ",
+              "filters and search, while ",
+              tags$b("Download cluster table (TSV)"),
+              " above it always writes the complete table."
+            ),
+
+            tags$h3("Cluster abundance profiles"),
+            tags$p(
+              "One facet per cluster, plotting the mean z-score per condition. ",
+              "Thin grey lines are individual proteins, the thick line is the ",
+              "cluster mean and the ribbon is \u00b11 SD of the member proteins."
+            ),
+            pq_warn(
+              tags$b("The ribbon is dispersion, not uncertainty."),
+              " It is the ",
+              "spread of proteins within the cluster \u2014 not a confidence ",
+              "interval, not a standard error, and it does not shrink as you ",
+              "add replicates. Two clusters whose ribbons do not overlap have ",
+              tags$i("not"),
+              " thereby been shown to differ."
+            ),
+            tags$p(
+              "Cluster means are separated by construction: separating them is ",
+              "what the clustering optimised. Read these panels for the ",
+              tags$i("shape"),
+              " of each block \u2014 monotone, condition-specific, flat \u2014 and take ",
+              "statistical claims from the limma contrasts instead."
+            ),
+
+            tags$h3("GO enrichment of selected clusters"),
+            tags$p(
+              "Builds one gene set per selected cluster and runs ",
+              tags$code("clusterProfiler::enrichGO"),
+              " on each, reusing the organism (OrgDb), identifier detection ",
+              "and annotation cache described under ",
+              tags$b("Enrichment & networks"),
+              ". The organism is the one chosen in the sidebar."
+            ),
+            pq_table(
+              c("Control", "Default", "Guidance"),
+              list(
+                c(
+                  "Clusters to enrich",
+                  "all",
+                  "Enrich a subset when only one or two blocks are of interest; each cluster is an independent gene set."
+                ),
+                c(
+                  "GO category",
+                  "BP",
+                  "BP is the default here because cluster profiles usually prompt mechanistic questions."
+                ),
+                c(
+                  "Term FDR cutoff",
+                  "0.2",
+                  "Same exploratory rationale as the contrast ORA; tighten to 0.05 for claims."
+                ),
+                c(
+                  "Terms per cluster",
+                  "8",
+                  "Display only &mdash; the table and TSV download always contain every term that passed."
+                )
+              )
+            ),
+            pq_note(
+              tags$b("Background universe."),
+              " The universe is every protein ",
+              "in the uploaded matrix, not the proteins drawn in the heatmap. ",
+              "Using the heatmap rows would test each cluster against a set ",
+              "that was already filtered for variance or significance, which ",
+              "inflates enrichment."
+            ),
+            pq_warn(
+              tags$b("This is circular and should be reported as descriptive."),
+              " The clusters were defined from the same data the enrichment ",
+              "then tests, and the p-values make no allowance for that ",
+              "selection. Treat the terms as labels that help name each block, ",
+              "not as confirmatory enrichment. Under ",
+              tags$code("top_n"),
+              " the entire input is additionally a high-variance selection, so ",
+              "broad terms tied to abundant or variable proteins can surface ",
+              "in several clusters at once."
+            ),
+            tags$p(
+              "The dotplot places gene ratio on the x-axis, point size as the ",
+              "number of genes hit, and colour as the adjusted p-value, with ",
+              "one panel per cluster."
+            )
+          )
+        ),
+
+        # ── 7. Troubleshooting ──────────────────────────────────────────────
         tabPanel(
           "Troubleshooting",
           div(
@@ -1377,6 +1654,20 @@ PwrQuantDocs_body_ui <- function(id) {
                 "Szklarczyk D, Kirsch R, Koutrouli M, et al. ",
                 tags$i("The STRING database in 2023."),
                 " Nucleic Acids Research. 2023;51(D1):D638-D646."
+              ),
+              tags$li(
+                "Gu Z, Eils R, Schlesner M. ",
+                tags$i(
+                  "Complex heatmaps reveal patterns and correlations in multidimensional genomic data."
+                ),
+                " Bioinformatics. 2016;32(18):2847-2849."
+              ),
+              tags$li(
+                "Kriegeskorte N, Simmons WK, Bellgowan PSF, Baker CI. ",
+                tags$i(
+                  "Circular analysis in systems neuroscience: the dangers of double dipping."
+                ),
+                " Nature Neuroscience. 2009;12(5):535-540."
               )
             )
           )
