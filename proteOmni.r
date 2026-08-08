@@ -38,7 +38,6 @@ CRAN_packages <- c(
   "lavaan",
   "naniar",
   "patchwork",
-  "pwr",
   "missForest",
   "data.table"
 )
@@ -171,7 +170,6 @@ writeLines(
   "clusterProfiler",
   "enrichplot",
   "patchwork",
-  "pwr",
   "missForest",
   "naniar",
   "DT",
