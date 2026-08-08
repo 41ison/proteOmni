@@ -41,7 +41,8 @@
 - **Deep QC Insights** — Generate detailed metrics including protease fingerprints, sequence logos, mass accuracy (ppm), retention time prediction errors, charge state and peptide length distributions, missed cleavages, GRAVY index, and isoelectric point (pI) profiles.
 - **Interactive Visualization** — Explore 3D QuantUMS score distributions, interactive PCA plots, sample correlation matrices, cosine/Euclidean/Jaccard similarity heatmaps, and annotated MS/MS fragmentation spectra directly in the browser.
 - **Peptide-to-Protein Mapping** — Map identified peptides onto user-provided FASTA sequences with a colour-coded protein sequence viewer.
-- **Differential Abundance Analysis** — Full limma-based workflow with normalization, batch correction (ComBat/SVA), flexible missing value imputation (KNN, MinProb, BPCA or missForest), MA plots, volcano plots, and statistical power simulation.
+- **Differential Abundance Analysis** — Full limma-based workflow with normalization, batch correction (ComBat/SVA), flexible missing value imputation (KNN, MinProb, BPCA or missForest), MA plots, volcano plots, and a simulation-based prospective power analysis.
+- **Prospective Power / Sensitivity Analysis** — Minimum detectable difference (MDD) estimated by simulating fresh datasets from the fitted empirical Bayes priors, spiking in known fold changes, and re-running the real design through `lmFit` → `eBayes` → BH — optionally including intensity-dependent missingness and imputation. A replicate sweep answers "how many replicates would I need?".
 - **Functional Enrichment** — GO over-representation analysis (ORA) with `clusterProfiler::enrichGO`, run per contrast and split by regulation direction, using Bioconductor OrgDb annotation packages for 20 supported organisms.
 - **Protein-Protein Interaction Networks** — STRING interaction networks for the significant proteins of any contrast via the `STRINGdb` package, with nodes halo-coloured by up/down regulation and confidence-score edge filtering.
 - **Publication-Ready Output** — Download filtered result matrices and universally formatted plots (PNG/ZIP) ready for reporting and publication.
@@ -66,9 +67,11 @@
 
 proteOmni auto-installs all required packages on first launch. The key dependencies are:
 
-**CRAN packages:** `shiny`, `shinydashboard`, `shinyjs`, `fresh`, `tidyverse`, `tidytext`, `janitor`, `ggpointdensity`, `ggtext`, `ggrepel`, `ggseqlogo`, `lsa`, `vegan`, `plotly`, `viridis`, `ggfortify`, `seqinr`, `zip`, `DT`, `colourpicker`, `R6`, `gridExtra`, `scales`, `lavaan`, `naniar`, `patchwork`, `pwr`, `missForest`, `data.table`, `GGally`, `arrow`, `httr`, `jsonlite`, `BiocManager`
+**CRAN packages:** `shiny`, `shinydashboard`, `shinyjs`, `fresh`, `devtools`, `tidyverse`, `tidytext`, `janitor`, `ggpointdensity`, `ggtext`, `ggrepel`, `ggseqlogo`, `ggsci`, `lsa`, `vegan`, `plotly`, `viridis`, `RColorBrewer`, `ggfortify`, `seqinr`, `zip`, `DT`, `colourpicker`, `R6`, `gridExtra`, `scales`, `lavaan`, `naniar`, `patchwork`, `missForest`, `data.table`, `GGally`, `arrow`, `httr`, `jsonlite`, `BiocManager`
 
-**Bioconductor packages:** `limma`, `Biostrings`, `sva`, `impute`, `ComplexHeatmap`, `clusterProfiler`, `GO.db`, `enrichplot`, `AnnotationDbi`, `STRINGdb`
+**Bioconductor packages:** `limma`, `Biostrings`, `sva`, `impute`, `pcaMethods`, `ComplexHeatmap`, `clusterProfiler`, `GO.db`, `enrichplot`, `AnnotationDbi`, `STRINGdb`
+
+> The power analysis is implemented directly against limma's empirical Bayes objects and the non-central *t* distribution in base R, so the `pwr` package is **not** a dependency. See [Step 7](#step-7--power-analysis--minimum-detectable-difference-mdd) for why a textbook power calculation does not apply here.
 
 **OrgDb annotation packages (auto-installed on demand):** the organism selected in the PwrQuant *GO Enrichment* dropdown determines which Bioconductor `org.*` package is required (e.g. `org.Hs.eg.db` for human, `org.Mm.eg.db` for mouse). proteOmni installs the matching package via `BiocManager` the first time that organism is used. 20 organisms are supported — see [Step 9](#step-9--functional-enrichment-ora-with-clusterprofiler).
 
@@ -187,7 +190,7 @@ End-to-end differential abundance and statistical power analysis pipeline. Accep
 | **Pre-processing QC** | CV distributions per condition, mean–variance relationship (loess trend), raw and normalized abundance boxplots |
 | **Differential Abundance** | MA/Bland-Altman plots, volcano plots, top-20 DAP bar mirror chart, raw p-value histograms per contrast |
 | **Correlation** | Inter-contrast logFC scatter with Spearman ρ and concordant/inverse/mismatch classification |
-| **Power Statistics** | eBayes posterior variance vs. |logFC| reliability map — proteins above the minimum detectable fold-change at 80% power are reported for your control |
+| **Power Statistics** | Prospective MDD power curve from simulated data, an MDD-vs-replicates design sweep, and a conditional per-protein sensitivity map (diagnostic only) |
 | **Enrichment** | GO over-representation analysis with `clusterProfiler::enrichGO`, run per contrast and split by up/down direction; results shown as a dotplot (top terms per contrast) and a Manhattan plot (all enriched terms), across 20 supported OrgDb organisms |
 | **Interaction Network** | STRING protein-protein interaction network (`STRINGdb`) for a selected contrast, with nodes halo-coloured by regulation and edges filtered by a confidence score; unmapped proteins are listed for transparency |
 | **UpSet Plots** | Visualize intersections of proteins across multiple sample groups; you can download the table |
@@ -325,8 +328,70 @@ The **eBayes trend** parameter (sidebar toggle) controls whether the prior varia
 - **Flat trend line** → `trend = FALSE`
 - **Positively sloped trend** → `trend = TRUE`
 
-### Step 7 — Power analysis
-`pwr::pwr.t.test` is used with the median replicate count per group, α = 0.05, and power = 0.80 to compute the minimum detectable effect size. Proteins with |logFC| ≥ this threshold are flagged as **reliable**, and the power map is visualised in the *Power Statistics* tab.
+### Step 7 — Power analysis / minimum detectable difference (MDD)
+
+The *Power Statistics* tab reports **two distinct quantities**. They answer different questions and should not be confused.
+
+#### 7a — Prospective MDD by simulation (the actual power statement)
+
+A textbook two-sample calculation (`pwr.t.test`, `power.t.test`) at α = 0.05 does not describe this pipeline, for three independent reasons:
+
+1. **The alpha is not the operating threshold.** Significance is called on BH-adjusted p-values across thousands of proteins. At the BH boundary the largest rejected raw p-value is `FDR × R / m` — with 5,000 proteins and 1,000 rejections that is 0.01, and far smaller with few rejections. Using 0.05 is anti-conservative.
+2. **The degrees of freedom are wrong.** A two-sample t-test has `2n − 2` df; the moderated statistic actually used has `2n − 2 + d₀`. Pairing a shrunken variance with unshrunken df is internally inconsistent, and conservative.
+3. **It is circular.** Comparing each protein's MDD against that same protein's observed fold change is the observed-power fallacy (see 7b).
+
+Errors (1) and (2) push in opposite directions, so a naive number can look plausible while being unjustifiable — the magnitude is not the real problem, the interpretation is.
+
+Instead, proteOmni simulates the pipeline end-to-end:
+
+1. Per-protein variances are drawn from the empirical Bayes prior estimated by `eBayes()` — $$\sigma^2_g \sim d_0 s_0^2 / \chi^2_{d_0}$$ (with `trend = TRUE`, `s2.prior` stays a per-protein function of abundance, preserving the mean–variance trend).
+2. Fresh abundance matrices are built at the protein mean intensities, and a known two-sided fold change is spiked into a random subset of proteins (proportion π₁).
+3. Optionally, values are knocked out using an **intensity-dependent (MNAR) dropout model** — a binomial GLM of missing-value counts on mean log2 abundance fitted to *your* matrix — and the same imputation used in Step 3 is applied.
+4. The **real** design and contrast matrices are pushed through `lmFit` → `contrasts.fit` → `eBayes` → BH, and power is measured as the fraction of spiked proteins recovered at the same FDR cutoff used on the real data.
+
+The **MDD** is the true log2 fold change at which the power curve crosses the target power, obtained by monotone interpolation. The realised false discovery proportion is also tracked as a sanity check on the BH machinery.
+
+Sidebar controls (under *Prospective MDD (simulation)*; runs on demand via **Run MDD simulation**):
+
+| Control | Default | Meaning |
+|---|---|---|
+| **Assumed proportion differential (π₁)** | 0.10 | Fraction of proteins truly changing — affects the BH threshold and therefore power. Use your observed hit rate as a guide; report the value, and check sensitivity at 0.01 and 0.30 if it sits near a decision boundary |
+| **Target power** | 0.80 | Convention. Raise to 0.90 for confirmatory work; the MDD rises accordingly |
+| **Max log₂FC tested** | 2 | Upper end of the grid. Raise if the summary reports the target power was never reached |
+| **log₂FC grid step** | 0.2 | Curve resolution. The crossing region is steep, so 0.1 gives a materially tighter estimate; 0.2 is adequate for a first look |
+| **Simulations per grid point** | 5 | Monte Carlo replicates: 5 for exploration, ~20 for a number you intend to publish. Cost is linear |
+| **Random seed** | 4817 | Fixed for reproducibility. Change it to confirm a conclusion is not seed-specific |
+| **Include missingness + imputation** | on | Leave on for realism. Turn off to isolate how much sensitivity the missing-data handling costs |
+
+> **Double-counting caveat on the missingness arm.** The variance prior was itself estimated from already-imputed data, so the gap between the missingness and complete-data arms measures the *marginal* cost of a second imputation round — treat it as a lower bound on the true cost.
+
+**Outputs.** A power curve per contrast with a shaded 95% Monte Carlo band (a wide band means more simulations are needed) and a dashed vertical line at the MDD, plus a summary table:
+
+| Column | Meaning |
+|---|---|
+| `MDD (log2FC)` | Fold change, in log2 units, detectable at the target power |
+| `MDD (fold change)` | The same number on a linear scale — the one to quote in a manuscript |
+| `Mean realised FDP` | Ground-truth false discovery proportion. Because the simulation knows the truth, it can verify BH is delivering the requested FDR; a value meaningfully above your cutoff is evidence that a pipeline step (usually imputation) is breaking FDR control |
+| `Note` | Flags a target power never reached, or already reached at the smallest fold change tested |
+
+**Replicate sweep** (**Run replicate sweep**; comma-separated grid in the sidebar, minimum 2, default `3,4,5,6,8,10,12,15` — include your current *n* so the plot has a reference point) rebuilds a balanced design at each replicate count and reruns the simulation with the variance prior held fixed, answering the design question directly. Expect roughly $$1/\sqrt{n}$$ behaviour, degrading at the low end where the df penalty bites, with returns typically flattening past about eight replicates. Because only the crossing point is needed, the sweep brackets and bisects rather than scanning the grid.
+
+Two limits: the prior is held fixed across the sweep (defensible — it is a property of the assay, not the sample size — but it was estimated at your current residual df, so the small-*n* end is optimistic about how well eBayes would shrink), and when the requested replicate count equals the min-valid floor, no dropout can be simulated, so that row shows 0% missingness by construction.
+
+A defensible way to report the result: *"At 80% power and a 5% BH-FDR, and assuming 10% of proteins are differentially abundant, this design resolves a 1.4-fold change (0.49 log2). The estimate comes from parametric simulation using the empirical Bayes variance prior fitted to these data, including the observed intensity-dependent missingness."*
+
+#### 7b — Conditional per-protein sensitivity (diagnostic only)
+
+Shown in the *Conditional sensitivity* box and exported as `Conditional_MDD_Log2FC` in the downloaded results. It fixes errors (1) and (2) above but not (3), which is why it is labelled a diagnostic.
+
+For each protein, the log2 fold change that would have been needed to reach the target power **given that protein's posterior variance** is computed from the non-central *t* distribution at:
+
+- the moderated degrees of freedom, `df.residual + df.prior`, and
+- the per-test alpha implied by the BH criterion, `FDR × R / m` (falling back to the Bonferroni-like floor `FDR / m` when there are no rejections).
+
+Unbalanced group sizes and non-pairwise contrasts are handled correctly because `stdev.unscaled` already encodes the design.
+
+> **This quantity is not used to call significance.** Filtering on an observed-variance MDD is the observed-power fallacy, and is algebraically vacuous: since `MDD_g = d · s_g` and `t_g = logFC_g / (s_g · √(2/n))`, the test `|logFC| ≥ MDD` reduces to `|t| ≥ d·√(n/2)` — a fixed cutoff on the *t* statistic, with the variance cancelling entirely. It adds no power information; it is just a second, hidden significance threshold. It is shown as a diagnostic map of posterior SD vs. |logFC| only.
 
 ### Step 8 — Results and significance calling
 A protein is called **significant** if:
@@ -476,6 +541,30 @@ source("/path/to/proteOmni/app/proteOmni.R")
 If you selected **missForest** as the imputation method, imputation can take 30–40 minutes for a typical 3,000-protein dataset with 3 conditions. This is expected — missForest builds one random forest per protein per group.
 
 **Solution:** switch to **KNN** (default, ~10,000× faster) or **MinProb** (~73,000× faster) in the *Imputation Method* dropdown, which appears in the sidebar when `robust` regression is selected. For most proteomics datasets with MNAR-type missingness, **MinProb** is the recommended choice.
+
+</details>
+
+<details>
+
+<summary><b>MDD simulation reports "target power not reached"</b></summary>
+
+The power curve never crossed the target within the tested fold-change range. Options, in rough order of preference:
+
+1. **Raise "Max log₂FC tested".** The default upper bound of 2 (a 4-fold change) may simply be below this design's sensitivity.
+2. **Check π₁.** A very small assumed proportion of differential proteins makes the BH threshold stringent and suppresses power. If π₁ is near a decision boundary, check sensitivity at 0.01 and 0.30.
+3. **Lower the target power**, or accept the honest conclusion that the design is underpowered for effects of the size you care about — the replicate sweep will tell you how many replicates would be needed.
+
+The mirror-image note, *"target power already reached at the smallest LFC tested"*, means the MDD is below the grid floor; lower the **log₂FC grid step** to resolve it.
+
+</details>
+
+<details>
+
+<summary><b>MDD simulation is slow</b></summary>
+
+Cost scales as (grid points) × (simulations per grid point) × (contrasts). Enabling **Include missingness + imputation** makes each evaluation roughly ten times more expensive, because `lmFit` falls back to a per-row fit as soon as NAs are present, and the chosen imputer runs on every simulated matrix.
+
+For a quick first pass, reduce **Simulations per grid point** to 3, coarsen the grid step to 0.5, and turn missingness off; then rerun at full settings for the number you intend to report. The replicate sweep already uses bisection instead of a full grid, so it is cheaper per design point than the main curve.
 
 </details>
 
