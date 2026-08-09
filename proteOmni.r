@@ -5,97 +5,10 @@
 ##          EncyclopeDIA (EncyclopeDIA - DIA), Sage (Sage - DDA/DIA QC)
 
 # ── Package installation ─────────────────────────────────────────────────────
-options(repos = c(CRAN = "https://cran.rstudio.com/"))
-CRAN_packages <- c(
-  "shiny",
-  "shinydashboard",
-  "shinyjs",
-  "fresh",
-  "devtools",
-  "BiocManager",
-  "tidyverse",
-  "tidytext",
-  "janitor",
-  "ggpointdensity",
-  "ggtext",
-  "ggrepel",
-  "ggseqlogo",
-  "GGally",
-  "ggsci",
-  "lsa",
-  "vegan",
-  "plotly",
-  "viridis",
-  "RColorBrewer",
-  "ggfortify",
-  "seqinr",
-  "zip",
-  "DT",
-  "colourpicker",
-  "R6",
-  "gridExtra",
-  "scales",
-  "lavaan",
-  "naniar",
-  "patchwork",
-  "missForest",
-  "data.table"
-)
-
-not_inst <- CRAN_packages[
-  !(CRAN_packages %in% installed.packages()[, "Package"])
-]
-if (length(not_inst)) {
-  install.packages(not_inst)
-}
-if (!requireNamespace("diann", quietly = TRUE)) {
-  pak::pak("https://github.com/vdemichev/diann-rpackage")
-}
-if (!requireNamespace("limma", quietly = TRUE)) {
-  BiocManager::install("limma", update = FALSE, ask = FALSE)
-}
-if (!requireNamespace("Biostrings", quietly = TRUE)) {
-  BiocManager::install("Biostrings", update = FALSE, ask = FALSE)
-}
-if (!requireNamespace("sva", quietly = TRUE)) {
-  BiocManager::install("sva", update = FALSE, ask = FALSE)
-}
-if (!requireNamespace("impute", quietly = TRUE)) {
-  BiocManager::install("impute", update = FALSE, ask = FALSE)
-}
-if (!requireNamespace("pcaMethods", quietly = TRUE)) {
-  BiocManager::install("pcaMethods", update = FALSE, ask = FALSE)
-}
-if (!requireNamespace("ComplexHeatmap", quietly = TRUE)) {
-  BiocManager::install("ComplexHeatmap", update = FALSE, ask = FALSE)
-}
-if (!requireNamespace("STRINGdb", quietly = TRUE)) {
-  BiocManager::install("STRINGdb", update = FALSE, ask = FALSE)
-}
-if (!requireNamespace("clusterProfiler", quietly = TRUE)) {
-  BiocManager::install("clusterProfiler", update = FALSE, ask = FALSE)
-}
-if (!requireNamespace("enrichplot", quietly = TRUE)) {
-  BiocManager::install("enrichplot", update = FALSE, ask = FALSE)
-}
-if (!requireNamespace("AnnotationDbi", quietly = TRUE)) {
-  BiocManager::install("AnnotationDbi", update = FALSE, ask = FALSE)
-}
-# Baseline OrgDb (human); other organisms are installed on demand by the
-# PwrQuant enrichment module via ensure_orgdb().
-if (!requireNamespace("org.Hs.eg.db", quietly = TRUE)) {
-  BiocManager::install("org.Hs.eg.db", update = FALSE, ask = FALSE)
-}
-if (!requireNamespace("httr", quietly = TRUE)) {
-  install.packages("httr")
-}
-if (!requireNamespace("jsonlite", quietly = TRUE)) {
-  install.packages("jsonlite")
-}
-Sys.setenv(LIBARROW_MINIMAL = "false", ARROW_WITH_ZSTD = "ON")
-if (!requireNamespace("arrow", quietly = TRUE)) {
-  install.packages("arrow")
-}
+# Dependency installation lives in bootstrap.R (base R only) and normally runs
+# from run.R *before* Shiny is loaded. This call is a no-op when run.R was used;
+# it is here so that sourcing/running this file directly still works.
+source("bootstrap.R")
 
 # ── Libraries ─────────────────────────────────────────────────────────────────
 library(shiny)
