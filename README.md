@@ -71,7 +71,7 @@ proteOmni auto-installs all required packages on first launch. The key dependenc
 
 **Bioconductor packages:** `limma`, `Biostrings`, `sva`, `impute`, `pcaMethods`, `ComplexHeatmap`, `clusterProfiler`, `GO.db`, `enrichplot`, `AnnotationDbi`, `STRINGdb`
 
-> The power analysis is implemented directly against limma's empirical Bayes objects and the non-central *t* distribution in base R, so the `pwr` package is **not** a dependency. See [Step 7](#step-7--power-analysis--minimum-detectable-difference-mdd) for why a textbook power calculation does not apply here.
+> The power analysis is implemented directly against limma's empirical Bayes objects and the non-central *t* distribution in base R, so the `pwr` package is **not** a dependency anymore. See [Step 7](#step-7--power-analysis--minimum-detectable-difference-mdd) for why a textbook power calculation does not apply here.
 
 **OrgDb annotation packages (auto-installed on demand):** the organism selected in the PwrQuant *GO Enrichment* dropdown determines which Bioconductor `org.*` package is required (e.g. `org.Hs.eg.db` for human, `org.Mm.eg.db` for mouse). proteOmni installs the matching package via `BiocManager` the first time that organism is used. 20 organisms are supported — see [Step 9](#step-9--functional-enrichment-ora-with-clusterprofiler).
 
@@ -101,17 +101,19 @@ Double-click `proteOmni_Windows.bat`. R must be on your system `PATH` (see [Trou
 
 ```r
 setwd("/path/to/proteOmni/app")
-shiny::runApp("proteOmni.R", launch.browser = TRUE)
+source("run.R")
 ```
 
 ### Option 3 — From the terminal
 
 ```bash
 cd /path/to/proteOmni/app
-Rscript -e "shiny::runApp('proteOmni.R', launch.browser = TRUE)"
+Rscript run.R
 ```
 
-> **First launch note:** On the first run, `proteOmni.R` will automatically check for and install any missing packages. This may take several minutes. Subsequent launches are fast.
+> **First launch note:** On the first run, `run.R` sources `bootstrap.R`, which checks for and installs any missing packages (including Shiny itself) before the app starts. This may take several minutes. Subsequent launches are fast.
+>
+> Always start proteOmni through `run.R`. Calling `shiny::runApp("proteOmni.R")` directly fails on a fresh R installation, because R has to load the `shiny` package before it ever reads the app file. If you only want to install dependencies without launching the app, run `Rscript -e 'source("bootstrap.R")'`.
 
 ---
 
