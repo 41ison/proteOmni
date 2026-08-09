@@ -16,5 +16,8 @@ echo   ^>^>  Opening in your default browser...
 echo.
 
 cd /d "%~dp0"
-Rscript -e "shiny::runApp('proteOmni.r', launch.browser = TRUE)"
+REM run.R installs any missing dependencies (including shiny itself) before
+REM starting the app. Do NOT call shiny::runApp() here: on a fresh R
+REM installation shiny does not exist yet.
+Rscript run.R
 pause

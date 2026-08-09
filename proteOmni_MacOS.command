@@ -14,4 +14,7 @@ echo "  🌐  Opening in your default browser..."
 echo ""
 
 cd "$SCRIPT_DIR"
-Rscript -e "shiny::runApp('proteOmni.r', launch.browser = TRUE)"
+# run.R installs any missing dependencies (including shiny itself) before
+# starting the app. Do NOT call shiny::runApp() here: on a fresh R installation
+# shiny does not exist yet.
+Rscript run.R
