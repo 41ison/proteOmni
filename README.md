@@ -64,7 +64,7 @@
 | **Browser** | Any modern browser | Chrome / Firefox |
 
 > [!IMPORTANT]
-> If you are using Windows, you will need to install [Rtools](https://cran.r-project.org/bin/windows/Rtools/). See troubleshooting for adding [Rscript] to your Environment Variables.
+> If you are using Windows, you will need to install [Rtools](https://cran.r-project.org/bin/windows/Rtools/). See troubleshooting for adding Rscript to your Environment Variables.
 
 ### R package dependencies
 
