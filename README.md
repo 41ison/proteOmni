@@ -59,9 +59,12 @@
 | Requirement | Minimum | Recommended |
 |---|---|---|
 | **R** | 4.2.0 | 4.5.0+ |
-| **OS** | Windows 10, macOS 12, Ubuntu 20.04 | Latest stable release |
+| **OS** | Windows 10, macOS, Linux | Latest stable release |
 | **RAM** | 8 GB | 16 GB+ (large DIA datasets) |
 | **Browser** | Any modern browser | Chrome / Firefox |
+
+> [!IMPORTANT]
+> If you are using Windows, you will need to install Rtools.
 
 ### R package dependencies
 
@@ -380,7 +383,8 @@ Sidebar controls (under *Prospective MDD (simulation)*; runs on demand via **Run
 
 Two limits: the prior is held fixed across the sweep (defensible — it is a property of the assay, not the sample size — but it was estimated at your current residual df, so the small-*n* end is optimistic about how well eBayes would shrink), and when the requested replicate count equals the min-valid floor, no dropout can be simulated, so that row shows 0% missingness by construction.
 
-A defensible way to report the result: *"At 80% power and a 5% BH-FDR, and assuming 10% of proteins are differentially abundant, this design resolves a 1.4-fold change (0.49 log2). The estimate comes from parametric simulation using the empirical Bayes variance prior fitted to these data, including the observed intensity-dependent missingness."*
+> [!TIP]
+> A defensible way to report the result: *"At 80% power and a 5% BH-FDR, and assuming 10% of proteins are differentially abundant, this design resolves a 1.4-fold change (0.49 log2). The estimate comes from parametric simulation using the empirical Bayes variance prior fitted to these data, including the observed intensity-dependent missingness."*
 
 #### 7b — Conditional per-protein sensitivity (diagnostic only)
 
