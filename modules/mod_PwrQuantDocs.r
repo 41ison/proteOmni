@@ -322,7 +322,7 @@ PwrQuantDocs_body_ui <- function(id) {
                 c(
                   "<code>knn</code>",
                   "MAR",
-                  "Borrows from the 5 most similar proteins within the same group. Shrinks variance, so p-values skew optimistic.",
+                  "Borrows from the 5 most similar proteins within the same group. Shrinks variance, so p-values skew optimistic &mdash; measurably so; see the warning below.",
                   "Fast"
                 ),
                 c(
@@ -344,6 +344,38 @@ PwrQuantDocs_body_ui <- function(id) {
                   "Moderate"
                 )
               )
+            ),
+            pq_warn(
+              tags$b("KNN inflates the false-discovery rate. "),
+              "Simulating through this pipeline \u2014 6 vs 6, effects spiked into ",
+              "10% of proteins, missingness replayed from a real matrix \u2014 a BH ",
+              "cut-off of 5% produced a realised FDR near 4% with no ",
+              "imputation, 7\u20138% with ",
+              tags$code("minprob"),
+              ", and 14\u201315% with ",
+              tags$code("knn"),
+              ". The gap widens as dropout worsens: roughly 19% once a quarter ",
+              "of the matrix sits below the detection limit, and 34% at 40%. ",
+              "What that bought was 2\u20134 percentage points of power."
+            ),
+            tags$p(
+              "The mechanism is the variance shrinkage noted in the table. ",
+              "Imputing a protein from its five nearest neighbours makes its ",
+              "replicates agree more closely than the measurements did, so ",
+              tags$code("eBayes"),
+              " sees less residual noise than the data actually contain and ",
+              "the moderated ",
+              tags$i("t"),
+              " statistics come out too large. Nothing downstream can recover ",
+              "the lost noise, and the BH correction is applied to p-values ",
+              "that are already too small. If a false positive is expensive, ",
+              "prefer ",
+              tags$code("ls"),
+              " mode and let limma fit each protein on the samples it has; if ",
+              "KNN is used, treat the hit list as a screen to be confirmed ",
+              "rather than a result. One dataset and one design were tested, so ",
+              "read the magnitudes as indicative \u2014 the direction is not in ",
+              "doubt, but the size of the inflation will depend on your data."
             ),
             tags$p(
               "Values still missing after imputation (typically a protein absent ",
