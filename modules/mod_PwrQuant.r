@@ -19,7 +19,7 @@ compute_cv_mtx <- function(protein_matrix, group_labels) {
 groupwise_imputation <- function(
   data,
   group_labels,
-  method = "knn",
+  method = "minprob",
   verbose = TRUE
 ) {
   # If the dataset has zero NAs, don't waste time trying to impute
@@ -1411,12 +1411,12 @@ PwrQuant_sidebar_ui <- function(id) {
           ns("imputation_method"),
           "Imputation Method (robust mode only)",
           choices = c(
-            "KNN — fast, MAR-appropriate" = "knn",
             "MinProb — fastest, MNAR-aware" = "minprob",
+            "KNN — fast, MAR-appropriate" = "knn",
             "missForest — accurate, very slow ☕" = "missforest",
             "Bayesian PCA — global latent-factor model" = "bpca"
           ),
-          selected = "knn"
+          selected = "minprob"
         )
       ),
       selectInput(
@@ -2951,7 +2951,7 @@ PwrQuant_server <- function(id) {
         reg_method <- ifelse(input$limma_method == "robust", "robust", "ls")
 
         if (reg_method == "robust") {
-          imp_method <- input$imputation_method %||% "knn"
+          imp_method <- input$imputation_method %||% "minprob"
           imp_labels <- c(
             knn = "KNN imputation",
             minprob = "MinProb imputation",
@@ -3157,7 +3157,7 @@ PwrQuant_server <- function(id) {
           min_valid_pct = input$min_valid_pct %||% 0,
           # NULL in least-squares mode, where limma handles NAs directly.
           impute_method = if (reg_method == "robust") {
-            input$imputation_method %||% "knn"
+            input$imputation_method %||% "minprob"
           } else {
             NULL
           }
