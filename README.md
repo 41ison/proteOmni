@@ -309,6 +309,7 @@ Imputation is performed when **Limma Regression Method** is set to `robust`. Fou
 | **missForest** | ~40 min | MAR / MCAR — random-forest multiple imputation | Maximum accuracy; small matrices are preferred |
 | **bPCA** | ~2 min | MAR / MCAR - BPCA borrows signal across all samples and conditions | Flexible statistical framework |
 
+> [!WARNING]
 > **Why missForest is slow:** after transposition, missForest receives a P-sample × N-protein matrix and builds one random forest per protein to predict missing values. For a typical proteomics dataset with 3,000 proteins across 3 groups, this means ~9,000 forests — reducing `ntree` or `maxiter` does not help because the bottleneck is the number of trees, not their depth. KNN is **~10,000× faster** and MinProb is **~73,000× faster** for equivalent datasets in our tests.
 
 When `ls` (ordinary least squares) regression is selected, imputation is skipped entirely and the raw log2 matrix is passed directly to limma.
@@ -397,6 +398,7 @@ For each protein, the log2 fold change that would have been needed to reach the 
 
 Unbalanced group sizes and non-pairwise contrasts are handled correctly because `stdev.unscaled` already encodes the design.
 
+> [!IMPORTANT]
 > **This quantity is not used to call significance.** Filtering on an observed-variance MDD is the observed-power fallacy, and is algebraically vacuous: since `MDD_g = d · s_g` and `t_g = logFC_g / (s_g · √(2/n))`, the test `|logFC| ≥ MDD` reduces to `|t| ≥ d·√(n/2)` — a fixed cutoff on the *t* statistic, with the variance cancelling entirely. It adds no power information; it is just a second, hidden significance threshold. It is shown as a diagnostic map of posterior SD vs. |logFC| only.
 
 ### Step 8 — Results and significance calling
