@@ -300,12 +300,12 @@ Assign each sample column a **Condition** and **Batch** label using the editable
 Proteins with fewer than `min_valid_pct`% of valid (non-missing) values per group are excluded before imputation and modelling. Set to 0 to disable filtering.
 
 ### Step 3 — Imputation (robust mode only)
-Imputation is performed when **Limma Regression Method** is set to `robust`. Three strategies are available (selectable in the sidebar):
+Imputation is performed when **Limma Regression Method** is set to `robust`. Four strategies are available (selectable in the sidebar):
 
 | Method | Speed | Missing-data model | Best for |
 |---|---|---|---|
-| **KNN** (default) | ~0.2 s | MAR / MCAR — borrows information from k=5 nearest proteins | General use; moderate missingness |
-| **MinProb** | ~0.03 s | MNAR — Gaussian draw at the detection limit (mean − 1.8 SD per column) | MNAR-dominated datasets, large matrices |
+| **MinProb** (default) | ~0.03 s | MNAR — Gaussian draw at the detection limit (mean − 1.8 SD per column) | MNAR-dominated datasets, large matrices |
+| **KNN** | ~0.2 s | MAR / MCAR — borrows information from k=5 nearest proteins | General use; moderate missingness |
 | **missForest** | ~40 min | MAR / MCAR — random-forest multiple imputation | Maximum accuracy; small matrices are preferred |
 | **bPCA** | ~2 min | MAR / MCAR - BPCA borrows signal across all samples and conditions | Flexible statistical framework |
 
@@ -546,7 +546,7 @@ source("/path/to/proteOmni/app/proteOmni.R")
 
 If you selected **missForest** as the imputation method, imputation can take 30–40 minutes for a typical 3,000-protein dataset with 3 conditions. This is expected — missForest builds one random forest per protein per group.
 
-**Solution:** switch to **KNN** (default, ~10,000× faster) or **MinProb** (~73,000× faster) in the *Imputation Method* dropdown, which appears in the sidebar when `robust` regression is selected. For most proteomics datasets with MNAR-type missingness, **MinProb** is the recommended choice.
+**Solution:** switch to **MinProb** (default, ~73,000× faster) or **KNN** (~10,000× faster) in the *Imputation Method* dropdown, which appears in the sidebar when `robust` regression is selected. For most proteomics datasets with MNAR-type missingness, **MinProb** is the recommended choice.
 
 </details>
 

@@ -320,16 +320,16 @@ PwrQuantDocs_body_ui <- function(id) {
               c("Method", "Missingness assumption", "Behaviour", "Cost"),
               list(
                 c(
+                  "<code>minprob</code> (default)",
+                  "MNAR",
+                  "Draws from the protein's own left tail (mean &minus; 1.8 SD). Appropriate for below-detection dropout, but can manufacture apparent differences.",
+                  "Fastest"
+                ),
+                c(
                   "<code>knn</code>",
                   "MAR",
                   "Borrows from the 5 most similar proteins within the same group. Shrinks variance, so p-values skew optimistic &mdash; measurably so; see the warning below.",
                   "Fast"
-                ),
-                c(
-                  "<code>minprob</code>",
-                  "MNAR",
-                  "Draws from the protein's own left tail (mean &minus; 1.8 SD). Appropriate for below-detection dropout, but can manufacture apparent differences.",
-                  "Fastest"
                 ),
                 c(
                   "<code>missforest</code>",
