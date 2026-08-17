@@ -61,14 +61,14 @@
 | **R** | 4.2.0 | 4.5.0+ |
 | **OS** | Windows 10, macOS, Linux | Latest stable release |
 | **RAM** | 8 GB | 16 GB+ (large DIA datasets) |
-| **Browser** | Any modern browser | Chrome / Firefox |
+| **Browser** | Any modern browser | Chrome / Firefox / Safari |
 
 > [!IMPORTANT]
 > If you are using Windows, you will need to install [Rtools](https://cran.r-project.org/bin/windows/Rtools/). See troubleshooting for adding Rscript to your Environment Variables.
 
 ### R package dependencies
 
-proteOmni auto-installs all required packages on first launch. The key dependencies are:
+proteOmni auto-installs all required packages on first launch via boostrap.R script. The key dependencies are:
 
 **CRAN packages:** `shiny`, `shinydashboard`, `shinyjs`, `fresh`, `devtools`, `tidyverse`, `tidytext`, `janitor`, `ggpointdensity`, `ggtext`, `ggrepel`, `ggseqlogo`, `ggsci`, `lsa`, `vegan`, `plotly`, `viridis`, `RColorBrewer`, `ggfortify`, `seqinr`, `zip`, `DT`, `colourpicker`, `R6`, `gridExtra`, `scales`, `lavaan`, `naniar`, `patchwork`, `missForest`, `data.table`, `GGally`, `arrow`, `httr`, `jsonlite`, `BiocManager`
 
@@ -115,8 +115,11 @@ Rscript run.R
 ```
 
 > **First launch note:** On the first run, `run.R` sources `bootstrap.R`, which checks for and installs any missing packages (including Shiny itself) before the app starts. This may take several minutes. Subsequent launches are fast.
->
+
 > Always start proteOmni through `run.R`. Calling `shiny::runApp("proteOmni.R")` directly fails on a fresh R installation, because R has to load the `shiny` package before it ever reads the app file. If you only want to install dependencies without launching the app, run `Rscript -e 'source("bootstrap.R")'`.
+
+> [!TIP]
+> Once you have all dependecies installed, you can copy the proteOmni_Windows.bat file (if Windows) or the proteOmni_MacOS.command (if MacOS) file and paste to your desktop as a shortcut and never touch the main folder again.
 
 ---
 
