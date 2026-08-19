@@ -450,3 +450,101 @@ plot_2d_gel <- function(
   }
   p
 }
+
+# ── Peptide-to-protein coverage ───────────────────────────────────────────────
+# Shared by mod_QC4DIANN (section E) and mod_PSManalyst (sequence coverage).
+
+# Normalize a FASTA sequence for matching: one string, no internal whitespace,
+# upper case. Some tools emit lower-case FASTA files, which would otherwise
+# match zero peptides and report 0% coverage with no error.
+fasta_seq_normalize <- function(seq) {
+  toupper(gsub("[[:space:]]", "", as.character(seq)[1]))
+}
+
+# The '|'-delimited tokens of a FASTA header's identifier field, e.g.
+# "sp|P02769|ALBU_BOVIN Albumin OS=..." -> c("sp", "P02769", "ALBU_BOVIN").
+fasta_header_tokens <- function(headers) {
+  lapply(headers, function(h) {
+    strsplit(trimws(strsplit(h, "\\s+")[[1]][1]), "|", fixed = TRUE)[[1]]
+  })
+}
+
+# Index of the FASTA entry whose accession or entry name equals `target`.
+# A substring grep selects the wrong entry (searching "P0231" matches the
+# header of "P02310"), so require a whole-token match.
+fasta_index_exact <- function(target, headers) {
+  toks <- fasta_header_tokens(headers)
+  hit <- which(vapply(toks, function(t) target %in% t, logical(1)))
+  if (length(hit) == 0) {
+    hit <- which(vapply(
+      toks,
+      function(t) any(tolower(t) == tolower(target)),
+      logical(1)
+    ))
+  }
+  if (length(hit) == 0) NA_integer_ else hit[1]
+}
+
+# Whether a search-engine protein field ("sp|P1|A_HUMAN;sp|P2|B_HUMAN")
+# contains `target` as a complete accession or entry name rather than as a
+# substring of some other identifier.
+protein_ids_contain <- function(ids, target) {
+  vapply(
+    ids,
+    function(x) {
+      if (is.na(x)) {
+        return(FALSE)
+      }
+      toks <- unlist(strsplit(as.character(x), ";", fixed = TRUE))
+      toks <- unlist(strsplit(trimws(toks), "|", fixed = TRUE))
+      target %in% toks
+    },
+    logical(1),
+    USE.NAMES = FALSE
+  )
+}
+
+# 1-based start positions of every non-overlapping occurrence of `pep`, so
+# peptides in repeat regions are covered wherever they occur, not only once.
+peptide_starts <- function(pep, prot_seq) {
+  if (length(pep) != 1 || is.na(pep) || nchar(pep) == 0) {
+    return(integer(0))
+  }
+  hits <- as.integer(gregexpr(
+    toupper(pep),
+    toupper(prot_seq),
+    fixed = TRUE
+  )[[1]])
+  hits[hits > 0L]
+}
+
+# Per-residue coverage depth and mask for a set of peptides against one
+# protein sequence. `counts` weights each peptide (e.g. PSM counts); NULL
+# weights every peptide equally. Returns the number of peptides that did not
+# map anywhere in the sequence.
+protein_coverage <- function(prot_seq, peptides, counts = NULL) {
+  pl <- nchar(prot_seq)
+  depth <- numeric(pl)
+  mask <- rep(FALSE, pl)
+  if (is.null(counts)) {
+    counts <- rep(1, length(peptides))
+  }
+  counts <- ifelse(is.na(counts), 1, counts)
+  n_unmapped <- 0L
+  for (i in seq_along(peptides)) {
+    starts <- peptide_starts(peptides[i], prot_seq)
+    if (length(starts) == 0) {
+      n_unmapped <- n_unmapped + 1L
+      next
+    }
+    for (s in starts) {
+      e <- s + nchar(peptides[i]) - 1L
+      if (e > pl) {
+        next
+      }
+      depth[s:e] <- depth[s:e] + counts[i]
+      mask[s:e] <- TRUE
+    }
+  }
+  list(depth = depth, mask = mask, n_unmapped = n_unmapped)
+}
