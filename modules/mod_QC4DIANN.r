@@ -1437,22 +1437,24 @@ QC4DIANN_server <- function(id) {
       )
     })
 
+    # Coverage helpers (fasta_index_exact, fasta_seq_normalize,
+    # protein_ids_contain, protein_coverage) live in modules/utils_fasta.r.
     coverage_plot_data_qc4 <- reactive({
       req(input$selected_protein, input$fasta_file, data())
       if (input$selected_protein == "") {
         return(list(protein_sequence = NULL))
       }
       tp <- input$selected_protein
-      tix <- grep(tp, names(fasta_data()), fixed = TRUE)[1]
+      tix <- fasta_index_exact(tp, names(fasta_data()))
       if (is.na(tix)) {
         return(list(error = paste("Protein", tp, "not found in FASTA.")))
       }
-      pr_seq <- as.character(fasta_data()[[tix]])[1]
+      pr_seq <- fasta_seq_normalize(fasta_data()[[tix]])
 
       d_df <- as.data.frame(data())
-      pep_df <- d_df[
-        stringr::str_detect(d_df$Protein.Ids, stringr::fixed(tp)),
-      ]
+      # Match whole ';'-separated accession tokens; a plain substring match
+      # would also pull in peptides assigned to other accessions.
+      pep_df <- d_df[protein_ids_contain(d_df$Protein.Ids, tp), ]
       if (
         !is.null(input$selected_sample_psv) &&
           input$selected_sample_psv != "All Samples"
@@ -1503,13 +1505,8 @@ QC4DIANN_server <- function(id) {
       nr_runs <- length(runs)
 
       run_masks <- lapply(runs, function(r) {
-        mask <- rep(FALSE, pl)
         peps <- pd$peptides_data$Stripped.Sequence[pd$peptides_data$Run == r]
-        for (pep in peps) {
-          pos <- as.integer(regexpr(pep, pd$protein_sequence, fixed = TRUE))
-          if (pos > 0) mask[pos:(pos + nchar(pep) - 1)] <- TRUE
-        }
-        mask
+        protein_coverage(pd$protein_sequence, peps)$mask
       })
       names(run_masks) <- runs
       nl <- max(1, ceiling(pl / apl))

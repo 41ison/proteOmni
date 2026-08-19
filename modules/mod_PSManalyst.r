@@ -1965,6 +1965,8 @@ PSManalyst_server <- function(id) {
     })
 
     # ── Sequence coverage ──
+    # Coverage helpers (fasta_index_exact, fasta_seq_normalize,
+    # protein_coverage) live in modules/utils_fasta.r.
     coverage_plot_data <- eventReactive(
       input$plot_seq,
       {
@@ -1981,15 +1983,12 @@ PSManalyst_server <- function(id) {
 
         req(data(), fasta_data())
         tp <- input$selected_protein
-        tix <- grep(tp, names(fasta_data()), fixed = TRUE)[1]
-        if (is.na(tix)) {
-          tix <- grep(tp, names(fasta_data()), ignore.case = TRUE)[1]
-        }
+        tix <- fasta_index_exact(tp, names(fasta_data()))
         if (is.na(tix)) {
           return(list(error = paste("Protein", tp, "not found in FASTA.")))
         }
 
-        pr_seq <- as.character(fasta_data()[[tix]])
+        pr_seq <- fasta_seq_normalize(fasta_data()[[tix]])
         pd <- data()
         pep_df <- if ("entry_name" %in% colnames(pd)) {
           pd[pd$entry_name == tp, ]
@@ -2018,8 +2017,6 @@ PSManalyst_server <- function(id) {
           dplyr::summarise(psm_count = n(), .groups = "drop") %>%
           dplyr::rename(sequence = !!sym(sc)) %>%
           dplyr::mutate(
-            start = NA_integer_,
-            end = NA_integer_,
             sequence = stringr::str_remove_all(
               stringr::str_remove_all(sequence, "\\[.*?\\]"),
               "[^A-Z]"
@@ -2060,21 +2057,13 @@ PSManalyst_server <- function(id) {
         min(200, ifelse(is.na(input$aa_per_line), 50, input$aa_per_line))
       )
       pl <- nchar(pd$protein_sequence)
-      cov <- rep(0, pl)
-      mask <- rep(FALSE, pl)
-
-      for (i in seq_len(nrow(pd$peptides_data))) {
-        pep <- pd$peptides_data[i, ]
-        pos <- regexpr(pep$sequence, pd$protein_sequence, fixed = TRUE)
-        if (pos == -1) {
-          next
-        }
-        s <- as.integer(pos)
-        e <- s + nchar(pep$sequence) - 1
-        cnt <- ifelse(is.na(pep$psm_count), 1, pep$psm_count)
-        cov[s:e] <- cov[s:e] + cnt
-        mask[s:e] <- TRUE
-      }
+      cvg <- protein_coverage(
+        pd$protein_sequence,
+        pd$peptides_data$sequence,
+        pd$peptides_data$psm_count
+      )
+      cov <- cvg$depth
+      mask <- cvg$mask
       mc <- max(cov[mask], na.rm = TRUE)
       if (!is.finite(mc) || mc == 0) {
         mc <- 1
