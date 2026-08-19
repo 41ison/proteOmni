@@ -1777,6 +1777,27 @@ PwrQuant_body_ui <- function(id) {
             ),
             DT::dataTableOutput(ns("metadata_table"))
           )
+        ),
+        box(
+          title = "Sample removal",
+          status = "warning",
+          solidHeader = TRUE,
+          width = 12,
+          p(
+            "Samples selected here are dropped from the abundance matrix before ",
+            "any further step (QC, normalization, batch correction, limma, MDD ",
+            "simulation, enrichment and all plots). Removal is reversible: ",
+            "deselect a sample to bring it back."
+          ),
+          selectizeInput(
+            ns("exclude_samples"),
+            "Samples to remove",
+            choices = NULL,
+            multiple = TRUE,
+            width = "100%",
+            options = list(placeholder = "Upload a matrix first")
+          ),
+          uiOutput(ns("sample_removal_status"))
         )
       )
     ),
@@ -2676,8 +2697,11 @@ PwrQuant_server <- function(id) {
       "sp_cluster_profile",
       "sp_cluster_ora"
     )
-    show_spinners <- function() {
-      lapply(spin_ids, function(s) shinyjs::show(id = s))
+    # `except` exists because a spinner is only ever lowered by the output it
+    # covers. Changing the sample selection does not re-render the metadata
+    # table, so raising sp_meta then would leave that overlay up for good.
+    show_spinners <- function(except = character(0)) {
+      lapply(setdiff(spin_ids, except), function(s) shinyjs::show(id = s))
     }
     hide_spinner <- function(sid) shinyjs::hide(id = sid)
     rh <- function(expr_fn, sid) {
@@ -2686,9 +2710,11 @@ PwrQuant_server <- function(id) {
     }
 
     # ── Matrix Ingestion ─────────────────────────────────────────────────────
-    raw_matrix <- reactive({
+    # `raw_matrix_full()` is the matrix exactly as uploaded. Everything
+    # downstream consumes `raw_matrix()`, which is this matrix minus the samples
+    # the user removed in the Metadata tab.
+    raw_matrix_full <- reactive({
       req(input$matrix_file)
-      show_spinners()
       df <- data.table::fread(
         input$matrix_file$datapath,
         header = TRUE,
@@ -2716,10 +2742,183 @@ PwrQuant_server <- function(id) {
       return(mtx)
     })
 
+    # Spinner overlays are driven by explicit events rather than from inside a
+    # data reactive: a reactive's first evaluation can be triggered by any
+    # consumer, which made the overlays appear (and stay) at unpredictable times.
+    # priority: must run before the output observers it covers, otherwise an
+    # overlay is raised after the render that would have lowered it.
+    observeEvent(input$matrix_file, show_spinners(), priority = 1000)
+
+    # ── Sample removal ───────────────────────────────────────────────────────
+    # The selectize lives in the static UI (not a renderUI). A dynamically
+    # created input registers its value only after the UI round-trip, which
+    # invalidated `raw_matrix()` a second time and re-ran the whole QC pipeline
+    # on every upload - the apparent freeze while loading a matrix.
+    # Held in a reactiveVal that is only written when the *set* changes, so a
+    # selectize round-trip reporting the same (or an empty) selection cannot
+    # invalidate `raw_matrix()` and re-run every QC plot for nothing.
+    excluded_samples_rv <- reactiveVal(character(0))
+    observeEvent(input$exclude_samples, ignoreNULL = FALSE, {
+      sel <- as.character(input$exclude_samples)
+      sel <- sort(unique(sel[!is.na(sel) & nzchar(sel)]))
+      if (!identical(sel, excluded_samples_rv())) {
+        excluded_samples_rv(sel)
+      }
+    })
+    excluded_samples <- reactive(excluded_samples_rv())
+
+    observeEvent(raw_matrix_full(), {
+      samples <- colnames(raw_matrix_full())
+      updateSelectizeInput(
+        session,
+        "exclude_samples",
+        choices = samples,
+        selected = intersect(isolate(excluded_samples()), samples),
+        options = list(
+          placeholder = "None removed \u2014 select samples to drop"
+        )
+      )
+    })
+
+    observeEvent(
+      excluded_samples(),
+      show_spinners(except = "sp_meta"),
+      ignoreInit = TRUE,
+      priority = 1000
+    )
+
+    raw_matrix <- reactive({
+      mtx <- raw_matrix_full()
+      keep <- !(colnames(mtx) %in% excluded_samples())
+      # Fully qualified: the app attaches jsonlite, whose validate() masks
+      # shiny's and rejects the NULL that need() returns on success. A bare
+      # validate() here throws a hard error, and an unhandled error inside an
+      # observer tears down the session - i.e. the app appears to freeze.
+      shiny::validate(shiny::need(
+        sum(keep) >= 2,
+        "At least two samples must be kept. Deselect some samples in the Metadata tab."
+      ))
+      mtx[, keep, drop = FALSE]
+    })
+
+    # Replicates per condition among the retained samples. limma needs >= 2 per
+    # group to estimate within-group variance at all, so removal that drops a
+    # condition to a single sample (or wipes it out) has to be surfaced.
+    condition_replicates <- reactive({
+      meta <- meta_edit_df()
+      req(nrow(meta) > 0)
+      tibble::tibble(Condition = meta$Condition) |>
+        dplyr::count(Condition, name = "n")
+    })
+
+    thin_conditions <- reactive({
+      condition_replicates() |> dplyr::filter(n < 2)
+    })
+
+    # Conditions that existed before removal but have no samples left.
+    emptied_conditions <- reactive({
+      all_meta <- meta_all()
+      req(all_meta)
+      setdiff(unique(all_meta$Condition), unique(meta_edit_df()$Condition))
+    })
+
+    output$sample_removal_status <- renderUI({
+      req(raw_matrix_full())
+      n_total <- ncol(raw_matrix_full())
+      removed <- intersect(excluded_samples(), colnames(raw_matrix_full()))
+
+      summary_txt <- if (length(removed) == 0) {
+        sprintf("All %d samples are included in the analysis.", n_total)
+      } else {
+        sprintf(
+          "%d of %d samples removed (%s). %d samples will be analysed.",
+          length(removed),
+          n_total,
+          paste(removed, collapse = ", "),
+          n_total - length(removed)
+        )
+      }
+
+      thin <- thin_conditions()
+      emptied <- emptied_conditions()
+
+      warn_tags <- NULL
+      if (length(emptied) > 0) {
+        warn_tags <- c(
+          warn_tags,
+          list(tags$p(
+            style = "color:#d9534f;font-weight:600;margin-bottom:4px;",
+            sprintf(
+              "No samples left in condition(s): %s. Any contrast using them cannot be fitted.",
+              paste(emptied, collapse = ", ")
+            )
+          ))
+        )
+      }
+      if (nrow(thin) > 0) {
+        warn_tags <- c(
+          warn_tags,
+          list(tags$p(
+            style = "color:#d9534f;font-weight:600;margin-bottom:4px;",
+            sprintf(
+              "Fewer than 2 replicates left in condition(s): %s. limma cannot estimate within-group variance for them \u2014 restore a sample or merge conditions.",
+              paste(
+                sprintf("%s (n = %d)", thin$Condition, thin$n),
+                collapse = ", "
+              )
+            )
+          ))
+        )
+      }
+
+      tags$div(
+        style = "margin-top:8px;",
+        warn_tags,
+        tags$p(style = "margin-bottom:0;", summary_txt)
+      )
+    })
+
+    # Same check as a transient notification, so the warning is seen even when
+    # the user is not looking at the Metadata tab when they change the selection.
+    observeEvent(excluded_samples(), ignoreInit = TRUE, {
+      thin <- thin_conditions()
+      emptied <- emptied_conditions()
+      msgs <- character(0)
+      if (length(emptied) > 0) {
+        msgs <- c(
+          msgs,
+          sprintf("no samples left in: %s", paste(emptied, collapse = ", "))
+        )
+      }
+      if (nrow(thin) > 0) {
+        msgs <- c(
+          msgs,
+          sprintf(
+            "fewer than 2 replicates in: %s",
+            paste(
+              sprintf("%s (n = %d)", thin$Condition, thin$n),
+              collapse = ", "
+            )
+          )
+        )
+      }
+      if (length(msgs) > 0) {
+        showNotification(
+          paste0(
+            "Sample removal left ",
+            paste(msgs, collapse = "; "),
+            ". limma needs at least 2 replicates per condition."
+          ),
+          type = "warning",
+          duration = 12
+        )
+      }
+    })
+
     # ── Metadata Mapping ─────────────────────────────────────────────────────
     metadata_base <- reactive({
-      req(raw_matrix())
-      samples <- colnames(raw_matrix())
+      req(raw_matrix_full())
+      samples <- colnames(raw_matrix_full())
 
       # Construct default data.frame for DT with an editable Display_Name column
       df <- data.frame(
@@ -2757,8 +2956,17 @@ PwrQuant_server <- function(id) {
       )
     })
 
-    # Reactive value to capture the edited table
-    meta_edit_df <- reactiveVal()
+    # Reactive value to capture the edited table (all uploaded samples).
+    meta_all <- reactiveVal()
+
+    # Metadata restricted to the samples actually being analysed. Every
+    # downstream consumer uses this, so removed samples cannot leak into a
+    # condition list, a contrast, a colour mapping or a plot.
+    meta_edit_df <- reactive({
+      df <- meta_all()
+      req(df)
+      df[!(df$Sample %in% excluded_samples()), , drop = FALSE]
+    })
     # Cache for the resolved OrgDb annotation object, keyed on the taxon ID, so
     # re-running enrichment doesn't re-resolve/re-load the org.*.eg.db package
     # unless the organism actually changed.
@@ -2769,14 +2977,14 @@ PwrQuant_server <- function(id) {
     string_db_cache <- reactiveVal(NULL)
 
     observeEvent(metadata_base(), {
-      meta_edit_df(metadata_base())
+      meta_all(metadata_base())
     })
 
     observeEvent(input$metadata_table_cell_edit, {
       info <- input$metadata_table_cell_edit
-      df <- meta_edit_df()
+      df <- meta_all()
       df[info$row, info$col + 1] <- info$value # +1 because rownames=FALSE but column index is 0-based in JS
-      meta_edit_df(df)
+      meta_all(df)
     })
 
     # Helper: get display name lookup from metadata
@@ -2909,6 +3117,37 @@ PwrQuant_server <- function(id) {
     limma_results_ev <- eventReactive(input$run_limma, {
       req(raw_matrix(), meta_edit_df(), input$contrast_pairs)
 
+      # Refuse to fit a contrast whose groups have no replication left; the
+      # residual df would be zero and every statistic downstream meaningless.
+      thin <- thin_conditions()
+      if (nrow(thin) > 0) {
+        thin_used <- thin$Condition[vapply(
+          thin$Condition,
+          function(cond) {
+            any(grepl(cond, input$contrast_pairs, fixed = TRUE))
+          },
+          logical(1)
+        )]
+        if (length(thin_used) > 0) {
+          showNotification(
+            sprintf(
+              "Cannot run limma: condition(s) %s have fewer than 2 replicates after sample removal.",
+              paste(
+                sprintf(
+                  "%s (n = %d)",
+                  thin_used,
+                  thin$n[match(thin_used, thin$Condition)]
+                ),
+                collapse = ", "
+              )
+            ),
+            type = "error",
+            duration = 15
+          )
+          req(FALSE)
+        }
+      }
+
       withProgress(message = "Executing limma pipeline...", value = 0, {
         incProgress(0.1, detail = "Parsing matrix and metadata")
         # 1. Parse Data & Metadata
@@ -2916,8 +3155,6 @@ PwrQuant_server <- function(id) {
         meta <- meta_edit_df()
         group_labels <- meta$Condition[match(colnames(raw), meta$Sample)]
         batch_labels <- meta$Batch[match(colnames(raw), meta$Sample)]
-
-        # Prepare log2 transformation
         log2_matrix <- log2(raw + 1)
 
         # 1b. Groupwise missing value filter
