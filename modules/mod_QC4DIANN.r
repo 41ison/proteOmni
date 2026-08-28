@@ -22,7 +22,7 @@ QC4DIANN_sidebar_ui <- function(id) {
       numericInput(
         ns("missed_cleavages"),
         "Max Missed Cleavages (FASTA digest)",
-        value = 0,
+        value = 1,
         min = 0,
         max = 3,
         step = 1
@@ -136,12 +136,13 @@ QC4DIANN_ui <- function(id) {
         "QC Filters & Distributions",
         fluidRow(
           column(
-            4,
+            12,
             box(
               title = "QC Plot Controls",
               status = "primary",
               solidHeader = TRUE,
               width = NULL,
+              collapsible = TRUE,
               selectInput(
                 ns("qc_plot_select"),
                 "Select Graphic",
@@ -168,18 +169,18 @@ QC4DIANN_ui <- function(id) {
                 "Plot Selected Graphic",
                 icon = icon("chart-bar"),
                 class = "btn-primary",
-                style = "width:100%;margin-bottom:8px;"
+                style = "margin-right:8px;margin-bottom:8px;"
               ),
               downloadButton(
                 ns("download_qc_plot"),
                 tagList(icon("download"), " Download (.png)"),
                 class = "dl-btn",
-                style = "width:100%;"
+                style = "margin-bottom:8px;"
               )
             )
           ),
           column(
-            8,
+            12,
             box(
               title = "Dynamic QC Plot View",
               status = "primary",
@@ -237,13 +238,6 @@ QC4DIANN_ui <- function(id) {
             )
           )
         ),
-        fluidRow(box(
-          title = "QuantUMS Score Distribution (3D)",
-          status = "primary",
-          solidHeader = TRUE,
-          width = 12,
-          plotlyOutput(ns("QuantUMS_dist"), height = WIDE_HEIGHT)
-        )),
         fluidRow(
           box(
             title = "Principal Component Analysis (PCA)",
@@ -725,11 +719,12 @@ QC4DIANN_server <- function(id) {
       scores$Sample <- rownames(scores)
       ve <- summary(pca_res)$importance[2, ] * 100
       ggplot(scores, aes(x = PC1, y = PC2, colour = Sample)) +
-        geom_point(size = 3) +
+        geom_point(size = 3, alpha = 0.6) +
         ggrepel::geom_text_repel(
           aes(label = Sample),
-          size = 3,
-          max.overlaps = 20
+          size = 4,
+          max.overlaps = Inf,
+          min.segment.length = 0
         ) +
         labs(
           x = paste0("PC1 (", round(ve[1], 1), "%)"),
@@ -1213,16 +1208,48 @@ QC4DIANN_server <- function(id) {
 
     plot13_obj <- reactive({
       req(QuantUMS_scores())
+
+      empirical_scores <- QuantUMS_scores() %>%
+        dplyr::filter(Filter == "Empirical.Quality") %>%
+        dplyr::pull(Score)
+      has_empirical <- any(empirical_scores != 0, na.rm = TRUE)
+
+      cutoffs <- data.frame(
+        Filter = c("PG.MaxLFQ.Quality", "Empirical.Quality"),
+        xint = c(input$PG.MaxLFQ.Quality, input$Empirical.Quality)
+      )
+      cutoffs <- cutoffs[
+        !is.na(cutoffs$xint) &
+          !(cutoffs$Filter == "Empirical.Quality" &
+            (!has_empirical | cutoffs$xint == 0)),
+        ,
+        drop = FALSE
+      ]
+
       QuantUMS_scores() %>%
         as.data.frame() %>%
         ggplot(aes(x = Score, fill = Filter)) +
         geom_density(alpha = 0.7) +
+        geom_vline(
+          data = cutoffs,
+          aes(xintercept = xint, color = Filter),
+          linetype = "dashed",
+          linewidth = 0.8,
+          show.legend = FALSE
+        ) +
         scale_fill_manual(
           values = c(
             "PG.MaxLFQ.Quality" = pal[["red1"]],
             "Empirical.Quality" = pal[["blue1"]],
             "Quantity.Quality" = pal[["green1"]]
           )
+        ) +
+        scale_color_manual(
+          values = c(
+            "PG.MaxLFQ.Quality" = pal[["red1"]],
+            "Empirical.Quality" = pal[["blue1"]]
+          ),
+          guide = "none"
         ) +
         labs(x = "Score", y = "Density", fill = NULL) +
         theme(legend.position = "bottom") +
@@ -1722,7 +1749,10 @@ QC4DIANN_server <- function(id) {
         )
       ) +
         theme_bw() +
-        theme(strip.text = element_text(face = "bold", size = 10))
+        theme(
+          strip.background = element_blank(),
+          strip.text = element_text(face = "bold", size = 10)
+        )
     })
 
     output$plot_ggpairs <- renderPlot({
@@ -1810,29 +1840,6 @@ QC4DIANN_server <- function(id) {
           y = paste0("log₂(", input$ycol, ")")
         )
       ggplotly(p)
-    })
-
-    # ── 3D QuantUMS score distribution ──
-    output$QuantUMS_dist <- renderPlotly({
-      req(data())
-      data() %>%
-        plot_ly(
-          x = ~PG.MaxLFQ.Quality,
-          y = ~Quantity.Quality,
-          z = ~Empirical.Quality,
-          color = ~Run,
-          alpha = 0.6,
-          colors = viridis::viridis(256),
-          type = "scatter3d",
-          mode = "markers"
-        ) %>%
-        layout(
-          scene = list(
-            xaxis = list(title = "PG MaxLFQ Quality"),
-            yaxis = list(title = "Quantity Quality"),
-            zaxis = list(title = "Empirical Quality")
-          )
-        )
     })
 
     # ── PCA ──
