@@ -1695,7 +1695,7 @@ PwrQuant_sidebar_ui <- function(id) {
           "Significant & Reliable" = "sig_reliable",
           "Top N Proteins" = "top_n"
         ),
-        selected = "top_n"
+        selected = "sig_reliable"
       ),
       conditionalPanel(
         condition = sprintf("input['%s'] == 'top_n'", ns("heatmap_filter")),
@@ -2602,8 +2602,6 @@ PwrQuant_server <- function(id) {
       mat <- raw_matrix()
       meta <- meta_edit_df()
       disp_names <- get_display_names()
-
-      # Filter to selected proteins
       sel_mat <- mat[rownames(mat) %in% sel, , drop = FALSE]
       req(nrow(sel_mat) > 0)
 
@@ -4613,7 +4611,7 @@ PwrQuant_server <- function(id) {
           status_y,
           class
         )
-      # Dynamic, contrast-aware column names for the two logFC columns.
+
       col_names <- c(
         "Protein",
         paste0("logFC: ", input$adv_corr_x),
@@ -6505,7 +6503,6 @@ PwrQuant_server <- function(id) {
         mat <- mat[top_idx, , drop = FALSE]
       }
 
-      # Z-score transformation (row-wise)
       mat_z <- t(scale(t(mat)))
       mat_z[is.nan(mat_z)] <- 0
 
@@ -6513,8 +6510,6 @@ PwrQuant_server <- function(id) {
       mat_z[keep, , drop = FALSE]
     })
 
-    # Row clustering shared by the heatmap, the cluster table and the export,
-    # so all three always report the same partition.
     zscore_clusters <- reactive({
       mat_z <- zscore_heatmap_data()
       req(nrow(mat_z) > 0)
@@ -6567,11 +6562,6 @@ PwrQuant_server <- function(id) {
 
       cl <- if (isTRUE(input$heatmap_show_clusters)) zscore_clusters() else NULL
 
-      # ComplexHeatmap only accepts a single number for `row_split` when
-      # `cluster_rows` is a dendrogram, so the split is expressed as k and the
-      # dendrogram is cut internally. That cut is the same `cutree(hc, k)` used
-      # by `cluster_heatmap_rows()`, and our labels are numbered in dendrogram
-      # order, so slice i is cluster i and the left annotation stays aligned.
       row_clust <- if (is.null(cl)) {
         function(m) hclust(dist(replace(m, is.na(m), 0)))
       } else {
@@ -6625,8 +6615,6 @@ PwrQuant_server <- function(id) {
       )
     })
 
-    # Mean Z-score per protein per condition, shared by the cluster table and
-    # the profile plot so both describe the same summary.
     zscore_cond_means <- reactive({
       mat_z <- zscore_heatmap_data()
       meta <- meta_edit_df()
@@ -6664,8 +6652,6 @@ PwrQuant_server <- function(id) {
         Protein = rownames(mat_z),
         Cluster = as.integer(cluster),
         Cluster_Size = as.integer(table(cluster)[as.character(cluster)]),
-        # Condition where the cluster member peaks: a compact summary of the
-        # abundance profile that the heatmap block shows visually.
         Peak_Condition = colnames(cond_means)[max.col(
           replace(cond_means, is.na(cond_means), -Inf),
           ties.method = "first"
@@ -6682,8 +6668,6 @@ PwrQuant_server <- function(id) {
           setNames(paste0("mean_z_", conditions))
       )
 
-      # Attach the strongest limma call per protein when a fit is available,
-      # so a downloaded cluster can be read alongside the statistics.
       lr <- tryCatch(limma_results_ev()$limma_results, error = function(e) NULL)
       if (!is.null(lr) && all(c("Protein", "adj.P.Val") %in% names(lr))) {
         best <- lr |>
@@ -6784,8 +6768,6 @@ PwrQuant_server <- function(id) {
       )
     })
 
-    # Shared builder so the on-screen panel and the batch export render the
-    # same figure from the same clustering.
     build_cluster_profile_plot <- function() {
       df <- cluster_profile_data()
       if (is.null(df) || nrow(df) == 0) {
@@ -6801,8 +6783,6 @@ PwrQuant_server <- function(id) {
         ) |>
         dplyr::mutate(SD = dplyr::coalesce(SD, 0))
 
-      # Cluster is deliberately mapped to both facet and colour so the panels
-      # key back to the heatmap's cluster annotation.
       ggplot(summ, aes(x = Condition, group = Cluster)) +
         geom_hline(yintercept = 0, linetype = "dashed", colour = "grey60") +
         geom_line(
@@ -6894,10 +6874,6 @@ PwrQuant_server <- function(id) {
             go_background_cache(list(taxon = taxon_id, orgdb = orgdb))
           }
 
-          # Background is every quantified protein, not just the heatmap rows:
-          # the heatmap is already a variance- or significance-filtered subset,
-          # so using it as the universe would test the clusters against their
-          # own selection and inflate enrichment.
           incProgress(0.35, detail = "Resolving protein identifiers")
           universe <- unique(extract_uniprot_lookup_id(rownames(raw_matrix())))
           keytype <- detect_go_keytype(universe)
@@ -7109,8 +7085,6 @@ PwrQuant_server <- function(id) {
       req(raw_matrix(), meta_edit_df())
       mat <- raw_matrix()
       meta <- meta_edit_df()
-
-      # For each condition: union of proteins with at least one non-NA value
       conditions <- unique(meta$Condition)
       sets <- lapply(conditions, function(cond) {
         samples <- meta$Sample[meta$Condition == cond]
@@ -7155,11 +7129,8 @@ PwrQuant_server <- function(id) {
         stringsAsFactors = FALSE,
         check.names = FALSE
       )
-      # Attach a 0/1 indicator per condition for convenience
       ind <- as.data.frame(presence + 0L, check.names = FALSE)
       df <- cbind(df, ind)
-
-      # Order by intersection size (largest first), then protein
       set_sizes <- table(df$Intersection)
       df$.size <- as.integer(set_sizes[df$Intersection])
       df <- df[order(-df$.size, df$Intersection, df$Protein), ]
