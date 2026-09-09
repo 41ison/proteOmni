@@ -410,7 +410,7 @@ A protein is called **significant** if:
 - log2FC threshold user-defined,
 - Safeguard for not imputation-driven (i.e. not completely absent in one of the contrast groups).
 
-Proteins that are fully missing in one condition are flagged as `imputation_driven` and classified as *Not significant*, avoiding false positives driven by structural zeros. You still can extract valuable information from the proteins detected only in one condition by using the UpSet View in PwrQuant.
+When robust regression with imputation is used, proteins that are fully missing in one condition are flagged as `imputation_driven` and classified as *Not significant*, avoiding false positives driven by structural zeros. In least-squares mode no imputation is performed, so this flag is always `FALSE` and limma handles missing values directly. You still can extract valuable information from the proteins detected only in one condition by using the UpSet View in PwrQuant.
 
 ### Step 9 — Functional enrichment (ORA with clusterProfiler)
 GO over-representation analysis is performed with `clusterProfiler::enrichGO()`. For every selected contrast, the significant proteins are split by regulation direction (**Increased** / **Decreased**) and each gene set is tested separately against the shared background (*universe*) of all quantified proteins in the matrix. Enriched terms across contrasts are stacked into a single result and rendered as:
