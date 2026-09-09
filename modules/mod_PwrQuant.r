@@ -2361,6 +2361,57 @@ PwrQuant_body_ui <- function(id) {
       )
     ),
     tabPanel(
+      "limma Results Table",
+      fluidRow(
+        box(
+          title = "Differential abundance — full limma results",
+          status = "primary",
+          solidHeader = TRUE,
+          width = 12,
+          p(
+            style = "color:#adb5bd;font-size:13px;",
+            "One row per protein and contrast. Use the column filters to search; the download exports exactly the rows currently selected by the filters above the table."
+          ),
+          fluidRow(
+            column(
+              4,
+              uiOutput(ns("limma_table_comparison_ui"))
+            ),
+            column(
+              4,
+              selectInput(
+                ns("limma_table_status"),
+                "Status",
+                choices = c(
+                  "All",
+                  "Significant only",
+                  "Increased",
+                  "Decreased",
+                  "Not significant"
+                ),
+                selected = "All"
+              )
+            ),
+            column(
+              4,
+              tags$div(
+                style = "margin-top:25px;",
+                downloadButton(
+                  ns("download_limma_table"),
+                  "⬇ Download shown rows (.tsv)",
+                  class = "dl-btn"
+                )
+              )
+            )
+          ),
+          div(
+            class = "plot-wrap",
+            DT::dataTableOutput(ns("limma_results_table"))
+          )
+        )
+      )
+    ),
+    tabPanel(
       "Z-Score Heatmap",
       fluidRow(
         box(
@@ -3167,23 +3218,28 @@ PwrQuant_server <- function(id) {
           log2_matrix <- log2_matrix[keep_protein, , drop = FALSE]
         }
 
-        # Identify totally missing (groupwise mask)
-        rn <- rownames(log2_matrix)
-        if (is.null(rn)) {
-          rn <- as.character(seq_len(nrow(log2_matrix)))
-        }
-        group_na_mask <- data.frame(Protein = rn, stringsAsFactors = FALSE)
-        for (g in unique(group_labels)) {
-          g_cols <- which(group_labels == g)
-          group_na_mask[[g]] <- apply(
-            log2_matrix[, g_cols, drop = FALSE],
-            1,
-            function(x) all(is.na(x))
-          )
-        }
-
         # 2. Imputation Selection
         reg_method <- ifelse(input$limma_method == "robust", "robust", "ls")
+
+        # Groupwise all-NA mask, only meaningful when imputation fills those
+        # cells. In least-squares mode limma handles NAs directly, so there is
+        # nothing "imputation-driven" to flag.
+        group_na_mask <- NULL
+        if (reg_method == "robust") {
+          rn <- rownames(log2_matrix)
+          if (is.null(rn)) {
+            rn <- as.character(seq_len(nrow(log2_matrix)))
+          }
+          group_na_mask <- data.frame(Protein = rn, stringsAsFactors = FALSE)
+          for (g in unique(group_labels)) {
+            g_cols <- which(group_labels == g)
+            group_na_mask[[g]] <- apply(
+              log2_matrix[, g_cols, drop = FALSE],
+              1,
+              function(x) all(is.na(x))
+            )
+          }
+        }
 
         if (reg_method == "robust") {
           imp_method <- input$imputation_method %||% "minprob"
@@ -3344,23 +3400,32 @@ PwrQuant_server <- function(id) {
         )
 
         limma_results <- power_stats %>%
-          left_join(contrast_groups, by = "comparison") %>%
-          rowwise() %>%
-          dplyr::mutate(
-            imputation_driven = group_na_mask[[group_a]][match(
-              Protein,
-              group_na_mask$Protein
-            )] |
-              group_na_mask[[group_b]][match(Protein, group_na_mask$Protein)]
-          ) %>%
-          ungroup() %>%
+          left_join(contrast_groups, by = "comparison")
+
+        if (!is.null(group_na_mask)) {
+          limma_results <- limma_results %>%
+            rowwise() %>%
+            dplyr::mutate(
+              imputation_driven = group_na_mask[[group_a]][match(
+                Protein,
+                group_na_mask$Protein
+              )] |
+                group_na_mask[[group_b]][match(Protein, group_na_mask$Protein)]
+            ) %>%
+            ungroup()
+        } else {
+          # No imputation was performed: nothing can be imputation-driven.
+          limma_results$imputation_driven <- FALSE
+        }
+
+        limma_results <- limma_results %>%
           dplyr::mutate(
             # Significance = FDR criterion + an explicit, user-set effect-size
             # cutoff. The conditional MDD is deliberately excluded: gating on it
             # would impose a second, undisclosed threshold on the same moderated
             # t statistic rather than adding information.
             status = case_when(
-              imputation_driven == TRUE ~ "Not significant",
+              imputation_driven %in% TRUE ~ "Not significant",
               logFC > 0 & adj.P.Val <= sig_fdr & abs(logFC) >= sig_lfc ~
                 "Increased",
               logFC < 0 & adj.P.Val <= sig_fdr & abs(logFC) >= sig_lfc ~
@@ -7203,5 +7268,104 @@ PwrQuant_server <- function(id) {
         column_title_gp = grid::gpar(fontsize = 14, fontface = "bold")
       )
     })
+
+    # ── limma results table ────────────────────────────────────────────────
+    output$limma_table_comparison_ui <- renderUI({
+      res <- limma_results_ev()
+      req(res$limma_results)
+      comps <- unique(res$limma_results$comparison)
+      selectInput(
+        ns("limma_table_comparison"),
+        "Comparison",
+        choices = c("All", comps),
+        selected = "All"
+      )
+    })
+
+    limma_table_data <- reactive({
+      res <- limma_results_ev()
+      req(res$limma_results)
+      df <- res$limma_results
+
+      comp <- input$limma_table_comparison %||% "All"
+      if (comp != "All") {
+        df <- df[df$comparison == comp, , drop = FALSE]
+      }
+
+      st <- input$limma_table_status %||% "All"
+      if (st == "Significant only") {
+        df <- df[df$status != "Not significant", , drop = FALSE]
+      } else if (st != "All") {
+        df <- df[df$status == st, , drop = FALSE]
+      }
+
+      keep_cols <- intersect(
+        c(
+          "Protein",
+          "comparison",
+          "status",
+          "logFC",
+          "AveExpr",
+          "t",
+          "P.Value",
+          "adj.P.Val",
+          "B",
+          "SE",
+          "Conditional_MDD_Log2FC",
+          "Above_MDD",
+          "imputation_driven"
+        ),
+        names(df)
+      )
+      df <- df[, keep_cols, drop = FALSE]
+      df <- df[order(df$adj.P.Val, -abs(df$logFC)), , drop = FALSE]
+      rownames(df) <- NULL
+      df
+    })
+
+    output$limma_results_table <- DT::renderDataTable({
+      df <- limma_table_data()
+      req(nrow(df) > 0)
+
+      round_cols <- intersect(
+        c("logFC", "AveExpr", "t", "B", "SE", "Conditional_MDD_Log2FC"),
+        names(df)
+      )
+      sci_cols <- intersect(c("P.Value", "adj.P.Val"), names(df))
+
+      DT::datatable(
+        df,
+        rownames = FALSE,
+        filter = "top",
+        options = list(
+          pageLength = 25,
+          scrollX = TRUE,
+          order = list()
+        ),
+        class = "display compact"
+      ) |>
+        DT::formatRound(columns = round_cols, digits = 3) |>
+        DT::formatSignif(columns = sci_cols, digits = 3)
+    })
+
+    output$download_limma_table <- downloadHandler(
+      filename = function() {
+        comp <- input$limma_table_comparison %||% "All"
+        tag <- if (comp == "All") {
+          "all_contrasts"
+        } else {
+          gsub("[^A-Za-z0-9]+", "_", comp)
+        }
+        paste0("limma_table_", tag, "_", Sys.Date(), ".tsv")
+      },
+      content = function(file) {
+        data.table::fwrite(
+          limma_table_data(),
+          file = file,
+          sep = "\t",
+          na = "NA"
+        )
+      }
+    )
   })
 }
