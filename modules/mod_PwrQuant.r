@@ -1382,6 +1382,17 @@ PwrQuant_sidebar_ui <- function(id) {
         "Upload Abundance Matrix (.tsv/.csv)",
         accept = c(".tsv", ".csv", ".txt")
       ),
+      checkboxInput(
+        ns("already_log2"),
+        "Matrix is already log2-transformed",
+        value = FALSE
+      ),
+      tags$div(
+        style = "padding:0 16px 8px;margin-top:-8px;color:#adb5bd;font-size:11px;line-height:1.35;",
+        "Tick this if the uploaded values are already in log2 space. ",
+        "The internal log2(x + 1) step is then skipped so fold changes are ",
+        "not compressed."
+      ),
       selectInput(
         ns("cond_palette"),
         "Condition colour palette",
@@ -2650,7 +2661,7 @@ PwrQuant_server <- function(id) {
     sel_prot_plot_data <- reactive({
       req(raw_matrix(), meta_edit_df(), input$sel_proteins)
       sel <- input$sel_proteins
-      mat <- raw_matrix()
+      mat <- log2_input()
       meta <- meta_edit_df()
       disp_names <- get_display_names()
       sel_mat <- mat[rownames(mat) %in% sel, , drop = FALSE]
@@ -2664,7 +2675,7 @@ PwrQuant_server <- function(id) {
           values_to = "abundance"
         ) |>
         dplyr::mutate(
-          log2_abundance = log2(abundance + 1),
+          log2_abundance = abundance,
           condition = meta$Condition[match(sample, meta$Sample)],
           display_name = disp_names[sample]
         ) |>
@@ -2849,6 +2860,53 @@ PwrQuant_server <- function(id) {
       ))
       mtx[, keep, drop = FALSE]
     })
+
+    # ── Log2 input matrix ────────────────────────────────────────────────────
+    # Single entry point for the log2 decision. Every downstream consumer
+    # (QC plots, limma pipeline, exports, heatmap) takes this reactive rather
+    # than calling log2() itself, so a pre-logged upload is never transformed
+    # twice - which would compress every fold change toward zero.
+    already_log2 <- reactive(isTRUE(input$already_log2))
+
+    log2_input <- reactive({
+      mtx <- raw_matrix()
+      if (already_log2()) mtx else log2(mtx + 1)
+    })
+
+    # Heuristic sanity check on the checkbox. Raw MS intensities are typically
+    # >> 100; log2 values essentially never exceed ~40. Mismatches are only
+    # flagged, never auto-corrected - the user knows their data.
+    observeEvent(
+      list(raw_matrix_full(), input$already_log2),
+      {
+        mtx <- raw_matrix_full()
+        req(mtx)
+        mx <- suppressWarnings(max(mtx, na.rm = TRUE))
+        if (!is.finite(mx)) {
+          return()
+        }
+        if (isTRUE(input$already_log2) && mx > 100) {
+          showNotification(
+            sprintf(
+              "'Already log2-transformed' is ticked, but the maximum value is %.3g. That looks like raw intensities - if so, untick the box.",
+              mx
+            ),
+            type = "warning",
+            duration = 12
+          )
+        } else if (!isTRUE(input$already_log2) && mx < 40) {
+          showNotification(
+            sprintf(
+              "The maximum value in the matrix is %.3g, which looks like log2 data. If the matrix is already log-transformed, tick 'Matrix is already log2-transformed' to avoid transforming it twice.",
+              mx
+            ),
+            type = "warning",
+            duration = 12
+          )
+        }
+      },
+      ignoreInit = FALSE
+    )
 
     # Replicates per condition among the retained samples. limma needs >= 2 per
     # group to estimate within-group variance at all, so removal that drops a
@@ -3130,7 +3188,7 @@ PwrQuant_server <- function(id) {
       meta <- meta_edit_df()
       group_labels <- meta$Condition[match(colnames(raw), meta$Sample)]
 
-      log2_matrix <- log2(raw + 1)
+      log2_matrix <- log2_input()
       cv <- compute_cv_mtx_fast(2^log2_matrix, group_labels) |>
         rownames_to_column("protein") |>
         pivot_longer(-protein, names_to = "condition", values_to = "CV") |>
@@ -3144,7 +3202,7 @@ PwrQuant_server <- function(id) {
       raw <- raw_matrix()
       meta <- meta_edit_df()
       group_labels <- meta$Condition[match(colnames(raw), meta$Sample)]
-      log2_matrix <- log2(raw + 1)
+      log2_matrix <- log2_input()
 
       # For each condition, compute per-protein mean and variance
       mv_list <- lapply(unique(group_labels), function(g) {
@@ -3204,7 +3262,7 @@ PwrQuant_server <- function(id) {
         meta <- meta_edit_df()
         group_labels <- meta$Condition[match(colnames(raw), meta$Sample)]
         batch_labels <- meta$Batch[match(colnames(raw), meta$Sample)]
-        log2_matrix <- log2(raw + 1)
+        log2_matrix <- log2_input()
 
         # 1b. Groupwise missing value filter
         min_pct <- input$min_valid_pct
@@ -4021,7 +4079,7 @@ PwrQuant_server <- function(id) {
         function() {
           req(raw_matrix(), meta_edit_df())
           disp_names <- get_display_names()
-          raw_log2 <- log2(raw_matrix() + 1)
+          raw_log2 <- log2_input()
           raw_df <- raw_log2 |>
             as.data.frame() |>
             tibble::rownames_to_column("protein") |>
@@ -4242,7 +4300,7 @@ PwrQuant_server <- function(id) {
         function() {
           req(raw_matrix(), meta_edit_df())
           build_pca_plot(
-            log2(raw_matrix() + 1),
+            log2_input(),
             meta_edit_df(),
             cond_colors(),
             get_display_names(),
@@ -4279,7 +4337,7 @@ PwrQuant_server <- function(id) {
           conds <- unique(meta$Condition)
           req(length(conds) >= 2)
           build_plsda_plot(
-            log2(raw_matrix() + 1),
+            log2_input(),
             meta,
             cond_colors(),
             get_display_names(),
@@ -5590,7 +5648,7 @@ PwrQuant_server <- function(id) {
 
         # 4. Raw boxplots
         safe_save("raw_boxplots.png", function() {
-          raw_log2 <- log2(raw_matrix() + 1)
+          raw_log2 <- log2_input()
           raw_df <- raw_log2 |>
             as.data.frame() |>
             tibble::rownames_to_column("protein") |>
@@ -6220,7 +6278,7 @@ PwrQuant_server <- function(id) {
         # PCA plots
         safe_save("pca_raw.png", function() {
           build_pca_plot(
-            log2(raw_matrix() + 1),
+            log2_input(),
             meta,
             cond_colors(),
             disp_names,
@@ -6253,7 +6311,7 @@ PwrQuant_server <- function(id) {
             if (length(conds_dl) >= 2) {
               safe_save("plsda_raw.png", function() {
                 build_plsda_plot(
-                  log2(raw_matrix() + 1),
+                  log2_input(),
                   meta,
                   cond_colors(),
                   disp_names,
@@ -6560,7 +6618,7 @@ PwrQuant_server <- function(id) {
         req(nrow(mat) > 1)
       } else {
         req(raw_matrix())
-        mat <- log2(raw_matrix() + 1)
+        mat <- log2_input()
         top_n <- input$heatmap_top_n %||% 50
         top_n <- min(top_n, nrow(mat))
         row_vars <- apply(mat, 1, var, na.rm = TRUE)

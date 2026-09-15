@@ -114,22 +114,56 @@ PwrQuantDocs_body_ui <- function(id) {
               ),
               tags$li(
                 tags$b("Remaining columns"),
-                " \u2014 one per sample, holding ",
+                " \u2014 one per sample, holding either ",
                 tags$b("raw (non-log) intensities"),
-                ". Missing values may be ",
-                "blank, ",
+                " or ",
+                tags$b("log2-transformed abundances"),
+                " \u2014 see the checkbox below. Missing values may be ",
+                "blank or ",
                 tags$code("NA"),
-                ", or ",
-                tags$code("0"),
                 "."
               )
             ),
-            pq_warn(
-              tags$b("Do not pre-log your data."),
-              " The module applies ",
+
+            tags$h4("Matrix is already log2-transformed (checkbox)"),
+            tags$p(
+              "By default the module applies ",
               tags$code("log2(x + 1)"),
-              " itself. Uploading log-space values ",
-              "will compress your fold changes into nonsense."
+              " to the uploaded matrix before anything else. If your values ",
+              "are already in log2 space \u2014 typical for exports from ",
+              "Perseus, MSstats, DIA-NN's ",
+              tags$code("report.pg_matrix"),
+              " after your own transformation, or any pre-processed matrix \u2014 ",
+              "tick ",
+              tags$b("Matrix is already log2-transformed"),
+              " under the file upload. The internal transform is then ",
+              "skipped and the values are used as they are."
+            ),
+            pq_warn(
+              tags$b("Getting this wrong corrupts every downstream result."),
+              " Log-transforming twice compresses the dynamic range: a true ",
+              "log2FC of 1 (two-fold) becomes ",
+              tags$code("log2(2x + 1) \u2212 log2(x + 1)"),
+              ", roughly 0.1 for typical log2 intensities around 20, and ",
+              "essentially every effect disappears. Conversely, feeding raw ",
+              "intensities through with the box ticked leaves the data ",
+              "heavily right-skewed, breaks the mean\u2013variance assumptions ",
+              "behind ",
+              tags$code("eBayes"),
+              " and makes fold changes meaningless. The module checks the ",
+              "value range on upload and shows a warning when the checkbox ",
+              "looks inconsistent with the data (raw intensities are usually ",
+              "in the thousands or above; log2 values rarely exceed ~40), but ",
+              "it never overrides your choice."
+            ),
+            pq_note(
+              "The checkbox affects only the log2 step. Everything else \u2014 ",
+              "min-valid filtering, imputation, ComBat, normalization, the ",
+              "linear model, QC plots and exports \u2014 runs identically on ",
+              "the resulting log2 matrix. If your matrix was log-transformed ",
+              "with a different base (ln, log10), convert it to log2 before ",
+              "uploading so that the reported logFC is interpretable as ",
+              "log2 fold change."
             ),
 
             tags$h3("Minimum workflow"),
@@ -244,9 +278,19 @@ PwrQuantDocs_body_ui <- function(id) {
             tags$h3("Pipeline order"),
             tags$p("Pressing ", tags$b("Start limma"), " runs, in this order:"),
             pq_eq(
-              "log2(x + 1)  \u2192  min-valid filter  \u2192  imputation (robust mode only)",
+              "log2(x + 1)*  \u2192  min-valid filter  \u2192  imputation (robust mode only)",
               tags$br(),
               "  \u2192  ComBat  \u2192  normalizeBetweenArrays  \u2192  lmFit  \u2192  contrasts.fit  \u2192  eBayes"
+            ),
+            tags$p(
+              tags$small(
+                "* Skipped when ",
+                tags$b("Matrix is already log2-transformed"),
+                " is ticked in the sidebar; the uploaded values are then ",
+                "taken as the log2 matrix directly. See the ",
+                tags$i("Overview"),
+                " tab."
+              )
             ),
             pq_warn(
               tags$b("Ordering caveat."),
