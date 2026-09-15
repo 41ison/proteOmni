@@ -728,9 +728,9 @@ QC4DIANN_server <- function(id) {
         ) +
         labs(
           x = paste0("PC1 (", round(ve[1], 1), "%)"),
-          y = paste0("PC2 (", round(ve[2], 1), "%)"),
-          colour = "Sample"
-        )
+          y = paste0("PC2 (", round(ve[2], 1), "%)")
+        ) +
+        theme(legend.position = "none")
     })
 
     fasta_data <- reactive({
