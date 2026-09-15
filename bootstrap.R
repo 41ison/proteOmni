@@ -46,7 +46,9 @@ if (!isTRUE(getOption("proteOmni.bootstrapped"))) {
 
   .omni_install <- function(pkgs, installer) {
     for (pkg in pkgs) {
-      if (.omni_has(pkg)) next
+      if (.omni_has(pkg)) {
+        next
+      }
       message("[proteOmni] Installing ", pkg, " ...")
       ok <- tryCatch(
         {
@@ -54,7 +56,12 @@ if (!isTRUE(getOption("proteOmni.bootstrapped"))) {
           .omni_has(pkg)
         },
         error = function(e) {
-          message("[proteOmni] Failed to install ", pkg, ": ", conditionMessage(e))
+          message(
+            "[proteOmni] Failed to install ",
+            pkg,
+            ": ",
+            conditionMessage(e)
+          )
           FALSE
         }
       )
@@ -71,14 +78,40 @@ if (!isTRUE(getOption("proteOmni.bootstrapped"))) {
   # `pak` is listed explicitly: it is needed to install the GitHub-only `diann`.
   .omni_install(
     c(
-      "shiny", "shinydashboard", "shinyjs", "fresh",
-      "BiocManager", "pak", "devtools",
-      "tidyverse", "tidytext", "janitor", "data.table",
-      "ggpointdensity", "ggtext", "ggrepel", "ggseqlogo", "GGally", "ggsci",
-      "ggfortify", "plotly", "viridis", "RColorBrewer", "scales", "patchwork",
-      "lsa", "vegan", "seqinr", "zip", "DT", "colourpicker", "R6",
-      "gridExtra", "lavaan", "naniar", "missForest",
-      "httr", "jsonlite"
+      "shiny",
+      "shinydashboard",
+      "shinyjs",
+      "fresh",
+      "BiocManager",
+      "pak",
+      "devtools",
+      "tidyverse",
+      "tidytext",
+      "janitor",
+      "data.table",
+      "ggpointdensity",
+      "ggtext",
+      "ggrepel",
+      "ggseqlogo",
+      "GGally",
+      "ggsci",
+      "ggfortify",
+      "plotly",
+      "viridis",
+      "RColorBrewer",
+      "scales",
+      "patchwork",
+      "seqinr",
+      "zip",
+      "DT",
+      "colourpicker",
+      "R6",
+      "gridExtra",
+      "lavaan",
+      "naniar",
+      "missForest",
+      "httr",
+      "jsonlite"
     ),
     .omni_cran
   )
@@ -91,9 +124,17 @@ if (!isTRUE(getOption("proteOmni.bootstrapped"))) {
   if (.omni_has("BiocManager")) {
     .omni_install(
       c(
-        "limma", "Biostrings", "sva", "impute", "pcaMethods",
-        "ComplexHeatmap", "STRINGdb", "clusterProfiler", "enrichplot",
-        "AnnotationDbi", "mixOmics",
+        "limma",
+        "Biostrings",
+        "sva",
+        "impute",
+        "pcaMethods",
+        "ComplexHeatmap",
+        "STRINGdb",
+        "clusterProfiler",
+        "enrichplot",
+        "AnnotationDbi",
+        "mixOmics",
         # Baseline OrgDb (human); other organisms are installed on demand by
         # the PwrQuant enrichment module via ensure_orgdb().
         "org.Hs.eg.db"

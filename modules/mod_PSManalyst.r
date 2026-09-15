@@ -433,6 +433,16 @@ PSManalyst_sidebar_ui <- function(id) {
         style = "width:80%;margin-bottom:6px;"
       ),
       uiOutput(ns("psm_folder_status")),
+      selectizeInput(
+        ns("sample_select"),
+        "Samples (empty = all)",
+        choices = NULL,
+        multiple = TRUE,
+        options = list(
+          placeholder = "All samples",
+          plugins = list("remove_button")
+        )
+      ),
       tags$hr(style = "border-color:#2d3741;"),
       sliderInput(ns("hyperscore"), "Hyperscore", 0, 1000, 0, 5),
       sliderInput(ns("probability"), "Probability", 0, 1, 0.95, 0.01),
@@ -513,136 +523,151 @@ PSManalyst_ui <- function(id) {
       id = ns("tabs"),
       type = "tabs",
 
-      # ── TAB 1: PSM Viewer (2-column layout) ──
+      # ── TAB 1: PSM Viewer (controls on top, full-width plot) ──
       tabPanel(
         "PSM Viewer",
         fluidRow(
-          # Left column — plot selector + controls
-          column(
-            4,
-            box(
-              title = "PSM Plot Controls",
-              status = "primary",
-              solidHeader = TRUE,
-              width = NULL,
-              selectInput(
-                ns("psm_plot_select"),
-                "Select PSM Plot",
-                choices = c(
-                  "Protease fingerprint" = "plot01",
-                  "N-termini SeqLogo" = "plot03",
-                  "C-termini SeqLogo" = "plot04",
-                  "m/z over RT" = "plot05",
-                  "Mass error (ppm)" = "plot06",
-                  "Peptide length" = "plot07",
-                  "GRAVY" = "plot08",
-                  "Isoelectric Point (pI)" = "plot09",
-                  "Charge state" = "plot10",
-                  "Missed cleavages" = "plot11",
-                  "Uniqueness" = "plot12",
-                  "Hyperscore" = "plot13",
-                  "Next Score" = "plot14",
-                  "PeptideProphet Probability" = "plot15",
-                  "Expectation" = "plot16",
-                  "Assigned Modifications" = "plot17",
-                  "Top 20 proteins" = "plot18",
-                  "N:C-terminus matrix" = "plot19",
-                  "Cysteine counts" = "plot20",
-                  "AA frequency vs FASTA" = "plot_aa_freq",
-                  "Peptide Yield vs. FDR" = "plot_fdr_curve"
+          box(
+            title = "PSM Plot Controls",
+            status = "primary",
+            solidHeader = TRUE,
+            width = 12,
+            fluidRow(
+              column(
+                6,
+                selectInput(
+                  ns("psm_plot_select"),
+                  "Select PSM Plot",
+                  choices = c(
+                    "Protease fingerprint" = "plot01",
+                    "N-termini SeqLogo" = "plot03",
+                    "C-termini SeqLogo" = "plot04",
+                    "m/z over RT" = "plot05",
+                    "Mass error (ppm)" = "plot06",
+                    "Peptide length" = "plot07",
+                    "GRAVY" = "plot08",
+                    "Isoelectric Point (pI)" = "plot09",
+                    "Charge state" = "plot10",
+                    "Missed cleavages" = "plot11",
+                    "Uniqueness" = "plot12",
+                    "Hyperscore" = "plot13",
+                    "Next Score" = "plot14",
+                    "PeptideProphet Probability" = "plot15",
+                    "Expectation" = "plot16",
+                    "Assigned Modifications" = "plot17",
+                    "Top 20 proteins" = "plot18",
+                    "N:C-terminus matrix" = "plot19",
+                    "Cysteine counts" = "plot20",
+                    "AA frequency vs FASTA" = "plot_aa_freq",
+                    "Peptide Yield vs. FDR" = "plot_fdr_curve"
+                  )
                 )
               ),
-              actionButton(
-                ns("run_psm_plot"),
-                "Build Plot",
-                class = "btn-primary",
-                style = "width:100%;margin-bottom:8px;"
+              column(
+                3,
+                actionButton(
+                  ns("run_psm_plot"),
+                  "Build Plot",
+                  class = "btn-primary",
+                  style = "width:100%;margin-top:25px;"
+                )
               ),
-              downloadButton(
-                ns("download_psm_plot"),
-                tagList(icon("download"), " Download (.png)"),
-                class = "dl-btn",
-                style = "width:100%;"
+              column(
+                3,
+                downloadButton(
+                  ns("download_psm_plot"),
+                  tagList(icon("download"), " Download (.png)"),
+                  class = "dl-btn",
+                  style = "width:100%;margin-top:25px;"
+                )
               )
             )
-          ),
-          # Right column — plot output
-          column(
-            8,
-            box(
-              title = "PSM Plot Output",
-              status = "primary",
-              solidHeader = TRUE,
-              width = NULL,
-              div(
-                class = "plot-wrap",
-                tags$div(
-                  class = "spinner-overlay",
-                  id = ns("sp_psm_main"),
-                  icon("spinner", class = "fa-spin")
-                ),
-                plotOutput(ns("psm_dynamic_plot_out"), height = "700px")
-              )
+          )
+        ),
+        fluidRow(
+          box(
+            title = "PSM Plot Output",
+            status = "primary",
+            solidHeader = TRUE,
+            width = 12,
+            div(
+              class = "plot-wrap",
+              tags$div(
+                class = "spinner-overlay",
+                id = ns("sp_psm_main"),
+                icon("spinner", class = "fa-spin")
+              ),
+              plotOutput(ns("psm_dynamic_plot_out"), height = "700px")
             )
           )
         )
       ),
 
-      # ── TAB 2: MS/MS Spectrum (2-column) ──
+      # ── TAB 2: MS/MS Spectrum (controls on top, full-width plot) ──
       tabPanel(
         title = tagList(icon("chart-bar"), "MS/MS Spectrum Viewer"),
         fluidRow(
-          column(
-            4,
-            box(
-              title = "Spectrum Controls",
-              status = "primary",
-              solidHeader = TRUE,
-              width = NULL,
-              selectizeInput(
-                ns("spectrum_peptide"),
-                "Peptide Sequence",
-                choices = NULL,
-                options = list(placeholder = "Load PSM files first…")
+          box(
+            title = "Spectrum Controls",
+            status = "primary",
+            solidHeader = TRUE,
+            width = 12,
+            fluidRow(
+              column(
+                5,
+                selectizeInput(
+                  ns("spectrum_peptide"),
+                  "Peptide Sequence",
+                  choices = NULL,
+                  options = list(placeholder = "Load PSM files first…")
+                )
               ),
-              numericInput(
-                ns("spectrum_label_size"),
-                "Ion Label Size",
-                value = 3,
-                min = 1,
-                max = 8,
-                step = 0.5
+              column(
+                3,
+                numericInput(
+                  ns("spectrum_label_size"),
+                  "Ion Label Size",
+                  value = 3,
+                  min = 1,
+                  max = 8,
+                  step = 0.5
+                )
               ),
-              actionButton(
-                ns("run_spectrum"),
-                "Plot Spectrum",
-                class = "btn-primary",
-                style = "width:100%;margin-bottom:8px;"
+              column(
+                2,
+                actionButton(
+                  ns("run_spectrum"),
+                  "Plot Spectrum",
+                  class = "btn-primary",
+                  style = "width:100%;margin-top:25px;"
+                )
               ),
-              downloadButton(
-                ns("download_spectrum_plot"),
-                tagList(icon("download"), " Download (.pdf)"),
-                class = "dl-btn",
-                style = "width:100%;"
+              column(
+                2,
+                downloadButton(
+                  ns("download_spectrum_plot"),
+                  tagList(icon("download"), " Download (.pdf)"),
+                  class = "dl-btn",
+                  style = "width:100%;margin-top:25px;"
+                )
               )
             )
-          ),
-          column(
-            8,
-            box(
-              title = "Annotated MS/MS Fragmentation Spectrum",
-              status = "primary",
-              solidHeader = TRUE,
-              width = NULL,
-              div(
-                class = "plot-wrap",
-                tags$div(
-                  class = "spinner-overlay",
-                  id = ns("sp_spectrum"),
-                  icon("spinner", class = "fa-spin")
-                ),
-                uiOutput(ns("spectrum_plot_ui"))
-              )
+          )
+        ),
+        fluidRow(
+          box(
+            title = "Annotated MS/MS Fragmentation Spectrum",
+            status = "primary",
+            solidHeader = TRUE,
+            width = 12,
+            div(
+              class = "plot-wrap",
+              tags$div(
+                class = "spinner-overlay",
+                id = ns("sp_spectrum"),
+                icon("spinner", class = "fa-spin")
+              ),
+              uiOutput(ns("spectrum_plot_ui"))
             )
           )
         ),
@@ -657,70 +682,72 @@ PSManalyst_ui <- function(id) {
         )
       ),
 
-      # ── TAB 3: Protein Viewer (2-column) ──
+      # ── TAB 3: Protein Viewer (controls on top, full-width plot) ──
       tabPanel(
         "Protein Viewer",
         fluidRow(infoBoxOutput(ns("info_box2"), width = 12)),
         fluidRow(
-          column(
-            4,
-            box(
-              title = "Protein Plot Controls",
-              status = "primary",
-              solidHeader = TRUE,
-              width = NULL,
-              selectInput(
-                ns("prot_plot_select"),
-                "Select Protein Plot",
-                choices = c(
-                  "Coverage" = "plot01p",
-                  "Organisms" = "plot02p",
-                  "Protein existence" = "plot03p",
-                  "Protein probability" = "plot04p",
-                  "Top peptide probability" = "plot05p",
-                  "Total peptides" = "plot06p",
-                  "Razor spectral count" = "plot07p",
-                  "Razor intensity" = "plot08p",
-                  "MaxLFQ distribution" = "plot10p",
-                  "Top 20 by MaxLFQ (log₂)" = "plot_rank_lfq",
-                  "Top 20 by spectral count" = "plot_rank_usc"
+          box(
+            title = "Protein Plot Controls",
+            status = "primary",
+            solidHeader = TRUE,
+            width = 12,
+            fluidRow(
+              column(
+                4,
+                selectInput(
+                  ns("prot_plot_select"),
+                  "Select Protein Plot",
+                  choices = c(
+                    "Coverage" = "plot01p",
+                    "Organisms" = "plot02p",
+                    "Protein existence" = "plot03p",
+                    "Protein probability" = "plot04p",
+                    "Top peptide probability" = "plot05p",
+                    "Total peptides" = "plot06p",
+                    "Razor spectral count" = "plot07p",
+                    "Razor intensity" = "plot08p",
+                    "MaxLFQ distribution" = "plot10p",
+                    "Top 20 by MaxLFQ (log₂)" = "plot_rank_lfq",
+                    "Top 20 by spectral count" = "plot_rank_usc"
+                  )
                 )
               ),
-              selectInput(
-                ns("protein_sample_select"),
-                "Sample",
-                choices = c("All samples" = "all")
+              column(
+                4,
+                actionButton(
+                  ns("run_prot_plot"),
+                  "Build Plot",
+                  class = "btn-primary",
+                  style = "width:100%;margin-top:25px;"
+                )
               ),
-              actionButton(
-                ns("run_prot_plot"),
-                "Build Plot",
-                class = "btn-primary",
-                style = "width:100%;margin-bottom:8px;"
-              ),
-              downloadButton(
-                ns("download_prot_plot"),
-                tagList(icon("download"), " Download (.png)"),
-                class = "dl-btn",
-                style = "width:100%;"
+              column(
+                4,
+                downloadButton(
+                  ns("download_prot_plot"),
+                  tagList(icon("download"), " Download (.png)"),
+                  class = "dl-btn",
+                  style = "width:100%;margin-top:25px;"
+                )
               )
             )
-          ),
-          column(
-            8,
-            box(
-              title = "Protein Plot Output",
-              status = "primary",
-              solidHeader = TRUE,
-              width = NULL,
-              div(
-                class = "plot-wrap",
-                tags$div(
-                  class = "spinner-overlay",
-                  id = ns("sp_prot_main"),
-                  icon("spinner", class = "fa-spin")
-                ),
-                plotOutput(ns("prot_dynamic_plot_out"), height = "700px")
-              )
+          )
+        ),
+        fluidRow(
+          box(
+            title = "Protein Plot Output",
+            status = "primary",
+            solidHeader = TRUE,
+            width = 12,
+            div(
+              class = "plot-wrap",
+              tags$div(
+                class = "spinner-overlay",
+                id = ns("sp_prot_main"),
+                icon("spinner", class = "fa-spin")
+              ),
+              plotOutput(ns("prot_dynamic_plot_out"), height = "700px")
             )
           )
         ),
@@ -773,44 +800,51 @@ PSManalyst_ui <- function(id) {
         )
       ),
 
-      # ── TAB 4: Modification Diagnostic ──
+      # ── TAB 4: Modification Diagnostic (controls on top, full-width plot) ──
       tabPanel(
         "Modification Diagnostic",
         fluidRow(
-          column(
-            4,
-            box(
-              title = "Diagnostic Controls",
-              status = "primary",
-              solidHeader = TRUE,
-              width = NULL,
-              sliderInput(
-                ns("rt_tolerance"),
-                "ΔRT Artifact Threshold (min)",
-                min = 0.1,
-                max = 5,
-                value = 0.5,
-                step = 0.1
+          box(
+            title = "Diagnostic Controls",
+            status = "primary",
+            solidHeader = TRUE,
+            width = 12,
+            fluidRow(
+              column(
+                6,
+                sliderInput(
+                  ns("rt_tolerance"),
+                  "ΔRT Artifact Threshold (min)",
+                  min = 0.1,
+                  max = 5,
+                  value = 0.5,
+                  step = 0.1
+                )
               ),
-              helpText("Lower threshold → more strict artifact classification.")
-            )
-          ),
-          column(
-            8,
-            box(
-              title = "RT Shift Profile — Modified vs Unmodified",
-              status = "primary",
-              solidHeader = TRUE,
-              width = NULL,
-              div(
-                class = "plot-wrap",
-                tags$div(
-                  class = "spinner-overlay",
-                  id = ns("sp_moddiag"),
-                  icon("spinner", class = "fa-spin")
-                ),
-                uiOutput(ns("mod_diag_plot_ui"))
+              column(
+                6,
+                helpText(
+                  style = "margin-top:25px;",
+                  "Lower threshold → more strict artifact classification."
+                )
               )
+            )
+          )
+        ),
+        fluidRow(
+          box(
+            title = "RT Shift Profile — Modified vs Unmodified",
+            status = "primary",
+            solidHeader = TRUE,
+            width = 12,
+            div(
+              class = "plot-wrap",
+              tags$div(
+                class = "spinner-overlay",
+                id = ns("sp_moddiag"),
+                icon("spinner", class = "fa-spin")
+              ),
+              uiOutput(ns("mod_diag_plot_ui"))
             )
           )
         ),
@@ -961,10 +995,38 @@ PSManalyst_server <- function(id) {
     # ════════════════════════════════════════════════════════════════════════
     # B. FILTERED PSM DATA
     # ════════════════════════════════════════════════════════════════════════
+    # ── Global sample selector (sidebar) ──
+    # Populated from the raw PSM data; an empty selection means "all samples".
+    observeEvent(raw_psm_data(), {
+      req(raw_psm_data(), "sample_name" %in% names(raw_psm_data()))
+      samples <- sort(unique(raw_psm_data()$sample_name))
+      updateSelectizeInput(
+        session,
+        "sample_select",
+        choices = samples,
+        selected = character(0)
+      )
+    })
+
+    selected_samples <- reactive({
+      sel <- input$sample_select
+      if (is.null(sel) || length(sel) == 0) NULL else sel
+    })
+
+    # Restrict any data frame with a sample_name column to the selected samples.
+    filter_samples <- function(d) {
+      sel <- selected_samples()
+      if (is.null(sel) || !"sample_name" %in% names(d)) {
+        return(d)
+      }
+      dplyr::filter(d, sample_name %in% sel)
+    }
+
     data <- reactive({
       req(raw_psm_data())
 
       psm_file <- raw_psm_data() %>%
+        filter_samples() %>%
         dplyr::filter(
           hyperscore >= input$hyperscore,
           probability >= input$probability
@@ -1053,7 +1115,10 @@ PSManalyst_server <- function(id) {
       req(raw_psm_data(), nchar(input$spectrum_peptide) > 0)
       show_spinner("sp_spectrum")
       withProgress(message = "Building spectrum…", value = 0.5, {
-        result <- tidy_psm_spectrum(raw_psm_data(), input$spectrum_peptide)
+        result <- tidy_psm_spectrum(
+          filter_samples(raw_psm_data()),
+          input$spectrum_peptide
+        )
         incProgress(0.5, detail = "Done.")
         result
       })
@@ -1704,6 +1769,7 @@ PSManalyst_server <- function(id) {
     # ════════════════════════════════════════════════════════════════════════
     # E4. MODIFICATION DIAGNOSTIC
     # ════════════════════════════════════════════════════════════════════════
+    # Sample restriction is inherited from data() via the sidebar selector.
     mod_diag_data <- reactive({
       d <- data()
       req(d, nrow(d) > 0)
@@ -1873,7 +1939,8 @@ PSManalyst_server <- function(id) {
         data.table::fread(f, sep = "\t", header = TRUE) %>%
           janitor::clean_names() %>%
           dplyr::mutate(sample_name = basename(dirname(f)))
-      })
+      }) %>%
+        filter_samples()
     })
 
     combined_protein_data <- reactive({
@@ -1887,8 +1954,27 @@ PSManalyst_server <- function(id) {
         dplyr::select(protein_id, ends_with("max_lfq_intensity")) %>%
         column_to_rownames("protein_id") %>%
         dplyr::rename_all(~ stringr::str_remove(., "_max_lfq_intensity")) %>%
-        log2()
+        # MaxLFQ of 0 means "not quantified": treat as NA so log2 does not
+        # yield -Inf and downstream metrics only use quantified proteins.
+        dplyr::mutate(dplyr::across(everything(), ~ dplyr::na_if(., 0))) %>%
+        log2() %>%
+        subset_combined_samples()
     })
+
+    # Keep only columns matching the sidebar sample selection. Column names in
+    # combined_protein.tsv may not match PSM-derived sample names exactly, so
+    # the subset is only applied when at least one selected sample matches.
+    subset_combined_samples <- function(m) {
+      sel <- selected_samples()
+      if (is.null(sel)) {
+        return(m)
+      }
+      keep <- intersect(colnames(m), c(sel, janitor::make_clean_names(sel)))
+      if (length(keep) == 0) {
+        return(m)
+      }
+      m[, keep, drop = FALSE]
+    }
 
     combined_protein_raw <- reactive({
       req(input$combined_protein)
@@ -1925,19 +2011,6 @@ PSManalyst_server <- function(id) {
           showNotification("Error reading FASTA file.", type = "error")
           NULL
         }
-      )
-    })
-
-    # Sample selector for protein view (populated from protein_data so the
-    # selected value always matches a sample_name present in the plots)
-    observeEvent(protein_data(), {
-      d <- protein_data()
-      req(d, "sample_name" %in% names(d))
-      samples <- sort(unique(d$sample_name))
-      updateSelectInput(
-        session,
-        "protein_sample_select",
-        choices = c("All samples" = "all", setNames(samples, samples))
       )
     })
 
@@ -2161,21 +2234,16 @@ PSManalyst_server <- function(id) {
     # F2. PROTEIN PLOTS
     # ════════════════════════════════════════════════════════════════════════
 
-    # Protein data restricted to the selected sample (all samples when "all").
+    # Protein data already restricted to the sidebar sample selection.
     prot_plot_data <- function() {
       d <- protein_data()
       req(d, "sample_name" %in% names(d))
-      sel <- input$protein_sample_select
-      if (!is.null(sel) && sel != "all") {
-        d <- dplyr::filter(d, sample_name == sel)
-      }
       d
     }
 
-    # Facet a protein plot by sample only when "All samples" is selected.
+    # Facet a protein plot by sample only when more than one sample is shown.
     add_prot_facet <- function(p) {
-      sel <- input$protein_sample_select
-      if (is.null(sel) || sel == "all") {
+      if (dplyr::n_distinct(prot_plot_data()$sample_name) > 1) {
         p <- p + facet_wrap(~sample_name, ncol = 3)
       }
       p
@@ -2445,13 +2513,33 @@ PSManalyst_server <- function(id) {
     }
 
     # ── Similarity / distance plots (require combined_protein upload) ──
+    # Upper-triangle panel: Pearson r computed only on proteins quantified
+    # (non-NA) in BOTH samples of the pair.
+    ggpairs_cor_panel <- function(data, mapping, ...) {
+      x <- GGally::eval_data_col(data, mapping$x)
+      y <- GGally::eval_data_col(data, mapping$y)
+      ok <- is.finite(x) & is.finite(y)
+      n <- sum(ok)
+      r <- if (n > 2) stats::cor(x[ok], y[ok], method = "pearson") else NA_real_
+      ggplot() +
+        annotate(
+          "text",
+          x = 0.5,
+          y = 0.5,
+          label = sprintf("r = %.3f\nn = %d", r, n),
+          size = 5,
+          fontface = "bold"
+        ) +
+        theme_void()
+    }
+
     prot_fns$plot_ggpairs <- function() {
       req(combined_protein_data())
       combined_protein_data() %>%
         GGally::ggpairs(
-          lower = list(continuous = wrap("points", alpha = 0.4)),
-          diag = list(continuous = "barDiag"),
-          upper = list(continuous = "density")
+          lower = list(continuous = wrap("points", alpha = 0.4, na.rm = TRUE)),
+          diag = list(continuous = wrap("barDiag", na.rm = TRUE)),
+          upper = list(continuous = ggpairs_cor_panel)
         ) +
         theme_bw() +
         theme(
@@ -2469,52 +2557,85 @@ PSManalyst_server <- function(id) {
       legend.key.height = unit(0.25, "cm")
     )
 
+    # Apply a pairwise metric f(x, y) to every pair of sample columns, using
+    # only proteins that are quantified (non-NA) in both samples of the pair.
+    pairwise_sample_matrix <- function(m, f) {
+      m <- as.matrix(m)
+      n <- ncol(m)
+      out <- matrix(
+        NA_real_,
+        n,
+        n,
+        dimnames = list(colnames(m), colnames(m))
+      )
+      for (i in seq_len(n)) {
+        for (j in seq_len(n)) {
+          ok <- !is.na(m[, i]) & !is.na(m[, j])
+          out[i, j] <- if (any(ok)) f(m[ok, i], m[ok, j]) else NA_real_
+        }
+      }
+      out
+    }
+
+    matrix_to_long <- function(mat) {
+      as.data.frame(mat) %>%
+        rownames_to_column(var = "Sample") %>%
+        pivot_longer(-Sample, names_to = "Match", values_to = "value")
+    }
+
+    similarity_heatmap <- function(long_df, fill_lab, digits = 2) {
+      ggplot(long_df, aes(x = Sample, y = Match, fill = value)) +
+        geom_tile() +
+        geom_text(
+          aes(label = round(value, digits)),
+          color = "white",
+          size = 4
+        ) +
+        viridis::scale_fill_viridis(option = "E") +
+        ht +
+        labs(x = NULL, y = NULL, fill = fill_lab)
+    }
+
     prot_fns$cosine_similarity <- function() {
       req(combined_protein_data())
       combined_protein_data() %>%
-        as.matrix() %>%
-        na.omit() %>%
-        lsa::cosine() %>%
-        as.data.frame() %>%
-        rownames_to_column(var = "Sample") %>%
-        pivot_longer(-Sample, names_to = "Match", values_to = "value") %>%
-        ggplot() +
-        geom_tile(aes(x = Sample, y = Match, fill = value)) +
-        viridis::scale_fill_viridis(option = "E") +
-        ht +
-        labs(x = NULL, y = NULL, fill = "Cosine similarity")
+        pairwise_sample_matrix(function(x, y) {
+          sum(x * y) / sqrt(sum(x^2) * sum(y^2))
+        }) %>%
+        matrix_to_long() %>%
+        similarity_heatmap("Cosine similarity", digits = 3)
     }
 
     prot_fns$euclidean_distance <- function() {
       req(combined_protein_data())
       combined_protein_data() %>%
-        t() %>%
-        dist(method = "euclidean") %>%
-        as.matrix() %>%
-        as.data.frame() %>%
-        rownames_to_column(var = "Sample") %>%
-        pivot_longer(-Sample, names_to = "Match", values_to = "value") %>%
-        ggplot() +
-        geom_tile(aes(x = Sample, y = Match, fill = value)) +
-        viridis::scale_fill_viridis(option = "E") +
-        ht +
-        labs(x = NULL, y = NULL, fill = "Euclidean distance")
+        pairwise_sample_matrix(function(x, y) sqrt(sum((x - y)^2))) %>%
+        matrix_to_long() %>%
+        similarity_heatmap("Euclidean distance", digits = 1)
     }
 
+    # Jaccard on protein identification (presence/absence):
+    # |A ∩ B| / |A ∪ B| where A, B are the sets of quantified proteins.
     prot_fns$jaccard_similarity <- function() {
       req(combined_protein_data())
-      combined_protein_data() %>%
-        t() %>%
-        vegan::vegdist(method = "jaccard", na.rm = TRUE) %>%
-        as.matrix() %>%
-        as.data.frame() %>%
-        rownames_to_column(var = "Sample") %>%
-        pivot_longer(-Sample, names_to = "Match", values_to = "value") %>%
-        ggplot() +
-        geom_tile(aes(x = Sample, y = Match, fill = value)) +
-        viridis::scale_fill_viridis(option = "E") +
-        ht +
-        labs(x = NULL, y = NULL, fill = "Jaccard similarity")
+      pres <- !is.na(as.matrix(combined_protein_data()))
+      n <- ncol(pres)
+      jac <- matrix(
+        NA_real_,
+        n,
+        n,
+        dimnames = list(colnames(pres), colnames(pres))
+      )
+      for (i in seq_len(n)) {
+        for (j in seq_len(n)) {
+          inter <- sum(pres[, i] & pres[, j])
+          uni <- sum(pres[, i] | pres[, j])
+          jac[i, j] <- if (uni > 0) inter / uni else NA_real_
+        }
+      }
+      jac %>%
+        matrix_to_long() %>%
+        similarity_heatmap("Jaccard similarity", digits = 3)
     }
 
     # Render similarity plots (always visible in their tab)
