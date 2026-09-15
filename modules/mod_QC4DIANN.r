@@ -1644,10 +1644,13 @@ QC4DIANN_server <- function(id) {
     # ════════════════════════════════════════════════════════════════════════
     cosine_obj <- reactive({
       req(unique_genes())
-      unique_genes() %>%
+      m <- unique_genes() %>%
         log2() %>%
-        na.omit() %>%
-        lsa::cosine() %>%
+        as.matrix() %>%
+        na.omit()
+      # Column-wise cosine similarity (equivalent to lsa::cosine on a matrix)
+      cp <- crossprod(m)
+      (cp / sqrt(outer(diag(cp), diag(cp)))) %>%
         as.data.frame() %>%
         tibble::rownames_to_column("Sample") %>%
         tidyr::pivot_longer(
@@ -1685,11 +1688,24 @@ QC4DIANN_server <- function(id) {
 
     jaccard_obj <- reactive({
       req(unique_genes())
-      mat <- unique_genes() %>%
-        log2() %>%
-        t() %>%
-        vegan::vegdist(method = "jaccard", na.rm = TRUE) %>%
-        as.matrix()
+      # Presence/absence Jaccard similarity on gene identification:
+      # |A ∩ B| / |A ∪ B|, where a gene is "present" if quantified (non-NA, > 0).
+      m <- as.matrix(unique_genes())
+      pres <- !is.na(m) & m > 0
+      n <- ncol(pres)
+      mat <- matrix(
+        NA_real_,
+        n,
+        n,
+        dimnames = list(colnames(pres), colnames(pres))
+      )
+      for (i in seq_len(n)) {
+        for (j in seq_len(n)) {
+          inter <- sum(pres[, i] & pres[, j])
+          uni <- sum(pres[, i] | pres[, j])
+          mat[i, j] <- if (uni > 0) inter / uni else NA_real_
+        }
+      }
       as.data.frame(mat) %>%
         tibble::rownames_to_column("Sample") %>%
         tidyr::pivot_longer(
@@ -1699,9 +1715,9 @@ QC4DIANN_server <- function(id) {
         ) %>%
         ggplot(aes(x = Sample, y = Match, fill = value)) +
         geom_tile() +
-        viridis::scale_fill_viridis(option = "E") +
+        viridis::scale_fill_viridis(option = "E", limits = c(0, 1)) +
         heatmap_theme +
-        labs(x = NULL, y = NULL, fill = "Jaccard similarity")
+        labs(x = NULL, y = NULL, fill = "Jaccard similarity (gene ID)")
     })
 
     output$cosine_similarity <- renderPlot({

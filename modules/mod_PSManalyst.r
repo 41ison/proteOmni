@@ -2583,14 +2583,9 @@ PSManalyst_server <- function(id) {
         pivot_longer(-Sample, names_to = "Match", values_to = "value")
     }
 
-    similarity_heatmap <- function(long_df, fill_lab, digits = 2) {
+    similarity_heatmap <- function(long_df, fill_lab) {
       ggplot(long_df, aes(x = Sample, y = Match, fill = value)) +
         geom_tile() +
-        geom_text(
-          aes(label = round(value, digits)),
-          color = "white",
-          size = 4
-        ) +
         viridis::scale_fill_viridis(option = "E") +
         ht +
         labs(x = NULL, y = NULL, fill = fill_lab)
@@ -2603,7 +2598,7 @@ PSManalyst_server <- function(id) {
           sum(x * y) / sqrt(sum(x^2) * sum(y^2))
         }) %>%
         matrix_to_long() %>%
-        similarity_heatmap("Cosine similarity", digits = 3)
+        similarity_heatmap("Cosine similarity")
     }
 
     prot_fns$euclidean_distance <- function() {
@@ -2611,7 +2606,7 @@ PSManalyst_server <- function(id) {
       combined_protein_data() %>%
         pairwise_sample_matrix(function(x, y) sqrt(sum((x - y)^2))) %>%
         matrix_to_long() %>%
-        similarity_heatmap("Euclidean distance", digits = 1)
+        similarity_heatmap("Euclidean distance")
     }
 
     # Jaccard on protein identification (presence/absence):
@@ -2635,7 +2630,7 @@ PSManalyst_server <- function(id) {
       }
       jac %>%
         matrix_to_long() %>%
-        similarity_heatmap("Jaccard similarity", digits = 3)
+        similarity_heatmap("Jaccard similarity")
     }
 
     # Render similarity plots (always visible in their tab)
