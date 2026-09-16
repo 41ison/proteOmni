@@ -95,16 +95,23 @@ read_summary_file <- function(path) {
 
 # ── proteinGroups.txt helpers ─────────────────────────────────────────────────
 
-#' Build a protein abundance matrix from proteinGroups.txt.
+#' Quantity types that can be exported from proteinGroups.txt.
+#' Names are display labels, values are the column prefixes.
+MQ_QUANT_TYPES <- c(
+  "Intensity" = "Intensity",
+  "LFQ intensity" = "LFQ intensity",
+  "iBAQ" = "iBAQ"
+)
+
+#' Read and filter proteinGroups.txt.
 #'
 #' Removes reverse hits, potential contaminants and groups only identified by
-#' site, keeps the first accession of each protein group and returns the
-#' per-sample \code{Intensity <sample>} columns.
+#' site, and adds a \code{Protein ID} column holding the first accession of
+#' each protein group.
 #'
 #' @param path Character. Full path to proteinGroups.txt.
-#' @return A data.table with a \code{Protein ID} column followed by one
-#'   intensity column per sample.
-read_protein_matrix <- function(path) {
+#' @return Filtered data.table with all original columns plus \code{Protein ID}.
+read_protein_groups <- function(path) {
   pg <- data.table::fread(path)
 
   flagged <- function(col) {
@@ -118,16 +125,72 @@ read_protein_matrix <- function(path) {
     flagged("Potential contaminant") |
     flagged("Only identified by site"))
   pg <- pg[keep]
+  pg[, `Protein ID` := sub(";.*$", "", `Protein IDs`)]
+  pg
+}
 
-  # Sample-level columns are "Intensity <sample>"; the bare "Intensity" column
-  # is the summed total and is excluded.
-  int_cols <- grep("^Intensity .+", names(pg), value = TRUE)
 
-  out <- data.table::data.table(
-    `Protein ID` = sub(";.*$", "", pg[["Protein IDs"]])
+#' Per-sample column names for a quantity type.
+#'
+#' Sample-level columns are "<quant> <sample>"; the bare "<quant>" column is
+#' the summed total and "iBAQ peptides" is a count, so both are excluded.
+quant_sample_cols <- function(pg, quant) {
+  cols <- grep(paste0("^", quant, " .+"), names(pg), value = TRUE)
+  setdiff(cols, paste0(quant, " peptides"))
+}
+
+
+#' Quantity types present (with per-sample columns) in a proteinGroups table.
+#' @return Named character vector, subset of \code{MQ_QUANT_TYPES}.
+available_quant_types <- function(pg) {
+  present <- vapply(
+    MQ_QUANT_TYPES,
+    function(q) length(quant_sample_cols(pg, q)) > 0,
+    logical(1)
   )
-  out <- cbind(out, pg[, .SD, .SDcols = int_cols])
-  data.table::setnames(out, int_cols, sub("^Intensity ", "", int_cols))
+  MQ_QUANT_TYPES[present]
+}
+
+
+#' Build a protein abundance matrix from a filtered proteinGroups table.
+#'
+#' @param pg         data.table from \code{read_protein_groups()}.
+#' @param quant      Character. One of \code{MQ_QUANT_TYPES}.
+#' @param zero_to_na Logical. Replace 0 (MaxQuant's "not quantified") with NA.
+#' @param log2_transform Logical. Apply log2 to the abundance columns. Zeros
+#'   are always converted to NA first, since log2(0) is -Inf.
+#' @return A data.table with a \code{Protein ID} column followed by one
+#'   abundance column per sample.
+build_protein_matrix <- function(
+  pg,
+  quant = "Intensity",
+  zero_to_na = FALSE,
+  log2_transform = FALSE
+) {
+  cols <- quant_sample_cols(pg, quant)
+  if (length(cols) == 0) {
+    stop("No per-sample '", quant, "' columns found in proteinGroups.txt.")
+  }
+  out <- cbind(
+    data.table::data.table(`Protein ID` = pg[["Protein ID"]]),
+    pg[, .SD, .SDcols = cols]
+  )
+  data.table::setnames(out, cols, sub(paste0("^", quant, " "), "", cols))
+  val_cols <- setdiff(names(out), "Protein ID")
+
+  if (zero_to_na || log2_transform) {
+    out[,
+      (val_cols) := lapply(.SD, function(x) {
+        x <- as.numeric(x)
+        x[!is.na(x) & x == 0] <- NA_real_
+        x
+      }),
+      .SDcols = val_cols
+    ]
+  }
+  if (log2_transform) {
+    out[, (val_cols) := lapply(.SD, log2), .SDcols = val_cols]
+  }
   out
 }
 
@@ -659,6 +722,23 @@ MaxQuantMSMS_sidebar_ui <- function(id) {
           class = "dl-btn",
           style = "width:100%;text-align:left;margin-bottom:6px;"
         ),
+        tags$hr(style = "border-color:#2d3741;margin:8px 0 4px 0;"),
+        selectInput(
+          ns("pg_quant"),
+          "Protein abundance values",
+          choices = MQ_QUANT_TYPES,
+          selected = "Intensity"
+        ),
+        checkboxInput(
+          ns("pg_zero_na"),
+          "Replace zeros with NA",
+          value = FALSE
+        ),
+        checkboxInput(
+          ns("pg_log2"),
+          "log2-transform values (zeros become NA)",
+          value = FALSE
+        ),
         downloadButton(
           ns("download_protein_matrix"),
           "\u2B07 Protein Abundance Matrix (.tsv)",
@@ -908,7 +988,7 @@ MaxQuantMSMS_server <- function(id) {
     raw_msms_rv <- reactiveVal(NULL)
     raw_evidence_rv <- reactiveVal(NULL)
     raw_summary_rv <- reactiveVal(NULL)
-    protein_matrix_rv <- reactiveVal(NULL)
+    protein_groups_rv <- reactiveVal(NULL)
 
     # Read one file with progress + log; returns NULL on failure
     load_one <- function(label, path, reader, step, n_steps) {
@@ -961,7 +1041,7 @@ MaxQuantMSMS_server <- function(id) {
       raw_msms_rv(NULL)
       raw_evidence_rv(NULL)
       raw_summary_rv(NULL)
-      protein_matrix_rv(NULL)
+      protein_groups_rv(NULL)
       status_log(status_log()[0, ])
 
       folder <- trimws(input$mq_folder)
@@ -1012,13 +1092,38 @@ MaxQuantMSMS_server <- function(id) {
           1,
           4
         ))
-        protein_matrix_rv(load_one(
+        protein_groups_rv(load_one(
           "proteinGroups.txt",
           files$proteinGroups,
-          read_protein_matrix,
+          read_protein_groups,
           2,
           4
         ))
+        # Offer only the quantity types actually present in this run
+        if (!is.null(protein_groups_rv())) {
+          avail <- available_quant_types(protein_groups_rv())
+          if (length(avail) == 0) {
+            log_step(
+              "proteinGroups.txt has no per-sample Intensity / LFQ / iBAQ columns.",
+              "warn"
+            )
+          } else {
+            log_step(
+              paste0(
+                "Abundance values available: ",
+                paste(names(avail), collapse = ", ")
+              ),
+              "info",
+              notify = FALSE
+            )
+          }
+          updateSelectInput(
+            session,
+            "pg_quant",
+            choices = avail,
+            selected = if ("Intensity" %in% avail) "Intensity" else avail[1]
+          )
+        }
         raw_evidence_rv(load_one(
           "evidence.txt",
           files$evidence,
@@ -1045,7 +1150,7 @@ MaxQuantMSMS_server <- function(id) {
       }
       loaded <- list(
         summary = raw_summary_rv(),
-        proteinGroups = protein_matrix_rv(),
+        proteinGroups = protein_groups_rv(),
         evidence = raw_evidence_rv(),
         msms = raw_msms_rv()
       )
@@ -1261,16 +1366,65 @@ MaxQuantMSMS_server <- function(id) {
       )
     })
 
+    # Abundance matrix for the currently selected quantity type
+    protein_matrix <- reactive({
+      req(protein_groups_rv(), input$pg_quant)
+      req(input$pg_quant %in% available_quant_types(protein_groups_rv()))
+      build_protein_matrix(
+        protein_groups_rv(),
+        input$pg_quant,
+        zero_to_na = isTRUE(input$pg_zero_na),
+        log2_transform = isTRUE(input$pg_log2)
+      )
+    })
+
+    # Human-readable description of the current matrix settings
+    protein_matrix_label <- reactive({
+      paste0(
+        input$pg_quant,
+        if (isTRUE(input$pg_log2)) {
+          " (log2, zeros -> NA)"
+        } else if (isTRUE(input$pg_zero_na)) {
+          " (zeros -> NA)"
+        } else {
+          ""
+        }
+      )
+    })
+
+    # Keep the two checkboxes consistent: log2 implies zeros -> NA
+    observeEvent(
+      input$pg_log2,
+      {
+        if (isTRUE(input$pg_log2)) {
+          updateCheckboxInput(session, "pg_zero_na", value = TRUE)
+          shinyjs::disable("pg_zero_na")
+        } else {
+          shinyjs::enable("pg_zero_na")
+        }
+      },
+      ignoreInit = TRUE
+    )
+
     output$protein_matrix_table <- DT::renderDataTable({
-      req(protein_matrix_rv())
+      pm <- protein_matrix()
       DT::datatable(
-        head(protein_matrix_rv(), 500),
+        head(pm, 500),
         rownames = FALSE,
+        caption = paste0(
+          "Values: ",
+          protein_matrix_label(),
+          " — ",
+          format(nrow(pm), big.mark = ","),
+          " protein groups × ",
+          ncol(pm) - 1,
+          " samples (first 500 rows shown)"
+        ),
         options = list(dom = "frtip", pageLength = 20, scrollX = TRUE),
         class = "display compact"
       ) |>
         DT::formatSignif(
-          columns = setdiff(names(protein_matrix_rv()), "Protein ID"),
+          columns = setdiff(names(pm), "Protein ID"),
           digits = 4
         )
     })
@@ -1435,17 +1589,26 @@ MaxQuantMSMS_server <- function(id) {
     # Protein abundance matrix TSV
     output$download_protein_matrix <- downloadHandler(
       filename = function() {
-        paste0("protein_abundance_matrix_", Sys.Date(), ".tsv")
+        tag <- gsub("[^A-Za-z0-9]+", "_", input$pg_quant)
+        if (isTRUE(input$pg_log2)) {
+          tag <- paste0(tag, "_log2")
+        } else if (isTRUE(input$pg_zero_na)) {
+          tag <- paste0(tag, "_zeroNA")
+        }
+        paste0("protein_abundance_matrix_", tag, "_", Sys.Date(), ".tsv")
       },
       content = function(file) {
-        req(protein_matrix_rv())
-        data.table::fwrite(
-          protein_matrix_rv(),
-          file = file,
-          sep = "\t",
-          na = "NA"
+        pm <- protein_matrix()
+        data.table::fwrite(pm, file = file, sep = "\t", na = "NA")
+        log_step(
+          sprintf(
+            "Protein abundance matrix (%s) downloaded: %s proteins x %d samples.",
+            protein_matrix_label(),
+            format(nrow(pm), big.mark = ","),
+            ncol(pm) - 1
+          ),
+          "ok"
         )
-        log_step("Protein abundance matrix downloaded.", "ok")
       }
     )
 
