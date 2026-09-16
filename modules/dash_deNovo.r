@@ -30,7 +30,38 @@ suppressPackageStartupMessages({
   library(viridis)
   library(colourpicker)
   library(DT)
+  library(arrow)
 })
+
+# ── Ingestion settings ────────────────────────────────────────────────────────
+## Number of text lines parsed per chunk when streaming an .mztab to parquet.
+DN_CHUNK_LINES <- 200000L
+## Max rows materialised for the interactive PSM table.
+DN_TABLE_MAX_ROWS <- 50000L
+## Columns needed by the plotting code (kept narrow to limit memory use).
+DN_PLOT_COLS <- c(
+  "filename",
+  "score",
+  "aa_score_mean",
+  "peptide_length",
+  "charge",
+  "mz_error",
+  "retention_time",
+  "mod_name",
+  "is_modified",
+  "gravy",
+  "pI",
+  "MW",
+  "stripped_sequence"
+)
+DN_NUMERIC_COLS <- c(
+  "PSM_ID",
+  "search_engine_score[1]",
+  "retention_time",
+  "charge",
+  "exp_mass_to_charge",
+  "calc_mass_to_charge"
+)
 
 # ── Helper functions ──────────────────────────────────────────────────────────
 
@@ -48,108 +79,357 @@ strip_sequence <- function(seq) {
   s
 }
 
-## Clean modification name from mzTab format:
-## "19-Oxidation (M):UNIMOD:35" → "Oxidation (M)"
-## "null" / NA                  → NA
-parse_mod_name <- function(x) {
-  if (is.na(x) || str_trim(x) %in% c("null", "NULL", "")) {
-    return(NA_character_)
+## Clean modification names from mzTab format (vectorised):
+## "19-Oxidation (M):UNIMOD:35,3-Carbamyl:UNIMOD:5" → "Oxidation (M); Carbamyl"
+## "null" / NA                                      → NA
+parse_mod_names <- function(x) {
+  x <- as.character(x)
+  x[!is.na(x) & str_trim(x) %in% c("null", "NULL", "")] <- NA_character_
+  x <- str_replace_all(x, "(^|,)\\s*[0-9]+-", "\\1") # strip position prefix
+  x <- str_replace_all(x, ":UNIMOD:[^,]*", "") # strip UNIMOD suffix
+  str_trim(str_replace_all(x, ",\\s*", "; "))
+}
+
+## Mean of the comma-separated per-residue scores in opt_global_aa_scores
+mean_aa_scores <- function(x) {
+  out <- rep(NA_real_, length(x))
+  ok <- !is.na(x)
+  if (any(ok)) {
+    out[ok] <- vapply(
+      str_split(x[ok], ","),
+      function(s) mean(suppressWarnings(as.numeric(s)), na.rm = TRUE),
+      numeric(1)
+    )
   }
-  parts <- str_split(x, ",")[[1]]
-  parts <- str_trim(parts)
-  parts <- sub("^[0-9]+-", "", parts) # strip position prefix
-  parts <- sub(":UNIMOD:.*$", "", parts) # strip UNIMOD suffix
-  paste(parts, collapse = "; ")
+  out[is.nan(out)] <- NA_real_
+  out
+}
+
+## Vectorised Kyte–Doolittle GRAVY (utils_fasta::GRAVY is scalar-only)
+gravy_vec <- function(seq) {
+  hi <- c(
+    A = 1.8,
+    R = -4.5,
+    N = -3.5,
+    D = -3.5,
+    C = 2.5,
+    Q = -3.5,
+    E = -3.5,
+    G = -0.4,
+    H = -3.2,
+    I = 4.5,
+    L = 3.8,
+    K = -3.9,
+    M = 1.9,
+    F = 2.8,
+    P = -1.6,
+    S = -0.8,
+    T = -0.7,
+    W = -0.9,
+    Y = -1.3,
+    V = 4.2
+  )
+  counts <- lapply(names(hi), function(aa) str_count(seq, fixed(aa)))
+  n_res <- Reduce(`+`, counts)
+  total <- Reduce(`+`, Map(`*`, counts, hi))
+  out <- total / n_res
+  out[is.na(seq) | n_res == 0] <- NA_real_
+  out
 }
 
 
-## Parse a Casanovo .mztab file → list(metadata df, psm df)
-read_mztab <- function(path) {
-  lines <- readLines(path, warn = FALSE)
-  # Strip carriage returns (Windows CRLF files)
-  lines <- gsub("\r", "", lines)
-
-  # Metadata
-  mtd <- lines[startsWith(lines, "MTD")]
-  meta <- do.call(rbind, strsplit(mtd, "\t")) |>
-    as.data.frame(stringsAsFactors = FALSE)
-  colnames(meta) <- c("prefix", "key", "value")
-  meta <- meta[, c("key", "value")]
-
-  # PSM header
-  psh <- lines[startsWith(lines, "PSH")][1]
-  cols <- strsplit(psh, "\t")[[1]]
-  cols[1] <- "row_type"
-
-  # PSM rows
-  psm_lines <- lines[startsWith(lines, "PSM")]
-  if (!length(psm_lines)) {
-    return(list(metadata = meta, psm = NULL))
+## Map ms_run[i] → sample name from the MTD "ms_run[i]-location" entries.
+## "file:///I:/.../THP1_M2_global_3.mzML" → c("ms_run[1]" = "THP1_M2_global_3")
+## Supported extensions: .mzML, .mgf, .mzXML, .raw, .d (optionally .gz)
+ms_run_sample_names <- function(meta) {
+  loc <- meta[grepl("^ms_run\\[[0-9]+\\]-location$", meta$key), , drop = FALSE]
+  if (!nrow(loc)) {
+    return(character(0))
   }
-
-  mat <- do.call(rbind, strsplit(psm_lines, "\t"))
-  if (ncol(mat) < length(cols)) {
-    mat <- cbind(mat, matrix("", nrow(mat), length(cols) - ncol(mat)))
-  }
-  psm <- as.data.frame(mat[, seq_len(length(cols))], stringsAsFactors = FALSE)
-  colnames(psm) <- cols
-  psm$row_type <- NULL
-
-  num_cols <- c(
-    "PSM_ID",
-    "search_engine_score[1]",
-    "retention_time",
-    "charge",
-    "exp_mass_to_charge",
-    "calc_mass_to_charge"
+  ids <- sub("-location$", "", loc$key)
+  path <- sub("^file:/+", "", loc$value)
+  path <- vapply(path, utils::URLdecode, character(1), USE.NAMES = FALSE)
+  # Normalise Windows separators; basename() drops any trailing slash (.d folders)
+  fname <- basename(gsub("\\\\", "/", path))
+  sample <- sub(
+    "\\.(mzml|mgf|mzxml|raw|d)(\\.gz)?$",
+    "",
+    fname,
+    ignore.case = TRUE
   )
-  for (col in intersect(num_cols, names(psm))) {
+  setNames(sample, ids)
+}
+
+## Parse MTD lines → data.frame(key, value)
+parse_mtd_lines <- function(mtd) {
+  if (!length(mtd)) {
+    return(data.frame(key = character(0), value = character(0)))
+  }
+  parts <- str_split_fixed(mtd, "\t", n = 3)
+  data.frame(key = parts[, 2], value = parts[, 3], stringsAsFactors = FALSE)
+}
+
+## Type-convert one chunk of raw PSM strings and add the derived columns.
+## `psm` is an all-character data.frame with PSH column names; `run_names`
+## is the ms_run[i] → sample lookup from ms_run_sample_names().
+dn_derive_psm <- function(psm, run_names, mztab_file) {
+  for (col in intersect(DN_NUMERIC_COLS, names(psm))) {
     psm[[col]] <- suppressWarnings(as.numeric(psm[[col]]))
+  }
+  for (col in setdiff(DN_NUMERIC_COLS, names(psm))) {
+    psm[[col]] <- NA_real_
+  }
+  for (col in c(
+    "sequence",
+    "modifications",
+    "opt_global_aa_scores",
+    "spectra_ref"
+  )) {
+    if (!col %in% names(psm)) {
+      psm[[col]] <- NA_character_
+    }
   }
 
   psm <- psm |>
     mutate(across(
       where(is.character),
-      ~ ifelse(. %in% c("null", "NULL", ""), NA, .)
+      ~ if_else(. %in% c("null", "NULL", ""), NA_character_, .)
     ))
 
   score_col <- which(names(psm) == "search_engine_score[1]")
-  if (length(score_col) == 0) {
-    score_col <- grep("search_engine_score", names(psm), fixed = FALSE)[1]
+  if (!length(score_col)) {
+    score_col <- grep("search_engine_score", names(psm))[1]
   }
-  if (length(score_col) > 0 && !is.na(score_col)) {
-    names(psm)[score_col] <- "score"
-  } else {
+  if (!length(score_col) || is.na(score_col)) {
     stop(paste(
       "Cannot find search_engine_score column. Available columns:",
       paste(names(psm), collapse = ", ")
     ))
   }
+  names(psm)[score_col] <- "score"
 
-  psm <- psm |>
+  psm |>
     mutate(
-      stripped_sequence = sapply(sequence, strip_sequence, USE.NAMES = FALSE),
+      stripped_sequence = strip_sequence(sequence),
       peptide_length = nchar(stripped_sequence),
       mz_error = exp_mass_to_charge - calc_mass_to_charge,
-      mod_name = sapply(modifications, parse_mod_name, USE.NAMES = FALSE),
+      mod_name = parse_mod_names(modifications),
       is_modified = !is.na(mod_name),
-      aa_score_mean = sapply(
-        `opt_global_aa_scores`,
-        function(x) {
-          if (is.na(x)) {
-            return(NA_real_)
-          }
-          sc <- suppressWarnings(as.numeric(strsplit(x, ",")[[1]]))
-          mean(sc, na.rm = TRUE)
-        },
-        USE.NAMES = FALSE
-      ),
-      gravy = sapply(stripped_sequence, GRAVY, USE.NAMES = FALSE),
-      pI = calculate_pI(stripped_sequence),
-      MW = calculate_MW(stripped_sequence)
+      aa_score_mean = mean_aa_scores(opt_global_aa_scores),
+      gravy = gravy_vec(stripped_sequence),
+      pI = as.numeric(calculate_pI(stripped_sequence)),
+      MW = as.numeric(calculate_MW(stripped_sequence)),
+      # Link each PSM to its original input file via spectra_ref ("ms_run[9]:...")
+      ms_run = str_extract(spectra_ref, "^ms_run\\[[0-9]+\\]"),
+      sample_name = unname(run_names[ms_run]),
+      mztab_file = mztab_file,
+      # Facet/group by the original input file (ms_run) when available;
+      # fall back to the .mztab name if the location is missing
+      filename = if_else(is.na(sample_name), mztab_file, sample_name)
     )
+}
 
-  list(metadata = meta, psm = psm)
+## Where to place the parquet cache for a results directory: a hidden folder
+## next to the .mztab files when writable, otherwise the session tempdir.
+## Override with options(proteOmni.deNovo_parquet_dir = "/path").
+dn_parquet_root <- function(dir_path) {
+  opt <- getOption("proteOmni.deNovo_parquet_dir", NULL)
+  if (!is.null(opt)) {
+    return(opt)
+  }
+  if (file.access(dir_path, mode = 2) == 0) {
+    file.path(dir_path, ".proteOmni_parquet")
+  } else {
+    file.path(tempdir(), "deNovo_parquet")
+  }
+}
+
+## Stream a Casanovo .mztab file into a chunked parquet dataset.
+##
+## The file is never fully loaded: it is read `chunk_lines` lines at a time,
+## MTD rows are collected as metadata, and each block of PSM rows is typed,
+## annotated (dn_derive_psm) and written to <out_dir>/part-NNNNN.parquet.
+## A manifest.rds (metadata + ingestion summary) is written alongside so a
+## later call with the same unchanged source file reuses the cache.
+##
+## Returns list(metadata = data.frame(key, value), summary = 1-row tibble,
+##              parquet_dir = <out_dir>)
+mztab_to_parquet <- function(
+  path,
+  out_dir,
+  chunk_lines = DN_CHUNK_LINES,
+  progress = NULL,
+  force = FALSE
+) {
+  mztab_file <- str_extract(basename(path), "^[^\\.]+")
+  src_size <- file.size(path)
+  src_mtime <- file.mtime(path)
+  manifest_path <- file.path(out_dir, "manifest.rds")
+
+  # ── Reuse cache if the source is unchanged ────────────────────────────────
+  if (!force && file.exists(manifest_path)) {
+    man <- tryCatch(readRDS(manifest_path), error = function(e) NULL)
+    parts <- list.files(out_dir, pattern = "^part-.*\\.parquet$")
+    if (
+      !is.null(man) &&
+        length(parts) > 0 &&
+        identical(man$source_size, src_size) &&
+        isTRUE(abs(as.numeric(man$source_mtime) - as.numeric(src_mtime)) < 1)
+    ) {
+      man$summary$cached <- TRUE
+      return(list(
+        metadata = man$metadata,
+        summary = man$summary,
+        parquet_dir = out_dir
+      ))
+    }
+  }
+
+  # ── Fresh conversion ──────────────────────────────────────────────────────
+  if (dir.exists(out_dir)) {
+    unlink(list.files(
+      out_dir,
+      full.names = TRUE,
+      all.files = TRUE,
+      no.. = TRUE
+    ))
+  }
+  dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
+
+  t0 <- Sys.time()
+  con <- file(path, open = "r")
+  on.exit(close(con), add = TRUE)
+
+  mtd_lines <- character(0)
+  cols <- NULL
+  run_names <- character(0)
+  schema <- NULL
+  n_lines <- 0L
+  n_psm <- 0L
+  n_parts <- 0L
+  bytes_seen <- 0
+
+  write_chunk <- function(psm_lines) {
+    if (!length(psm_lines) || is.null(cols)) {
+      return(invisible())
+    }
+    mat <- str_split_fixed(psm_lines, "\t", n = length(cols))
+    psm <- as.data.frame(mat, stringsAsFactors = FALSE)
+    colnames(psm) <- cols
+    psm$row_type <- NULL
+    psm <- dn_derive_psm(psm, run_names, mztab_file)
+
+    tbl <- if (is.null(schema)) {
+      t <- arrow::as_arrow_table(psm)
+      schema <<- t$schema
+      t
+    } else {
+      arrow::as_arrow_table(psm, schema = schema)
+    }
+    n_parts <<- n_parts + 1L
+    n_psm <<- n_psm + nrow(psm)
+    arrow::write_parquet(
+      tbl,
+      file.path(out_dir, sprintf("part-%05d.parquet", n_parts))
+    )
+  }
+
+  repeat {
+    lines <- readLines(con, n = chunk_lines, warn = FALSE)
+    if (!length(lines)) {
+      break
+    }
+    bytes_seen <- bytes_seen + sum(nchar(lines, type = "bytes")) + length(lines)
+    n_lines <- n_lines + length(lines)
+    lines <- sub("\r$", "", lines)
+    prefix <- substr(lines, 1, 3)
+
+    mtd_new <- lines[prefix == "MTD"]
+    if (length(mtd_new)) {
+      mtd_lines <- c(mtd_lines, mtd_new)
+      run_names <- ms_run_sample_names(parse_mtd_lines(mtd_lines))
+    }
+
+    if (is.null(cols)) {
+      psh <- lines[prefix == "PSH"]
+      if (length(psh)) {
+        cols <- strsplit(psh[1], "\t")[[1]]
+        cols[1] <- "row_type"
+      }
+    }
+
+    write_chunk(lines[prefix == "PSM"])
+
+    if (is.function(progress)) {
+      progress(
+        min(0.99, bytes_seen / max(src_size, 1)),
+        sprintf("%s: %s PSMs", basename(path), format(n_psm, big.mark = ","))
+      )
+    }
+  }
+
+  meta <- parse_mtd_lines(mtd_lines)
+  elapsed <- as.numeric(difftime(Sys.time(), t0, units = "secs"))
+  parquet_size <- sum(file.size(list.files(
+    out_dir,
+    pattern = "\\.parquet$",
+    full.names = TRUE
+  )))
+
+  summary <- tibble::tibble(
+    mztab_file = mztab_file,
+    source_path = path,
+    source_size_mb = round(src_size / 1024^2, 1),
+    n_lines = n_lines,
+    n_mtd = nrow(meta),
+    n_psm = n_psm,
+    n_ms_runs = length(run_names),
+    n_columns = if (is.null(cols)) 0L else length(cols) - 1L,
+    n_chunks = n_parts,
+    parquet_size_mb = round(parquet_size / 1024^2, 1),
+    elapsed_s = round(elapsed, 1),
+    cached = FALSE,
+    parquet_dir = out_dir
+  )
+
+  saveRDS(
+    list(
+      source_path = path,
+      source_size = src_size,
+      source_mtime = src_mtime,
+      metadata = meta,
+      summary = summary,
+      created = Sys.time()
+    ),
+    manifest_path
+  )
+
+  list(metadata = meta, summary = summary, parquet_dir = out_dir)
+}
+
+## Open all converted parts as one lazy arrow Dataset (nothing is loaded
+## into memory until collect()).
+open_psm_dataset <- function(parquet_dirs) {
+  files <- list.files(
+    parquet_dirs,
+    pattern = "^part-.*\\.parquet$",
+    full.names = TRUE
+  )
+  if (!length(files)) {
+    return(NULL)
+  }
+  arrow::open_dataset(files, format = "parquet", unify_schemas = TRUE)
+}
+
+## Row count of a Dataset or lazy arrow query
+dn_nrow <- function(q) {
+  if (is.null(q)) {
+    return(0L)
+  }
+  if (inherits(q, "Dataset")) {
+    return(nrow(q))
+  }
+  q |> summarise(n = n()) |> collect() |> pull(n)
 }
 
 prep_seqlogo <- function(seqs, width) {
@@ -327,7 +607,8 @@ deNovo_body_ui <- function(id) {
               icon("circle-info"),
               " Casanovo Run Summary"
             ),
-            uiOutput(ns("metadata_ui"))
+            uiOutput(ns("metadata_ui")),
+            uiOutput(ns("ingest_ui"))
           )
         )),
         fluidRow(infoBoxOutput(ns("info_box"), width = 12)),
@@ -377,8 +658,17 @@ deNovo_server <- function(id) {
       fn()
     }
 
-    # ── Load raw data ───────────────────────────────────────────────────────────
-    raw_data_rv <- reactiveValues(metadata = NULL, psm = NULL)
+    # ── Load raw data (stream .mztab → parquet, keep only a lazy handle) ────────
+    ## PSMs are never held in memory as a whole. Each .mztab is converted to a
+    ## chunked parquet dataset (cached next to the source); `parquet_dirs` is the
+    ## only thing kept here, and every consumer queries it lazily via arrow.
+    raw_data_rv <- reactiveValues(
+      parquet_dirs = NULL,
+      metadata = NULL,
+      ingest = NULL,
+      stats = NULL,
+      version = 0L
+    )
 
     observeEvent(input$load_dir_btn, {
       dir_path <- trimws(input$mztab_dir)
@@ -387,7 +677,7 @@ deNovo_server <- function(id) {
         return()
       }
       show_all()
-      withProgress(message = "Parsing mzTab files...", value = 0, {
+      withProgress(message = "Converting mzTab → parquet...", value = 0, {
         mz_files <- list.files(
           dir_path,
           pattern = "\\.mztab$",
@@ -404,50 +694,97 @@ deNovo_server <- function(id) {
           return()
         }
 
-        all_meta <- psm_list <- list()
+        pq_root <- dn_parquet_root(dir_path)
         n <- length(mz_files)
+        all_meta <- ingest <- list()
+        pq_dirs <- character(0)
 
         for (i in seq_along(mz_files)) {
           fpath <- mz_files[i]
           fname <- str_extract(basename(fpath), "^[^\\.]+")
-          setProgress(i / n, detail = paste("Reading", basename(fpath)))
-
-          res <- tryCatch(read_mztab(fpath), error = function(e) NULL)
-          if (!is.null(res)) {
-            if (!is.null(res$psm) && nrow(res$psm) > 0) {
-              res$psm$filename <- fname
-              psm_list[[fname]] <- res$psm
-            }
-            if (!is.null(res$metadata)) {
-              res$metadata$filename <- fname
-              all_meta[[fname]] <- res$metadata
-            }
+          base <- (i - 1) / n
+          prog <- function(frac, msg) {
+            setProgress(base + frac / n, detail = msg)
           }
+
+          res <- tryCatch(
+            mztab_to_parquet(
+              fpath,
+              out_dir = file.path(pq_root, fname),
+              progress = prog
+            ),
+            error = function(e) {
+              showNotification(
+                paste0(
+                  "Failed to convert ",
+                  basename(fpath),
+                  ": ",
+                  conditionMessage(e)
+                ),
+                type = "error",
+                duration = 10
+              )
+              NULL
+            }
+          )
+          if (is.null(res)) {
+            next
+          }
+          if (res$summary$n_psm > 0) {
+            pq_dirs <- c(pq_dirs, res$parquet_dir)
+          }
+          if (!is.null(res$metadata) && nrow(res$metadata)) {
+            res$metadata$filename <- fname
+            all_meta[[fname]] <- res$metadata
+          }
+          ingest[[fname]] <- res$summary
         }
 
-        if (length(psm_list) > 0) {
-          raw_data_rv$psm <- bind_rows(psm_list)
+        if (length(pq_dirs) > 0) {
+          setProgress(0.99, detail = "Computing slider ranges...")
+          ds <- open_psm_dataset(pq_dirs)
+          st <- ds |>
+            summarise(
+              n = n(),
+              score_min = min(score, na.rm = TRUE),
+              score_max = max(score, na.rm = TRUE),
+              aa_max = max(aa_score_mean, na.rm = TRUE),
+              n_files = n_distinct(filename)
+            ) |>
+            collect()
+          raw_data_rv$parquet_dirs <- pq_dirs
           raw_data_rv$metadata <- bind_rows(all_meta)
+          raw_data_rv$ingest <- bind_rows(ingest)
+          raw_data_rv$stats <- st
+          raw_data_rv$version <- raw_data_rv$version + 1L
         } else {
-          raw_data_rv$psm <- NULL
+          raw_data_rv$parquet_dirs <- NULL
           raw_data_rv$metadata <- NULL
+          raw_data_rv$ingest <- bind_rows(ingest)
+          raw_data_rv$stats <- NULL
+          showNotification(
+            "No PSM rows found in the .mztab files.",
+            type = "warning"
+          )
         }
         setProgress(1)
       })
     })
 
-    raw_data <- reactive({
-      req(raw_data_rv$psm)
-      list(metadata = raw_data_rv$metadata, psm = raw_data_rv$psm)
+    ## Lazy arrow Dataset over every converted part (all files).
+    raw_ds <- reactive({
+      req(raw_data_rv$parquet_dirs)
+      raw_data_rv$version
+      open_psm_dataset(raw_data_rv$parquet_dirs)
     })
 
-    # ── Update slider ranges once file is loaded ────────────────────────────────
-    observeEvent(raw_data_rv$psm, {
-      psm_dat <- raw_data_rv$psm
-      sc <- psm_dat$score[is.finite(psm_dat$score)]
-      if (length(sc)) {
-        sc_lo <- floor(min(sc) * 100) / 100
-        sc_hi <- ceiling(max(sc) * 100) / 100
+    # ── Update slider ranges once files are converted ───────────────────────────
+    observeEvent(raw_data_rv$stats, {
+      st <- raw_data_rv$stats
+      req(st)
+      if (is.finite(st$score_min) && is.finite(st$score_max)) {
+        sc_lo <- floor(st$score_min * 100) / 100
+        sc_hi <- ceiling(st$score_max * 100) / 100
         updateSliderInput(
           session,
           "score_filter",
@@ -456,31 +793,108 @@ deNovo_server <- function(id) {
           value = sc_lo
         )
       }
-      aa <- psm_dat$aa_score_mean[is.finite(psm_dat$aa_score_mean)]
-      if (length(aa)) {
+      if (is.finite(st$aa_max)) {
         updateSliderInput(
           session,
           "aa_score_filter",
-          max = ceiling(max(aa) * 100) / 100
+          max = ceiling(st$aa_max * 100) / 100
         )
       }
     })
 
     # ── Filtered PSM data ───────────────────────────────────────────────────────
-    data <- reactive({
-      rd <- raw_data()
-      req(rd, rd$psm)
-      rd$psm |>
+    data_q <- reactive({
+      ds <- raw_ds()
+      req(ds)
+      ds |>
         filter(
           is.na(score) | score >= input$score_filter,
           is.na(aa_score_mean) | aa_score_mean >= input$aa_score_filter
         )
     })
 
+    data <- reactive({
+      q <- data_q()
+      cols <- intersect(DN_PLOT_COLS, names(q))
+      q |>
+        select(all_of(cols)) |>
+        collect()
+    })
+
     meta <- reactive({
-      rd <- raw_data()
-      req(rd)
-      rd$metadata
+      req(raw_data_rv$metadata)
+      raw_data_rv$metadata
+    })
+
+    # ── Ingestion summary (what was converted, from where, how big) ─────────────
+    output$ingest_ui <- renderUI({
+      ing <- raw_data_rv$ingest
+      req(ing, nrow(ing) > 0)
+      th_style <- "padding:3px 8px;color:#7fb3d5;font-weight:bold;text-align:left;border-bottom:1px solid #2d3741;"
+      td_style <- "padding:3px 8px;"
+      hdr <- c(
+        "mzTab file",
+        "Source (MB)",
+        "PSMs",
+        "MS runs",
+        "Columns",
+        "Chunks",
+        "Parquet (MB)",
+        "Time (s)",
+        "Cache"
+      )
+      rows <- lapply(seq_len(nrow(ing)), function(i) {
+        r <- ing[i, ]
+        tags$tr(
+          style = if (i %% 2 == 0) "background:#1e2d3d;" else "",
+          tags$td(style = td_style, r$mztab_file),
+          tags$td(style = td_style, format(r$source_size_mb, big.mark = ",")),
+          tags$td(style = td_style, format(r$n_psm, big.mark = ",")),
+          tags$td(style = td_style, r$n_ms_runs),
+          tags$td(style = td_style, r$n_columns),
+          tags$td(style = td_style, r$n_chunks),
+          tags$td(style = td_style, format(r$parquet_size_mb, big.mark = ",")),
+          tags$td(style = td_style, r$elapsed_s),
+          tags$td(
+            style = td_style,
+            if (isTRUE(r$cached)) "reused" else "converted"
+          )
+        )
+      })
+      tot_psm <- sum(ing$n_psm, na.rm = TRUE)
+      tagList(
+        tags$details(
+          open = NA,
+          tags$summary(
+            style = "color:#7fb3d5;cursor:pointer;font-size:11px;font-weight:700;margin-top:8px;",
+            paste0(
+              "▶ Ingestion summary (",
+              nrow(ing),
+              " file",
+              if (nrow(ing) != 1) "s" else "",
+              ", ",
+              format(tot_psm, big.mark = ","),
+              " PSMs, ",
+              format(sum(ing$source_size_mb), big.mark = ","),
+              " MB → ",
+              format(sum(ing$parquet_size_mb), big.mark = ","),
+              " MB parquet)"
+            )
+          ),
+          tags$table(
+            style = "font-size:10px;color:#adb5bd;margin-top:6px;border-collapse:collapse;width:100%;",
+            tags$thead(tags$tr(lapply(hdr, function(h) {
+              tags$th(style = th_style, h)
+            }))),
+            tags$tbody(rows)
+          ),
+          tags$p(
+            style = "font-size:10px;color:#6c7a89;margin:6px 0 0 0;",
+            "Parquet cache: ",
+            tags$code(dirname(ing$parquet_dir[1]))
+          )
+        )
+      )
     })
 
     # ── Metadata box UI ─────────────────────────────────────────────────────────
@@ -544,16 +958,16 @@ deNovo_server <- function(id) {
 
     # ── Info box ────────────────────────────────────────────────────────────────
     output$info_box <- renderInfoBox({
-      d <- data()
-      total <- nrow(raw_data()$psm)
-      n <- nrow(d)
+      # Both counts run in arrow; no rows are pulled into R here
+      total <- dn_nrow(raw_ds())
+      n <- dn_nrow(data_q())
       pct <- if (total > 0) round(n / total * 100, 1) else 0
       infoBox(
         "PSM Filter",
         paste0(
-          n,
+          format(n, big.mark = ","),
           " / ",
-          total,
+          format(total, big.mark = ","),
           " PSMs  (",
           pct,
           "%)  |  score ≥ ",
@@ -808,9 +1222,11 @@ deNovo_server <- function(id) {
     })
 
     plot_elbow_obj <- reactive({
-      rd <- raw_data()
-      req(rd, rd$psm)
-      d_raw <- rd$psm |> dplyr::filter(!is.na(score))
+      # Unfiltered curve; only two columns are materialised
+      d_raw <- raw_ds() |>
+        dplyr::filter(!is.na(score)) |>
+        dplyr::select(filename, score) |>
+        collect()
       if (nrow(d_raw) < 10) {
         return(
           ggplot() +
@@ -1447,18 +1863,29 @@ deNovo_server <- function(id) {
 
     # ── PSM Table ────────────────────────────────────────────────────────────────
     output$psm_table <- DT::renderDataTable({
-      d <- data()
-      req(nrow(d) > 0)
+      n_total <- dn_nrow(data_q())
+      req(n_total > 0)
 
-      d_show <- d |>
-        # Ensure list columns do not break DataTables by converting them to string summaries if any exist
-        dplyr::mutate(across(
-          where(is.list),
-          ~ sapply(., function(x) paste(head(x, 5), collapse = ","))
-        )) |>
+      # Only the first DN_TABLE_MAX_ROWS filtered rows are materialised
+      d_show <- data_q() |>
+        head(DN_TABLE_MAX_ROWS) |>
+        collect() |>
         dplyr::mutate(across(where(is.numeric), ~ round(., 4)))
+      caption <- if (n_total > DN_TABLE_MAX_ROWS) {
+        htmltools::tags$caption(
+          style = "caption-side:top;text-align:left;color:#e67e22;",
+          sprintf(
+            "Showing the first %s of %s filtered PSMs.",
+            format(DN_TABLE_MAX_ROWS, big.mark = ","),
+            format(n_total, big.mark = ",")
+          )
+        )
+      } else {
+        NULL
+      }
       DT::datatable(
         d_show,
+        caption = caption,
         options = list(
           scrollX = TRUE,
           pageLength = 25,
@@ -2055,16 +2482,18 @@ deNovo_server <- function(id) {
       d <- data()
       req(d, nrow(d) > 0)
       req(all(
-        c("sequence", "stripped_sequence", "retention_time", "filename") %in%
-          names(d)
+        c("stripped_sequence", "retention_time", "filename") %in% names(d)
       ))
 
-      d_mod <- d |>
+      # `sequence` (modified form) is not part of DN_PLOT_COLS; pull it from
+      # arrow for modified rows only, which is the smaller subset.
+      d_mod <- data_q() |>
         dplyr::filter(
           !is.na(is_modified) & is_modified == TRUE,
           !is.na(retention_time)
         ) |>
         dplyr::select(stripped_sequence, sequence, retention_time, filename) |>
+        collect() |>
         dplyr::rename(
           peptide = stripped_sequence,
           mod_seq = sequence,
