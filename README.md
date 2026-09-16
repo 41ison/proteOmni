@@ -258,7 +258,7 @@ QC dashboard for [Sage](https://github.com/lazear/sage) search engine results. A
 
 ### 8. MaxQuant — *MaxQuant / DDA*
 
-QC module for MaxQuant results. Requires `msms.txt` and `evidence.txt` from a MaxQuant output directory.
+QC module for MaxQuant results. Requires the path to the combined MaxQuant output directory. The module finds the necessary files to use as input. To understand the files and meaning of each column variable from MaxQuant outputs, see [here](https://cox-labs.github.io/coxdocs/output_tables.html).
 
 **Features:** Annotated MS/MS fragmentation spectrum viewer (b/y ions colour-coded by series) for any peptide in `msms.txt`; evidence-level QC metrics from `evidence.txt` including mass error distributions, charge states, PTM profiles, missed cleavages, and more.
 
@@ -275,7 +275,7 @@ QC module for MaxQuant results. Requires `msms.txt` and `evidence.txt` from a Ma
 | **InstaNovo** | InstaNovo results `.csv` file | FASTA file |
 | **EncyclopeDIA** | Directory path containing EncyclopeDIA `.txt` result files | FASTA file |
 | **Sage** | `results.sage.tsv` or `results.sage.parquet` | FASTA file |
-| **MaxQuant** | `msms.txt`, `evidence.txt` | — |
+| **MaxQuant** | `path/to/combined` | — |
 
 ### PwrQuant abundance matrix format
 
