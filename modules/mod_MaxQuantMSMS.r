@@ -36,6 +36,102 @@ theme_mq <- function(...) {
 }
 
 
+# ── MaxQuant folder discovery ─────────────────────────────────────────────────
+
+#' Locate the MaxQuant output files under a user-supplied folder.
+#'
+#' Accepts either the \code{combined} folder or the \code{combined/txt}
+#' subfolder; searches recursively and prefers matches inside a \code{txt}
+#' directory when more than one exists.
+#'
+#' @param path Character. Folder to search.
+#' @return Named list with elements \code{msms}, \code{evidence},
+#'   \code{summary}, \code{proteinGroups} (full path or \code{NA}).
+find_mq_files <- function(path) {
+  targets <- c(
+    msms = "msms.txt",
+    evidence = "evidence.txt",
+    summary = "summary.txt",
+    proteinGroups = "proteinGroups.txt"
+  )
+  path <- path.expand(trimws(path))
+  if (!nzchar(path) || !dir.exists(path)) {
+    return(setNames(
+      as.list(rep(NA_character_, length(targets))),
+      names(targets)
+    ))
+  }
+  lapply(targets, function(f) {
+    hits <- list.files(
+      path,
+      pattern = paste0("^", f, "$"),
+      recursive = TRUE,
+      full.names = TRUE
+    )
+    if (length(hits) == 0) {
+      return(NA_character_)
+    }
+    in_txt <- grepl("/txt/", hits, fixed = TRUE)
+    if (any(in_txt)) hits[in_txt][1] else hits[1]
+  })
+}
+
+
+# ── summary.txt helpers ───────────────────────────────────────────────────────
+
+#' Read the MaxQuant summary.txt file, dropping columns that are entirely empty.
+#' @param path Character. Full path to summary.txt.
+#' @return A data.table with one row per raw file (plus the MaxQuant Total row).
+read_summary_file <- function(path) {
+  dt <- data.table::fread(path)
+  empty <- vapply(
+    dt,
+    function(x) all(is.na(x) | (is.character(x) & !nzchar(x))),
+    logical(1)
+  )
+  dt[, .SD, .SDcols = !empty]
+}
+
+
+# ── proteinGroups.txt helpers ─────────────────────────────────────────────────
+
+#' Build a protein abundance matrix from proteinGroups.txt.
+#'
+#' Removes reverse hits, potential contaminants and groups only identified by
+#' site, keeps the first accession of each protein group and returns the
+#' per-sample \code{Intensity <sample>} columns.
+#'
+#' @param path Character. Full path to proteinGroups.txt.
+#' @return A data.table with a \code{Protein ID} column followed by one
+#'   intensity column per sample.
+read_protein_matrix <- function(path) {
+  pg <- data.table::fread(path)
+
+  flagged <- function(col) {
+    if (!col %in% names(pg)) {
+      return(rep(FALSE, nrow(pg)))
+    }
+    x <- pg[[col]]
+    !is.na(x) & as.character(x) == "+"
+  }
+  keep <- !(flagged("Reverse") |
+    flagged("Potential contaminant") |
+    flagged("Only identified by site"))
+  pg <- pg[keep]
+
+  # Sample-level columns are "Intensity <sample>"; the bare "Intensity" column
+  # is the summed total and is excluded.
+  int_cols <- grep("^Intensity .+", names(pg), value = TRUE)
+
+  out <- data.table::data.table(
+    `Protein ID` = sub(";.*$", "", pg[["Protein IDs"]])
+  )
+  out <- cbind(out, pg[, .SD, .SDcols = int_cols])
+  data.table::setnames(out, int_cols, sub("^Intensity ", "", int_cols))
+  out
+}
+
+
 # ── msms.txt helpers ──────────────────────────────────────────────────────────
 
 #' Read and pre-process the MaxQuant msms.txt file.
@@ -438,19 +534,32 @@ MaxQuantMSMS_sidebar_ui <- function(id) {
     tags$div(
       id = ns("sidebar_content"),
 
-      # ── Data Upload ───────────────────────────────────────────────────────
-      tags$div(class = "sidebar-section-label", "Data Upload"),
+      # ── Data Input ────────────────────────────────────────────────────────
+      tags$div(class = "sidebar-section-label", "MaxQuant Output Folder"),
 
-      fileInput(
-        ns("msms_file"),
-        "Upload msms.txt",
-        accept = c(".txt", ".tsv")
-      ),
-
-      fileInput(
-        ns("evidence_file"),
-        "Upload evidence.txt",
-        accept = c(".txt", ".tsv")
+      tags$div(
+        style = "padding:0 8px;",
+        textInput(
+          ns("mq_folder"),
+          "Path to MaxQuant 'combined' folder",
+          value = "",
+          placeholder = "/path/to/combined"
+        ),
+        tags$p(
+          style = "color:#adb5bd;font-size:11px;margin-top:-6px;",
+          "msms.txt, evidence.txt, summary.txt and proteinGroups.txt are ",
+          "located automatically in the txt/ subfolder."
+        ),
+        tags$div(
+          style = "text-align:center;",
+          actionButton(
+            ns("load_files"),
+            "Load MaxQuant Files",
+            class = "btn-primary",
+            style = "width:80%;font-weight:bold;margin-bottom:6px;"
+          )
+        ),
+        uiOutput(ns("file_status"))
       ),
 
       tags$hr(style = "border-color:#2d3741;margin:4px 0;"),
@@ -463,7 +572,7 @@ MaxQuantMSMS_sidebar_ui <- function(id) {
         "Select Peptide Sequence",
         choices = NULL,
         options = list(
-          placeholder = "Upload msms.txt first…",
+          placeholder = "Load MaxQuant files first…",
           maxOptions = 5000,
           searchField = "value"
         )
@@ -548,6 +657,12 @@ MaxQuantMSMS_sidebar_ui <- function(id) {
           ns("download_ev_data"),
           "\u2B07 Evidence Data (.tsv)",
           class = "dl-btn",
+          style = "width:100%;text-align:left;margin-bottom:6px;"
+        ),
+        downloadButton(
+          ns("download_protein_matrix"),
+          "\u2B07 Protein Abundance Matrix (.tsv)",
+          class = "dl-btn",
           style = "width:100%;text-align:left;"
         )
       )
@@ -578,7 +693,42 @@ MaxQuantMSMS_body_ui <- function(id) {
     id = ns("tabs"),
     type = "tabs",
 
-    # ── Tab 1: MS/MS Spectrum ─────────────────────────────────────────────
+    # ── Tab 1: Run Summary (summary.txt) ─────────────────────────────────
+    tabPanel(
+      title = tagList(icon("clipboard-list"), "Run Summary"),
+      fluidRow(
+        box(
+          title = "Processing Status",
+          status = "info",
+          solidHeader = TRUE,
+          width = 12,
+          collapsible = TRUE,
+          uiOutput(ns("status_log_ui"))
+        )
+      ),
+      fluidRow(
+        box(
+          title = "MaxQuant run summary (summary.txt)",
+          status = "primary",
+          solidHeader = TRUE,
+          width = 12,
+          DT::dataTableOutput(ns("run_summary_table"))
+        )
+      ),
+      fluidRow(
+        box(
+          title = "Protein abundance matrix preview (proteinGroups.txt)",
+          status = "primary",
+          solidHeader = TRUE,
+          width = 12,
+          collapsible = TRUE,
+          collapsed = FALSE,
+          DT::dataTableOutput(ns("protein_matrix_table"))
+        )
+      )
+    ),
+
+    # ── Tab 2: MS/MS Spectrum ─────────────────────────────────────────────
     tabPanel(
       title = tagList(icon("chart-bar"), "MS/MS Spectrum"),
       fluidRow(
@@ -710,16 +860,275 @@ MaxQuantMSMS_server <- function(id) {
     show_spinner <- function(sid) shinyjs::show(id = sid)
 
     # ════════════════════════════════════════════════════════════════════
+    # 0. PROCESSING LOG + FILE LOADING
+    # ════════════════════════════════════════════════════════════════════
+
+    # Timestamped step log shown in the sidebar and the Run Summary tab so
+    # the user can always tell whether the app is working or idle.
+    status_log <- reactiveVal(
+      data.frame(
+        time = character(0),
+        level = character(0),
+        msg = character(0),
+        stringsAsFactors = FALSE
+      )
+    )
+
+    log_step <- function(
+      msg,
+      level = c("info", "ok", "warn", "error"),
+      notify = TRUE
+    ) {
+      level <- match.arg(level)
+      status_log(rbind(
+        status_log(),
+        data.frame(
+          time = format(Sys.time(), "%H:%M:%S"),
+          level = level,
+          msg = msg,
+          stringsAsFactors = FALSE
+        )
+      ))
+      if (notify) {
+        showNotification(
+          msg,
+          type = switch(
+            level,
+            info = "message",
+            ok = "message",
+            warn = "warning",
+            error = "error"
+          ),
+          duration = if (level == "error") NULL else 4
+        )
+      }
+    }
+
+    mq_files <- reactiveVal(NULL)
+    raw_msms_rv <- reactiveVal(NULL)
+    raw_evidence_rv <- reactiveVal(NULL)
+    raw_summary_rv <- reactiveVal(NULL)
+    protein_matrix_rv <- reactiveVal(NULL)
+
+    # Read one file with progress + log; returns NULL on failure
+    load_one <- function(label, path, reader, step, n_steps) {
+      if (is.na(path)) {
+        log_step(
+          paste0(label, " not found — related tabs will stay empty."),
+          "warn"
+        )
+        return(NULL)
+      }
+      size_mb <- round(file.info(path)$size / 1024^2, 1)
+      log_step(
+        sprintf("Reading %s (%s MB)…", label, size_mb),
+        "info",
+        notify = FALSE
+      )
+      setProgress(
+        value = (step - 1) / n_steps,
+        message = sprintf("Step %d/%d: reading %s", step, n_steps, label),
+        detail = sprintf("%s MB — large files may take a minute", size_mb)
+      )
+      t0 <- Sys.time()
+      res <- tryCatch(reader(path), error = function(e) {
+        log_step(
+          sprintf("Failed to read %s: %s", label, conditionMessage(e)),
+          "error"
+        )
+        NULL
+      })
+      if (!is.null(res)) {
+        secs <- round(as.numeric(difftime(Sys.time(), t0, units = "secs")), 1)
+        log_step(
+          sprintf(
+            "%s loaded: %s rows in %s s",
+            label,
+            format(nrow(res), big.mark = ","),
+            secs
+          ),
+          "ok"
+        )
+      }
+      res
+    }
+
+    observeEvent(input$load_files, {
+      shinyjs::disable("load_files")
+      on.exit(shinyjs::enable("load_files"), add = TRUE)
+
+      # Reset previous state
+      raw_msms_rv(NULL)
+      raw_evidence_rv(NULL)
+      raw_summary_rv(NULL)
+      protein_matrix_rv(NULL)
+      status_log(status_log()[0, ])
+
+      folder <- trimws(input$mq_folder)
+      if (!nzchar(folder)) {
+        log_step(
+          "Please enter the path to the MaxQuant 'combined' folder.",
+          "error"
+        )
+        return()
+      }
+      if (!dir.exists(path.expand(folder))) {
+        log_step(paste0("Folder not found: ", folder), "error")
+        return()
+      }
+
+      log_step(
+        paste0("Scanning ", folder, " for MaxQuant files…"),
+        "info",
+        notify = FALSE
+      )
+      files <- find_mq_files(folder)
+      mq_files(files)
+
+      found <- names(files)[!is.na(unlist(files))]
+      missing <- setdiff(names(files), found)
+      log_step(
+        sprintf(
+          "Found %d/4 files%s",
+          length(found),
+          if (length(missing)) {
+            paste0(" (missing: ", paste(missing, collapse = ", "), ")")
+          } else {
+            ""
+          }
+        ),
+        if (length(missing)) "warn" else "ok"
+      )
+      if (length(found) == 0) {
+        return()
+      }
+
+      withProgress(message = "Loading MaxQuant files", value = 0, {
+        # Small files first so the Run Summary tab populates quickly
+        raw_summary_rv(load_one(
+          "summary.txt",
+          files$summary,
+          read_summary_file,
+          1,
+          4
+        ))
+        protein_matrix_rv(load_one(
+          "proteinGroups.txt",
+          files$proteinGroups,
+          read_protein_matrix,
+          2,
+          4
+        ))
+        raw_evidence_rv(load_one(
+          "evidence.txt",
+          files$evidence,
+          read_evidence_file,
+          3,
+          4
+        ))
+        raw_msms_rv(load_one("msms.txt", files$msms, read_msms_file, 4, 4))
+        setProgress(1, message = "Loading complete", detail = "")
+      })
+
+      log_step("All available files processed. Ready for analysis.", "ok")
+    })
+
+    # Sidebar status block
+    output$file_status <- renderUI({
+      files <- mq_files()
+      if (is.null(files)) {
+        return(tags$p(
+          style = "color:#adb5bd;font-size:11px;",
+          icon("circle-info"),
+          " No folder loaded yet."
+        ))
+      }
+      loaded <- list(
+        summary = raw_summary_rv(),
+        proteinGroups = protein_matrix_rv(),
+        evidence = raw_evidence_rv(),
+        msms = raw_msms_rv()
+      )
+      row <- function(nm) {
+        if (is.na(files[[nm]])) {
+          tags$li(
+            style = "color:#e74c3c;",
+            icon("xmark"),
+            " ",
+            nm,
+            ".txt missing"
+          )
+        } else if (is.null(loaded[[nm]])) {
+          tags$li(
+            style = "color:#f39c12;",
+            icon("spinner", class = "fa-spin"),
+            " ",
+            nm,
+            ".txt found — loading…"
+          )
+        } else {
+          tags$li(
+            style = "color:#2ecc71;",
+            icon("check"),
+            " ",
+            nm,
+            ".txt (",
+            format(nrow(loaded[[nm]]), big.mark = ","),
+            " rows)"
+          )
+        }
+      }
+      tags$ul(
+        style = "list-style:none;padding-left:4px;font-size:11px;margin-top:4px;",
+        lapply(c("summary", "proteinGroups", "evidence", "msms"), row)
+      )
+    })
+
+    # Full step log in the Run Summary tab
+    output$status_log_ui <- renderUI({
+      lg <- status_log()
+      if (nrow(lg) == 0) {
+        return(tags$p(
+          style = "color:#adb5bd;",
+          icon("circle-info"),
+          " Enter the MaxQuant 'combined' folder path in the sidebar and click ",
+          tags$b("Load MaxQuant Files"),
+          ". Progress will be reported here."
+        ))
+      }
+      colors <- c(
+        info = "#3498db",
+        ok = "#2ecc71",
+        warn = "#f39c12",
+        error = "#e74c3c"
+      )
+      icons <- c(
+        info = "circle-info",
+        ok = "check",
+        warn = "triangle-exclamation",
+        error = "xmark"
+      )
+      tags$ul(
+        style = "list-style:none;padding-left:0;font-family:monospace;font-size:12px;margin:0;",
+        lapply(rev(seq_len(nrow(lg))), function(i) {
+          tags$li(
+            style = paste0("color:", colors[lg$level[i]], ";"),
+            tags$span(style = "color:#7f8c8d;", lg$time[i]),
+            "  ",
+            icon(icons[lg$level[i]]),
+            " ",
+            lg$msg[i]
+          )
+        })
+      )
+    })
+
+    # ════════════════════════════════════════════════════════════════════
     # A. msms.txt REACTIVES
     # ════════════════════════════════════════════════════════════════════
 
     raw_msms <- reactive({
-      req(input$msms_file)
-      withProgress(message = "Reading msms.txt…", value = 0.4, {
-        df <- read_msms_file(input$msms_file$datapath)
-        incProgress(0.6, detail = "Done.")
-        df
-      })
+      req(raw_msms_rv())
     })
 
     # Populate peptide selector after upload
@@ -736,13 +1145,29 @@ MaxQuantMSMS_server <- function(id) {
 
     # Tidy MS/MS data — recalculate only on button click
     tidy_msms_data <- eventReactive(input$run_msms, {
+      if (is.null(raw_msms_rv())) {
+        log_step(
+          "msms.txt is not loaded — load the MaxQuant folder first.",
+          "warn"
+        )
+      }
       req(raw_msms(), nchar(input$peptide_seq) > 0)
       show_spinner("sp_spectrum")
+      log_step(
+        paste0("Building MS/MS spectrum for ", input$peptide_seq, "…"),
+        "info",
+        notify = FALSE
+      )
       withProgress(message = "Tidying MS/MS data…", value = 0.5, {
         result <- tidy_msms(raw_msms(), input$peptide_seq)
         incProgress(0.5, detail = "Done.")
         result
       })
+      log_step(
+        sprintf("MS/MS spectrum ready (%d fragment ions).", nrow(result)),
+        "ok"
+      )
+      result
     })
 
     # Number of facets for dynamic height
@@ -763,21 +1188,27 @@ MaxQuantMSMS_server <- function(id) {
     # ════════════════════════════════════════════════════════════════════
 
     raw_evidence <- reactive({
-      req(input$evidence_file)
-      withProgress(message = "Reading evidence.txt…", value = 0.4, {
-        df <- read_evidence_file(input$evidence_file$datapath)
-        incProgress(0.6, detail = "Done.")
-        df
-      })
+      req(raw_evidence_rv())
     })
 
     # The currently selected evidence plot — recalculate on button click
     current_ev_plot <- eventReactive(input$run_evidence, {
+      if (is.null(raw_evidence_rv())) {
+        log_step(
+          "evidence.txt is not loaded — load the MaxQuant folder first.",
+          "warn"
+        )
+      }
       req(raw_evidence())
       show_spinner("sp_evidence")
 
       df <- raw_evidence()
       sel <- input$ev_plot_select
+      log_step(
+        paste0("Building evidence QC plot: ", sel, "…"),
+        "info",
+        notify = FALSE
+      )
 
       withProgress(message = "Building evidence plot…", value = 0.3, {
         p <- switch(
@@ -800,12 +1231,48 @@ MaxQuantMSMS_server <- function(id) {
         incProgress(0.7, detail = "Done.")
         p
       })
+      log_step("Evidence QC plot built — rendering…", "ok", notify = FALSE)
+      p
     })
 
     # Dynamic height for evidence plots
     ev_plot_height_px <- reactive({
       req(raw_evidence())
       facet_height_px(raw_evidence())
+    })
+
+    # ════════════════════════════════════════════════════════════════════
+    # C0. OUTPUTS — Run Summary / Protein matrix
+    # ════════════════════════════════════════════════════════════════════
+
+    output$run_summary_table <- DT::renderDataTable({
+      req(raw_summary_rv())
+      DT::datatable(
+        raw_summary_rv(),
+        rownames = FALSE,
+        extensions = "FixedColumns",
+        options = list(
+          dom = "frtip",
+          pageLength = 25,
+          scrollX = TRUE,
+          fixedColumns = list(leftColumns = 1)
+        ),
+        class = "display compact"
+      )
+    })
+
+    output$protein_matrix_table <- DT::renderDataTable({
+      req(protein_matrix_rv())
+      DT::datatable(
+        head(protein_matrix_rv(), 500),
+        rownames = FALSE,
+        options = list(dom = "frtip", pageLength = 20, scrollX = TRUE),
+        class = "display compact"
+      ) |>
+        DT::formatSignif(
+          columns = setdiff(names(protein_matrix_rv()), "Protein ID"),
+          digits = 4
+        )
     })
 
     # ════════════════════════════════════════════════════════════════════
@@ -929,7 +1396,9 @@ MaxQuantMSMS_server <- function(id) {
       filename = function() {
         paste0("msms_tidy_", input$peptide_seq, "_", Sys.Date(), ".tsv")
       },
-      content = function(file) data.table::fwrite(tidy_msms_data(), file = file, sep = ",", na = "NA")
+      content = function(file) {
+        data.table::fwrite(tidy_msms_data(), file = file, sep = ",", na = "NA")
+      }
     )
 
     # Evidence plot PDF
@@ -958,7 +1427,26 @@ MaxQuantMSMS_server <- function(id) {
       filename = function() {
         paste0("evidence_data_", Sys.Date(), ".tsv")
       },
-      content = function(file) data.table::fwrite(raw_evidence(), file = file, sep = ",", na = "NA")
+      content = function(file) {
+        data.table::fwrite(raw_evidence(), file = file, sep = ",", na = "NA")
+      }
+    )
+
+    # Protein abundance matrix TSV
+    output$download_protein_matrix <- downloadHandler(
+      filename = function() {
+        paste0("protein_abundance_matrix_", Sys.Date(), ".tsv")
+      },
+      content = function(file) {
+        req(protein_matrix_rv())
+        data.table::fwrite(
+          protein_matrix_rv(),
+          file = file,
+          sep = "\t",
+          na = "NA"
+        )
+        log_step("Protein abundance matrix downloaded.", "ok")
+      }
     )
 
     # ════════════════════════════════════════════════════════════════════════
@@ -1082,7 +1570,7 @@ MaxQuantMSMS_server <- function(id) {
       if (is.null(paired) || nrow(paired) == 0) {
         return(tags$p(
           style = "color:#adb5bd;text-align:center;padding:20px;",
-          "No paired modified/unmodified peptides found. Upload evidence.txt and ensure it contains 'Sequence', 'Modifications', and 'Retention time' columns."
+          "No paired modified/unmodified peptides found. Load the MaxQuant folder (evidence.txt) and ensure it contains 'Sequence', 'Modifications', and 'Retention time' columns."
         ))
       }
       n_samples <- dplyr::n_distinct(paired$sample_name)
