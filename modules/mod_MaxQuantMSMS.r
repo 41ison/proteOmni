@@ -1,5 +1,5 @@
 # ╔══════════════════════════════════════════════════════════════════════════════╗
-# ║  proteOmni — MaxQuant MS/MS Spectrum + Evidence QC Module                  ║
+# ║  proteOmni — MaxQuant Evidence / Peptides / MS/MS Scans QC Module         ║
 # ║  File: mod_MaxQuantMSMS.r                                                  ║
 # ╚══════════════════════════════════════════════════════════════════════════════╝
 
@@ -44,16 +44,25 @@ theme_mq <- function(...) {
 #' subfolder; searches recursively and prefers matches inside a \code{txt}
 #' directory when more than one exists.
 #'
+#' For the heavy tables (\code{msmsScans}, \code{evidence}) the \code{.parquet}
+#' file produced by \code{ensure_mq_parquet()} takes precedence; the
+#' \code{.txt} is returned only when no parquet exists yet, and is then used
+#' solely to build the parquet.
+#'
 #' @param path Character. Folder to search.
-#' @return Named list with elements \code{msms}, \code{evidence},
-#'   \code{summary}, \code{proteinGroups} (full path or \code{NA}).
+#' @return Named list with elements \code{msmsScans}, \code{evidence},
+#'   \code{summary}, \code{proteinGroups}, \code{peptides} (full path or
+#'   \code{NA}). msms.txt is deliberately not used (too large).
+MQ_FILE_TARGETS <- c(
+  msmsScans = "msmsScans",
+  evidence = "evidence",
+  summary = "summary",
+  proteinGroups = "proteinGroups",
+  peptides = "peptides"
+)
+
 find_mq_files <- function(path) {
-  targets <- c(
-    msms = "msms.txt",
-    evidence = "evidence.txt",
-    summary = "summary.txt",
-    proteinGroups = "proteinGroups.txt"
-  )
+  targets <- MQ_FILE_TARGETS
   path <- path.expand(trimws(path))
   if (!nzchar(path) || !dir.exists(path)) {
     return(setNames(
@@ -62,9 +71,10 @@ find_mq_files <- function(path) {
     ))
   }
   lapply(targets, function(f) {
+    exts <- if (f %in% MQ_PARQUET_TABLES) "(txt|parquet)" else "txt"
     hits <- list.files(
       path,
-      pattern = paste0("^", f, "$"),
+      pattern = paste0("^", f, "\\.", exts, "$"),
       recursive = TRUE,
       full.names = TRUE
     )
@@ -72,8 +82,136 @@ find_mq_files <- function(path) {
       return(NA_character_)
     }
     in_txt <- grepl("/txt/", hits, fixed = TRUE)
-    if (any(in_txt)) hits[in_txt][1] else hits[1]
+    if (any(in_txt)) {
+      hits <- hits[in_txt]
+    }
+    # Keep a single directory, then prefer the .parquet within it
+    hits <- hits[dirname(hits) == dirname(hits[1])]
+    is_pq <- grepl("\\.parquet$", hits)
+    if (any(is_pq)) hits[is_pq][1] else hits[1]
   })
+}
+
+
+# ── Parquet cache for heavy tables ────────────────────────────────────────────
+
+#' Tables that are cached as parquet next to the original .txt.
+MQ_PARQUET_TABLES <- c("msmsScans", "evidence")
+
+#' Path of the parquet sibling of a MaxQuant .txt file.
+mq_parquet_path <- function(txt_path) {
+  sub("\\.txt$", ".parquet", txt_path)
+}
+
+#' Make sure a parquet copy of a MaxQuant .txt exists.
+#'
+#' If the parquet already exists it is used as-is. Otherwise the full .txt is
+#' converted once (all columns), the in-memory txt table is released
+#' immediately, and the parquet is written next to the original. The file is
+#' written to a temp name and renamed so a failed conversion never leaves a
+#' truncated parquet behind.
+#'
+#' The parquet is the only format the app works with for these tables, so a
+#' conversion failure (e.g. read-only folder) is an error rather than a
+#' fallback to the .txt.
+#'
+#' @param txt_path Character. Full path to the .txt file.
+#' @param log Function \code{(msg, level)} used to report progress.
+#' @return Parquet path.
+ensure_mq_parquet <- function(txt_path, log = function(msg, level) NULL) {
+  pq_path <- mq_parquet_path(txt_path)
+  if (file.exists(pq_path)) {
+    return(pq_path)
+  }
+  if (!file.exists(txt_path)) {
+    stop("Neither ", basename(pq_path), " nor ", basename(txt_path), " found.")
+  }
+
+  log(
+    sprintf(
+      "Converting %s to parquet (one-time; %s MB)…",
+      basename(txt_path),
+      round(file.info(txt_path)$size / 1024^2, 1)
+    ),
+    "info"
+  )
+  tmp <- tempfile(
+    pattern = paste0(".", basename(pq_path), "-"),
+    tmpdir = dirname(pq_path),
+    fileext = ".tmp"
+  )
+  on.exit(if (file.exists(tmp)) unlink(tmp), add = TRUE)
+
+  t0 <- Sys.time()
+  tryCatch(
+    {
+      dt <- data.table::fread(txt_path)
+      arrow::write_parquet(dt, tmp)
+      # Release the txt table before anything else is loaded
+      rm(dt)
+      invisible(gc())
+      if (!file.rename(tmp, pq_path)) {
+        stop("could not move the temporary file into place")
+      }
+    },
+    error = function(e) {
+      stop(
+        "Could not create ",
+        basename(pq_path),
+        " in ",
+        dirname(pq_path),
+        ": ",
+        conditionMessage(e),
+        ". The folder must be writable so proteOmni can store the parquet ",
+        "next to the original .txt.",
+        call. = FALSE
+      )
+    }
+  )
+  log(
+    sprintf(
+      "%s written (%s MB) in %s s",
+      basename(pq_path),
+      round(file.info(pq_path)$size / 1024^2, 1),
+      round(as.numeric(difftime(Sys.time(), t0, units = "secs")), 1)
+    ),
+    "ok"
+  )
+  pq_path
+}
+
+#' Read selected columns of a heavy MaxQuant table from its parquet file.
+#'
+#' The .txt is never read for analysis: when a .txt path is given it is first
+#' converted with \code{ensure_mq_parquet()} and the parquet is read instead.
+#'
+#' @param path   Character. Path to a .parquet file, or to the .txt when no
+#'   parquet exists yet.
+#' @param select Character. Columns to read; missing ones are skipped.
+#' @param log    Function \code{(msg, level)} for progress messages.
+#' @return A data.table.
+read_mq_table <- function(path, select, log = function(msg, level) NULL) {
+  pq_path <- if (grepl("\\.parquet$", path)) {
+    path
+  } else {
+    ensure_mq_parquet(path, log)
+  }
+
+  available <- arrow::ParquetFileReader$create(pq_path)$GetSchema()$names
+  cols <- intersect(select, available)
+  missing <- setdiff(select, available)
+  if (length(missing)) {
+    log(
+      sprintf(
+        "%s: column(s) not found, skipping: %s",
+        basename(pq_path),
+        paste(missing, collapse = ", ")
+      ),
+      "warn"
+    )
+  }
+  arrow::read_parquet(pq_path, col_select = tidyselect::all_of(cols)) |>
+    data.table::as.data.table()
 }
 
 
@@ -195,137 +333,767 @@ build_protein_matrix <- function(
 }
 
 
-# ── msms.txt helpers ──────────────────────────────────────────────────────────
+# ── peptides.txt helpers ──────────────────────────────────────────────────────
 
-#' Read and pre-process the MaxQuant msms.txt file.
-#' @param path Character. Full path to msms.txt.
-#' @return A tibble ready for \code{tidy_msms()}.
-read_msms_file <- function(path) {
-  data.table::fread(
-    path,
-    select = c(
-      "Raw file",
-      "Charge",
-      "m/z",
-      "Retention time",
-      "Sequence",
-      "Gene Names",
-      "Matches",
-      "Intensities",
-      "Masses",
-      "Intensities2",
-      "Masses2",
-      "Number of matches"
-    )
-  )[, Charge := paste0(as.character(Charge), "+")]
-}
-
-
-#' Tidy a raw msms tibble for a single peptide sequence.
-#' @param data        Tibble from \code{read_msms_file()}.
-#' @param peptide_seq Character. Peptide sequence to subset.
-#' @return Tidy tibble with one row per fragment ion.
-tidy_msms <- function(data, peptide_seq) {
-  # Ensure 'data' is a data.table
-  data.table::setDT(data)
-  data[
-    Sequence == peptide_seq,
-    .(
-      `Raw file`,
-      `Gene Names`,
-      Sequence,
-      `m/z`,
-      `Retention time`,
-      Charge,
-      Match = unlist(strsplit(as.character(Matches), ";")),
-      Intensity = as.numeric(unlist(strsplit(as.character(Intensities), ";"))),
-      MZ = as.numeric(unlist(strsplit(as.character(Masses), ";")))
-    )
-  ][!is.na(MZ) & Intensity > 0]
-}
-
-
-#' Build the annotated MS/MS spectrum ggplot object.
-#' @param tidy_data  Tibble from \code{tidy_msms()}.
-#' @param label_size Numeric. Font size for ion annotations.
-#' @return A ggplot object.
-build_msms_spectrum <- function(tidy_data, label_size = 3) {
-  if (nrow(tidy_data) == 0) {
-    return(
-      ggplot() +
-        annotate(
-          "text",
-          x = 0.5,
-          y = 0.5,
-          label = "Peptide not found in the uploaded file.",
-          size = 6,
-          colour = "grey50"
-        ) +
-        theme_void()
-    )
+#' Read and filter the MaxQuant peptides.txt file.
+#'
+#' One row per non-redundant peptide sequence. Reverse hits and potential
+#' contaminants are removed. Small enough to be read directly with fread.
+#'
+#' @param path Character. Full path to peptides.txt.
+#' @return A data.table.
+read_peptides_file <- function(path) {
+  pep <- data.table::fread(path)
+  flagged <- function(col) {
+    if (!col %in% names(pep)) {
+      return(rep(FALSE, nrow(pep)))
+    }
+    x <- pep[[col]]
+    !is.na(x) & as.character(x) == "+"
   }
+  pep <- pep[!(flagged("Reverse") | flagged("Potential contaminant"))]
+  if ("Missed cleavages" %in% names(pep)) {
+    pep[, `Missed cleavages` := as.character(`Missed cleavages`)]
+  }
+  pep
+}
 
-  gene_name <- dplyr::first(stats::na.omit(tidy_data$`Gene Names`))
-  peptide <- dplyr::first(tidy_data$Sequence)
 
-  ggplot(tidy_data, aes(x = MZ, y = Intensity)) +
-    geom_segment(aes(xend = MZ, yend = 0), colour = "grey25", linewidth = 0.4) +
+#' Experiment names present in peptides.txt ("Experiment <name>" columns).
+#' @return Character vector (possibly empty).
+pep_experiments <- function(pep) {
+  cols <- grep("^Experiment .+", names(pep), value = TRUE)
+  sub("^Experiment ", "", cols)
+}
+
+
+#' Peptide summary table shown in the "Peptides" tab.
+pep_summary_table <- function(pep) {
+  wanted <- c(
+    "Sequence",
+    "Gene names",
+    "Leading razor protein",
+    "Length",
+    "Missed cleavages",
+    "Charges",
+    "MS/MS Count",
+    "Score",
+    "PEP",
+    "Unique (Groups)",
+    "Unique (Proteins)",
+    "Intensity"
+  )
+  pep[, .SD, .SDcols = intersect(wanted, names(pep))] |>
+    dplyr::arrange(dplyr::desc(`MS/MS Count`))
+}
+
+
+#' Long table of per-experiment peptide counts (rows where the peptide was
+#' identified in that experiment).
+pep_experiment_long <- function(pep) {
+  exps <- pep_experiments(pep)
+  if (length(exps) == 0) {
+    return(NULL)
+  }
+  pep |>
+    dplyr::select(Sequence, dplyr::all_of(paste0("Experiment ", exps))) |>
+    tidyr::pivot_longer(
+      -Sequence,
+      names_to = "Experiment",
+      names_prefix = "Experiment ",
+      values_to = "n_msms"
+    ) |>
+    dplyr::filter(!is.na(n_msms), n_msms > 0)
+}
+
+
+# ── Individual peptides.txt plot builders ─────────────────────────────────────
+
+plot_pep_msms_count <- function(pep) {
+  cap <- 20L
+  pep |>
+    dplyr::mutate(
+      n = pmin(`MS/MS Count`, cap),
+      n = factor(
+        ifelse(n >= cap, paste0(cap, "+"), as.character(n)),
+        levels = c(as.character(0:(cap - 1)), paste0(cap, "+"))
+      )
+    ) |>
+    ggplot(aes(x = n)) +
+    geom_bar(fill = "#1b9e77", alpha = 0.8, color = "white", linewidth = 0.25) +
+    labs(x = "MS/MS spectra per peptide", y = "Number of peptides") +
+    theme_mq()
+}
+
+plot_pep_score <- function(pep) {
+  ggplot(pep, aes(x = Score)) +
+    geom_density(
+      fill = "#1b9e77",
+      alpha = 0.8,
+      color = "white",
+      linewidth = 0.25
+    ) +
+    scale_x_continuous(breaks = scales::pretty_breaks(n = 10)) +
+    labs(x = "Andromeda score", y = "Density") +
+    theme_mq()
+}
+
+plot_pep_pep <- function(pep) {
+  pep |>
+    dplyr::filter(!is.na(PEP), PEP > 0) |>
+    ggplot(aes(x = PEP)) +
+    geom_density(
+      fill = "#1b9e77",
+      alpha = 0.8,
+      color = "white",
+      linewidth = 0.25
+    ) +
+    scale_x_log10() +
+    labs(x = "Posterior error probability (PEP, log scale)", y = "Density") +
+    theme_mq()
+}
+
+plot_pep_charges <- function(pep) {
+  pep |>
+    dplyr::select(Sequence, Charges) |>
+    tidyr::separate_rows(Charges, sep = ";") |>
+    dplyr::filter(nzchar(Charges)) |>
+    ggplot(aes(x = Charges)) +
+    geom_bar(fill = "#1b9e77", alpha = 0.8, color = "white", linewidth = 0.25) +
     geom_text(
-      aes(label = Match, color = stringr::str_detect(Match, "^y")),
-      vjust = -0.8,
-      size = label_size,
-      fontface = "bold",
-      check_overlap = TRUE
+      aes(label = after_stat(count)),
+      stat = "count",
+      vjust = -0.3,
+      size = 5,
+      fontface = "bold"
     ) +
-    scale_color_manual(
-      values = c("TRUE" = "#d95f02", "FALSE" = "#1b9e77"),
-      guide = "none"
-    ) +
-    facet_wrap(
-      ~ `Raw file` + Charge + `Retention time`,
-      ncol = 2,
-      scales = "free",
-      labeller = label_both
-    ) +
-    scale_y_continuous(
-      expand = expansion(mult = c(0, 0.15)),
-      labels = scales::label_scientific()
-    ) +
-    scale_x_continuous(
-      breaks = tidy_data$MZ,
-      labels = scales::label_number(accuracy = 0.1)
-    ) +
+    scale_x_discrete(limits = as.character(1:6)) +
+    scale_y_continuous(expand = expansion(mult = c(0, 0.1))) +
     labs(
-      title = paste0("MS/MS Fragmentation: ", peptide, " (", gene_name, ")"),
-      x = "*m/z*",
-      y = "Intensity"
+      x = "Charge state observed for the peptide",
+      y = "Number of peptides"
     ) +
+    theme_mq()
+}
+
+plot_pep_unique <- function(pep) {
+  pep |>
+    dplyr::select(
+      Sequence,
+      dplyr::any_of(c("Unique (Groups)", "Unique (Proteins)"))
+    ) |>
+    tidyr::pivot_longer(-Sequence, names_to = "Level", values_to = "Unique") |>
+    ggplot(aes(x = Unique)) +
+    geom_bar(fill = "#1b9e77", alpha = 0.8, color = "white", linewidth = 0.25) +
+    geom_text(
+      aes(label = after_stat(count)),
+      stat = "count",
+      vjust = -0.3,
+      size = 5,
+      fontface = "bold"
+    ) +
+    scale_y_continuous(expand = expansion(mult = c(0, 0.1))) +
+    facet_wrap(~Level) +
+    labs(x = "Unique peptide", y = "Number of peptides") +
+    theme_mq()
+}
+
+plot_pep_per_experiment <- function(pep) {
+  long <- pep_experiment_long(pep)
+  if (is.null(long)) {
+    stop("peptides.txt has no 'Experiment <name>' columns.")
+  }
+  long |>
+    dplyr::count(Experiment, name = "n_peptides") |>
+    ggplot(aes(x = Experiment, y = n_peptides)) +
+    geom_col(fill = "#1b9e77", alpha = 0.8, color = "white", linewidth = 0.25) +
+    geom_text(
+      aes(label = n_peptides),
+      vjust = -0.3,
+      size = 5,
+      fontface = "bold"
+    ) +
+    scale_y_continuous(expand = expansion(mult = c(0, 0.1))) +
+    labs(x = "Experiment", y = "Peptides identified") +
+    theme_mq() +
+    theme(axis.text.x = element_text(angle = 65, hjust = 1))
+}
+
+plot_pep_experiment_overlap <- function(pep) {
+  long <- pep_experiment_long(pep)
+  if (is.null(long)) {
+    stop("peptides.txt has no 'Experiment <name>' columns.")
+  }
+  n_exp <- length(pep_experiments(pep))
+  long |>
+    dplyr::count(Sequence, name = "n_experiments") |>
+    dplyr::mutate(n_experiments = factor(n_experiments, levels = 1:n_exp)) |>
+    ggplot(aes(x = n_experiments)) +
+    geom_bar(fill = "#1b9e77", alpha = 0.8, color = "white", linewidth = 0.25) +
+    geom_text(
+      aes(label = after_stat(count)),
+      stat = "count",
+      vjust = -0.3,
+      size = 5,
+      fontface = "bold"
+    ) +
+    scale_x_discrete(drop = FALSE) +
+    scale_y_continuous(expand = expansion(mult = c(0, 0.1))) +
+    labs(
+      x = "Number of experiments in which the peptide was identified",
+      y = "Number of peptides"
+    ) +
+    theme_mq()
+}
+
+plot_pep_intensity <- function(pep) {
+  exps <- pep_experiments(pep)
+  cols <- intersect(paste0("Intensity ", exps), names(pep))
+  if (length(cols) == 0) {
+    stop("peptides.txt has no per-experiment 'Intensity <name>' columns.")
+  }
+  pep |>
+    dplyr::select(Sequence, dplyr::all_of(cols)) |>
+    tidyr::pivot_longer(
+      -Sequence,
+      names_to = "Experiment",
+      names_prefix = "Intensity ",
+      values_to = "Intensity"
+    ) |>
+    # 0 means "not quantified" in MaxQuant
+    dplyr::filter(!is.na(Intensity), Intensity > 0) |>
+    ggplot(aes(x = log10(Intensity), fill = Experiment)) +
+    geom_density(alpha = 0.5, color = "white", linewidth = 0.25) +
+    scale_fill_viridis_d(option = "D") +
+    labs(x = "log10 peptide intensity", y = "Density") +
+    theme_mq()
+}
+
+plot_pep_length <- function(pep) {
+  ggplot(pep, aes(x = Length)) +
+    geom_bar(fill = "#1b9e77", alpha = 0.8, color = "white", linewidth = 0.25) +
+    scale_x_continuous(breaks = scales::pretty_breaks(n = 10)) +
+    labs(
+      x = "Peptide length (number of amino acids)",
+      y = "Number of peptides"
+    ) +
+    theme_mq()
+}
+
+plot_pep_missed_cleavages <- function(pep) {
+  ggplot(pep, aes(x = `Missed cleavages`)) +
+    geom_bar(fill = "#1b9e77", alpha = 0.8, color = "white", linewidth = 0.25) +
+    geom_text(
+      aes(label = after_stat(count)),
+      stat = "count",
+      vjust = -0.3,
+      size = 5,
+      fontface = "bold"
+    ) +
+    scale_x_discrete(limits = as.character(0:5)) +
+    scale_y_continuous(expand = expansion(mult = c(0, 0.1))) +
+    labs(x = "Number of missed cleavages", y = "Number of peptides") +
+    theme_mq()
+}
+
+plot_pep_terminal_aa <- function(pep) {
+  pep |>
+    dplyr::select(
+      Sequence,
+      dplyr::any_of(c(
+        "First amino acid",
+        "Last amino acid",
+        "Amino acid after"
+      ))
+    ) |>
+    tidyr::pivot_longer(-Sequence, names_to = "Position", values_to = "aa") |>
+    dplyr::filter(!is.na(aa), nzchar(aa)) |>
+    ggplot(aes(x = aa)) +
+    geom_bar(fill = "#1b9e77", alpha = 0.8, color = "white", linewidth = 0.25) +
+    facet_wrap(~Position, ncol = 1, scales = "free_y") +
+    labs(x = "Amino acid", y = "Number of peptides") +
+    theme_mq()
+}
+
+plot_pep_per_protein <- function(pep) {
+  cap <- 30L
+  pep |>
+    dplyr::filter(
+      !is.na(`Leading razor protein`),
+      nzchar(`Leading razor protein`)
+    ) |>
+    dplyr::count(`Leading razor protein`, name = "n_peptides") |>
+    dplyr::mutate(
+      n = pmin(n_peptides, cap),
+      n = factor(
+        ifelse(n >= cap, paste0(cap, "+"), as.character(n)),
+        levels = c(as.character(1:(cap - 1)), paste0(cap, "+"))
+      )
+    ) |>
+    ggplot(aes(x = n)) +
+    geom_bar(fill = "#1b9e77", alpha = 0.8, color = "white", linewidth = 0.25) +
+    labs(x = "Peptides per leading razor protein", y = "Number of proteins") +
+    theme_mq()
+}
+
+#' UpSet-style plot of peptide sharing between experiments.
+#'
+#' Top panel: number of peptides per exact experiment combination
+#' (intersection). Bottom panel: dot matrix marking which experiments make
+#' up each combination. Built with ggplot2 + patchwork only.
+plot_pep_upset <- function(pep, max_sets = 40L) {
+  long <- pep_experiment_long(pep)
+  if (is.null(long)) {
+    stop("peptides.txt has no 'Experiment <name>' columns.")
+  }
+  exps <- pep_experiments(pep)
+
+  combos <- long |>
+    dplyr::group_by(Sequence) |>
+    dplyr::summarise(
+      members = list(sort(unique(Experiment))),
+      .groups = "drop"
+    ) |>
+    dplyr::mutate(
+      combo = vapply(members, paste, character(1), collapse = " & ")
+    ) |>
+    dplyr::count(combo, members, name = "n_peptides") |>
+    dplyr::arrange(dplyr::desc(n_peptides)) |>
+    dplyr::slice_head(n = max_sets) |>
+    dplyr::mutate(combo = factor(combo, levels = combo))
+
+  matrix_df <- combos |>
+    dplyr::select(combo, members) |>
+    tidyr::unnest(members) |>
+    dplyr::rename(Experiment = members) |>
+    dplyr::mutate(present = TRUE) |>
+    tidyr::complete(
+      combo,
+      Experiment = exps,
+      fill = list(present = FALSE)
+    ) |>
+    dplyr::mutate(Experiment = factor(Experiment, levels = rev(exps)))
+
+  set_sizes <- long |>
+    dplyr::count(Experiment, name = "n") |>
+    dplyr::mutate(Experiment = factor(Experiment, levels = rev(exps)))
+
+  p_bars <- ggplot(combos, aes(x = combo, y = n_peptides)) +
+    geom_col(fill = "#1b9e77", alpha = 0.8, color = "white", linewidth = 0.25) +
+    geom_text(
+      aes(label = n_peptides),
+      vjust = -0.3,
+      size = 4,
+      fontface = "bold"
+    ) +
+    scale_y_continuous(expand = expansion(mult = c(0, 0.15))) +
+    labs(x = NULL, y = "Peptides in intersection") +
     theme_mq() +
     theme(
-      panel.grid = element_blank(),
-      strip.text = element_text(color = "black", face = "bold", size = 8),
-      axis.text.x = element_text(
-        angle = 90,
-        vjust = 0.5,
-        hjust = 1,
-        size = 8,
-        color = "black"
-      ),
-      axis.text.y = element_text(size = 8, color = "black"),
-      axis.ticks = element_line(color = "black", linewidth = 0.25)
+      axis.text.x = element_blank(),
+      axis.ticks.x = element_blank(),
+      panel.grid.major.x = element_blank()
     )
+
+  p_matrix <- ggplot(matrix_df, aes(x = combo, y = Experiment)) +
+    geom_point(aes(color = present), size = 4) +
+    geom_line(
+      data = dplyr::filter(matrix_df, present),
+      aes(group = combo),
+      color = "black",
+      linewidth = 0.8
+    ) +
+    scale_color_manual(
+      values = c(`TRUE` = "black", `FALSE` = "grey85"),
+      guide = "none"
+    ) +
+    labs(x = "Experiment combination", y = NULL) +
+    theme_mq() +
+    theme(
+      axis.text.x = element_blank(),
+      axis.ticks.x = element_blank(),
+      panel.grid = element_blank()
+    )
+
+  p_sets <- ggplot(set_sizes, aes(x = n, y = Experiment)) +
+    geom_col(fill = "grey50", alpha = 0.8, color = "white", linewidth = 0.25) +
+    geom_text(
+      aes(label = n),
+      hjust = 1.1,
+      size = 3.5,
+      color = "white",
+      fontface = "bold"
+    ) +
+    scale_x_reverse(
+      expand = expansion(mult = c(0.05, 0)),
+      breaks = scales::pretty_breaks(n = 3)
+    ) +
+    labs(x = "Peptides per experiment", y = NULL) +
+    theme_mq() +
+    theme(axis.text.y = element_blank(), axis.ticks.y = element_blank())
+
+  patchwork::wrap_plots(
+    patchwork::plot_spacer(),
+    p_bars,
+    p_sets,
+    p_matrix,
+    ncol = 2,
+    widths = c(1, 4),
+    heights = c(3, 1)
+  )
 }
+
+
+#' Peptides QC plot registry: key -> (label, builder, height in px).
+PEP_PLOTS <- list(
+  msms_count = list("MS/MS Spectra per Peptide", plot_pep_msms_count, 550L),
+  per_experiment = list(
+    "Peptides per Experiment",
+    plot_pep_per_experiment,
+    550L
+  ),
+  experiment_overlap = list(
+    "Experiment Overlap (count)",
+    plot_pep_experiment_overlap,
+    550L
+  ),
+  upset = list("Experiment Overlap (UpSet)", plot_pep_upset, 750L),
+  intensity = list(
+    "Peptide Intensity per Experiment",
+    plot_pep_intensity,
+    550L
+  ),
+  charges = list("Charge States", plot_pep_charges, 550L),
+  unique = list("Unique Peptides", plot_pep_unique, 550L),
+  score = list("Andromeda Score", plot_pep_score, 550L),
+  pep = list("PEP Distribution", plot_pep_pep, 550L),
+  length = list("Peptide Length", plot_pep_length, 550L),
+  missed_cleavages = list("Missed Cleavages", plot_pep_missed_cleavages, 550L),
+  terminal_aa = list("Terminal Amino Acids", plot_pep_terminal_aa, 900L),
+  per_protein = list("Peptides per Protein", plot_pep_per_protein, 550L)
+)
+
+plot_registry_choices <- function(registry) {
+  setNames(names(registry), vapply(registry, `[[`, character(1), 1))
+}
+
+
+# ── msmsScans.txt helpers ─────────────────────────────────────────────────────
+#
+# msmsScans.txt has one row per MS/MS scan acquired (identified or not), so it
+# is the right table for instrument-level QC: identification rate, TIC, ion
+# injection time, precursor sampling. It replaces msms.txt, which was too
+# large to be practical. Reads through the parquet cache.
+
+#' Read the MaxQuant msmsScans.txt file (selected columns).
+#' @param path Character. Full path to msmsScans.txt (or .parquet).
+#' @param log  Function \code{(msg, level)} for progress messages.
+#' @return A data.table with an \code{Identified} factor column.
+read_msmsscans_file <- function(path, log = function(msg, level) NULL) {
+  dt <- read_mq_table(
+    path,
+    log = log,
+    select = c(
+      "Raw file",
+      "Scan number",
+      "Retention time",
+      "Ion injection time",
+      "Total ion current",
+      "Base peak intensity",
+      "Identified",
+      "Sequence",
+      "Length",
+      "Filtered peaks",
+      "m/z",
+      "Charge",
+      "Scan event number",
+      "Precursor intensity",
+      "Precursor apex fraction",
+      "Score",
+      "PEP",
+      "Modifications"
+    )
+  )
+  if ("Identified" %in% names(dt)) {
+    dt[,
+      Identified := factor(
+        ifelse(
+          !is.na(Identified) & Identified == "+",
+          "Identified",
+          "Not identified"
+        ),
+        levels = c("Identified", "Not identified")
+      )
+    ]
+  }
+  if ("Charge" %in% names(dt)) {
+    dt[, Charge := as.character(Charge)]
+  }
+  dt
+}
+
+
+# ── Individual msmsScans plot builders ────────────────────────────────────────
+
+SCAN_ID_COLORS <- c("Identified" = "#1b9e77", "Not identified" = "#d95f02")
+
+plot_scan_id_rate <- function(sc) {
+  sc |>
+    dplyr::count(`Raw file`, Identified) |>
+    dplyr::group_by(`Raw file`) |>
+    dplyr::mutate(frac = n / sum(n)) |>
+    dplyr::ungroup() |>
+    ggplot(aes(y = `Raw file`, x = n, fill = Identified)) +
+    geom_col(color = "white", linewidth = 0.25, alpha = 0.9) +
+    geom_text(
+      aes(
+        label = sprintf("%s (%.1f%%)", format(n, big.mark = ","), 100 * frac)
+      ),
+      position = position_stack(vjust = 0.5),
+      size = 4,
+      fontface = "bold",
+      color = "white"
+    ) +
+    scale_fill_manual(values = SCAN_ID_COLORS) +
+    labs(x = "MS/MS scans", y = NULL, fill = NULL) +
+    theme_mq()
+}
+
+plot_scan_rt_hist <- function(sc) {
+  ggplot(sc, aes(x = `Retention time`, fill = Identified)) +
+    geom_histogram(
+      binwidth = 1,
+      color = "white",
+      linewidth = 0.1,
+      alpha = 0.9
+    ) +
+    scale_fill_manual(values = SCAN_ID_COLORS) +
+    facet_wrap(~`Raw file`, ncol = 3) +
+    labs(
+      x = "Retention time (min)",
+      y = "MS/MS scans per minute",
+      fill = NULL
+    ) +
+    theme_mq()
+}
+
+plot_scan_id_rate_rt <- function(sc) {
+  sc |>
+    dplyr::mutate(rt_bin = floor(`Retention time`)) |>
+    dplyr::group_by(`Raw file`, rt_bin) |>
+    dplyr::summarise(
+      id_rate = mean(Identified == "Identified"),
+      n = dplyr::n(),
+      .groups = "drop"
+    ) |>
+    ggplot(aes(x = rt_bin, y = id_rate)) +
+    geom_line(color = "#1b9e77", linewidth = 0.7) +
+    geom_point(aes(size = n), color = "#1b9e77", alpha = 0.6) +
+    scale_y_continuous(labels = scales::label_percent(), limits = c(0, 1)) +
+    scale_size_area(max_size = 3) +
+    facet_wrap(~`Raw file`, ncol = 3) +
+    labs(
+      x = "Retention time (min)",
+      y = "Identification rate",
+      size = "Scans"
+    ) +
+    theme_mq()
+}
+
+plot_scan_tic_rt <- function(sc) {
+  ggplot(sc, aes(x = `Retention time`, y = log10(`Total ion current`))) +
+    ggpointdensity::geom_pointdensity(
+      method = "kde2d",
+      adjust = 3,
+      size = 0.6
+    ) +
+    scale_color_viridis_c(option = "D", direction = -1) +
+    facet_wrap(~`Raw file`, ncol = 3) +
+    labs(
+      x = "Retention time (min)",
+      y = "log10 total ion current",
+      color = "Density"
+    ) +
+    theme_mq()
+}
+
+plot_scan_injection_time <- function(sc) {
+  ggplot(sc, aes(x = `Ion injection time`, fill = Identified)) +
+    geom_histogram(bins = 50, color = "white", linewidth = 0.1, alpha = 0.9) +
+    scale_fill_manual(values = SCAN_ID_COLORS) +
+    facet_wrap(~`Raw file`, ncol = 3) +
+    labs(x = "Ion injection time (ms)", y = "MS/MS scans", fill = NULL) +
+    theme_mq()
+}
+
+plot_scan_injection_time_rt <- function(sc) {
+  ggplot(sc, aes(x = `Retention time`, y = `Ion injection time`)) +
+    ggpointdensity::geom_pointdensity(
+      method = "kde2d",
+      adjust = 3,
+      size = 0.6
+    ) +
+    scale_color_viridis_c(option = "D", direction = -1) +
+    facet_wrap(~`Raw file`, ncol = 3) +
+    labs(
+      x = "Retention time (min)",
+      y = "Ion injection time (ms)",
+      color = "Density"
+    ) +
+    theme_mq()
+}
+
+plot_scan_base_peak <- function(sc) {
+  ggplot(sc, aes(x = log10(`Base peak intensity`), fill = Identified)) +
+    geom_density(alpha = 0.6, color = "white", linewidth = 0.25) +
+    scale_fill_manual(values = SCAN_ID_COLORS) +
+    facet_wrap(~`Raw file`, ncol = 3) +
+    labs(x = "log10 base peak intensity", y = "Density", fill = NULL) +
+    theme_mq()
+}
+
+plot_scan_precursor_intensity <- function(sc) {
+  sc |>
+    dplyr::filter(!is.na(`Precursor intensity`), `Precursor intensity` > 0) |>
+    ggplot(aes(x = log10(`Precursor intensity`), fill = Identified)) +
+    geom_density(alpha = 0.6, color = "white", linewidth = 0.25) +
+    scale_fill_manual(values = SCAN_ID_COLORS) +
+    facet_wrap(~`Raw file`, ncol = 3) +
+    labs(x = "log10 precursor intensity", y = "Density", fill = NULL) +
+    theme_mq()
+}
+
+plot_scan_apex_fraction <- function(sc) {
+  sc |>
+    dplyr::filter(!is.na(`Precursor apex fraction`)) |>
+    ggplot(aes(x = `Precursor apex fraction`, fill = Identified)) +
+    geom_density(alpha = 0.6, color = "white", linewidth = 0.25) +
+    scale_fill_manual(values = SCAN_ID_COLORS) +
+    facet_wrap(~`Raw file`, ncol = 3) +
+    labs(
+      x = "Precursor apex fraction (1 = sampled at elution apex)",
+      y = "Density",
+      fill = NULL
+    ) +
+    theme_mq()
+}
+
+plot_scan_charge <- function(sc) {
+  ggplot(sc, aes(x = Charge, fill = Identified)) +
+    geom_bar(color = "white", linewidth = 0.25, alpha = 0.9) +
+    scale_fill_manual(values = SCAN_ID_COLORS) +
+    scale_x_discrete(limits = as.character(0:6)) +
+    facet_wrap(~`Raw file`, ncol = 3) +
+    labs(
+      x = "Precursor charge (0 = undetermined)",
+      y = "MS/MS scans",
+      fill = NULL
+    ) +
+    theme_mq()
+}
+
+plot_scan_event <- function(sc) {
+  sc |>
+    dplyr::group_by(`Raw file`, `Scan event number`) |>
+    dplyr::summarise(
+      id_rate = mean(Identified == "Identified"),
+      n = dplyr::n(),
+      .groups = "drop"
+    ) |>
+    ggplot(aes(x = `Scan event number`, y = id_rate)) +
+    geom_col(fill = "#1b9e77", alpha = 0.8, color = "white", linewidth = 0.25) +
+    geom_text(aes(label = n), vjust = -0.3, size = 3.5, fontface = "bold") +
+    scale_y_continuous(
+      labels = scales::label_percent(),
+      expand = expansion(mult = c(0, 0.15))
+    ) +
+    scale_x_continuous(breaks = scales::pretty_breaks(n = 10)) +
+    facet_wrap(~`Raw file`, ncol = 3) +
+    labs(
+      x = "Scan event number (position in TopN cycle)",
+      y = "Identification rate (label: number of scans)"
+    ) +
+    theme_mq()
+}
+
+plot_scan_filtered_peaks <- function(sc) {
+  ggplot(sc, aes(x = `Filtered peaks`, fill = Identified)) +
+    geom_density(alpha = 0.6, color = "white", linewidth = 0.25) +
+    scale_fill_manual(values = SCAN_ID_COLORS) +
+    facet_wrap(~`Raw file`, ncol = 3) +
+    labs(x = "Filtered peaks per MS/MS spectrum", y = "Density", fill = NULL) +
+    theme_mq()
+}
+
+plot_scan_score <- function(sc) {
+  sc |>
+    dplyr::filter(!is.na(Score)) |>
+    ggplot(aes(x = Score, fill = Identified)) +
+    geom_density(alpha = 0.6, color = "white", linewidth = 0.25) +
+    scale_fill_manual(values = SCAN_ID_COLORS) +
+    facet_wrap(~`Raw file`, ncol = 3) +
+    labs(x = "Andromeda score", y = "Density", fill = NULL) +
+    theme_mq()
+}
+
+plot_scan_mz_rt <- function(sc) {
+  ggplot(sc, aes(x = `Retention time`, y = `m/z`)) +
+    geom_point(aes(color = Identified), size = 0.4, alpha = 0.4) +
+    scale_color_manual(values = SCAN_ID_COLORS) +
+    facet_wrap(~`Raw file`, ncol = 3) +
+    labs(x = "Retention time (min)", y = "Precursor m/z", color = NULL) +
+    theme_mq() +
+    guides(color = guide_legend(override.aes = list(size = 3, alpha = 1)))
+}
+
+#' MS/MS scans QC plot registry: key -> (label, builder). All plots are
+#' faceted by raw file, so the height comes from \code{facet_height_px()}.
+SCAN_PLOTS <- list(
+  id_rate = list("Identification Rate per Raw File", plot_scan_id_rate),
+  rt_hist = list("MS/MS Scans over Retention Time", plot_scan_rt_hist),
+  id_rate_rt = list(
+    "Identification Rate over Retention Time",
+    plot_scan_id_rate_rt
+  ),
+  mz_rt = list("Precursor m/z vs Retention Time", plot_scan_mz_rt),
+  tic_rt = list("Total Ion Current vs Retention Time", plot_scan_tic_rt),
+  injection_time = list("Ion Injection Time", plot_scan_injection_time),
+  injection_time_rt = list(
+    "Ion Injection Time vs Retention Time",
+    plot_scan_injection_time_rt
+  ),
+  base_peak = list("Base Peak Intensity", plot_scan_base_peak),
+  precursor_intensity = list(
+    "Precursor Intensity",
+    plot_scan_precursor_intensity
+  ),
+  apex_fraction = list("Precursor Apex Fraction", plot_scan_apex_fraction),
+  charge = list("Precursor Charge", plot_scan_charge),
+  scan_event = list(
+    "Identification Rate by Scan Event (TopN)",
+    plot_scan_event
+  ),
+  filtered_peaks = list(
+    "Filtered Peaks per Spectrum",
+    plot_scan_filtered_peaks
+  ),
+  score = list("Andromeda Score", plot_scan_score)
+)
 
 
 # ── evidence.txt helpers ──────────────────────────────────────────────────────
 
 #' Read the MaxQuant evidence.txt file.
 #'
-#' @param path Character. Full path to evidence.txt.
-#' @return A tibble.
-read_evidence_file <- function(path) {
-  dt <- fread(
+#' Reads through the parquet cache (see \code{read_mq_table()}).
+#'
+#' @param path Character. Full path to evidence.txt (or evidence.parquet).
+#' @param log  Function \code{(msg, level)} for progress messages.
+#' @return A data.table.
+read_evidence_file <- function(path, log = function(msg, level) NULL) {
+  dt <- read_mq_table(
     path,
+    log = log,
     select = c(
       "Raw file",
       "Sequence",
@@ -610,8 +1378,11 @@ MaxQuantMSMS_sidebar_ui <- function(id) {
         ),
         tags$p(
           style = "color:#adb5bd;font-size:11px;margin-top:-6px;",
-          "msms.txt, evidence.txt, summary.txt and proteinGroups.txt are ",
-          "located automatically in the txt/ subfolder."
+          "msmsScans.txt, evidence.txt, peptides.txt, summary.txt and ",
+          "proteinGroups.txt are located automatically in the txt/ ",
+          "subfolder. msmsScans and evidence are read from .parquet; on ",
+          "first load the .txt files are converted once and the .parquet ",
+          "saved next to them. msms.txt is not used."
         ),
         tags$div(
           style = "text-align:center;",
@@ -623,31 +1394,6 @@ MaxQuantMSMS_sidebar_ui <- function(id) {
           )
         ),
         uiOutput(ns("file_status"))
-      ),
-
-      tags$hr(style = "border-color:#2d3741;margin:4px 0;"),
-
-      # ── MS/MS Parameters ──────────────────────────────────────────────────
-      tags$div(class = "sidebar-section-label", "MS/MS Parameters"),
-
-      selectizeInput(
-        ns("peptide_seq"),
-        "Select Peptide Sequence",
-        choices = NULL,
-        options = list(
-          placeholder = "Load MaxQuant files first…",
-          maxOptions = 5000,
-          searchField = "value"
-        )
-      ),
-
-      numericInput(
-        ns("label_size"),
-        "Ion Label Size",
-        value = 3,
-        min = 1,
-        max = 8,
-        step = 0.5
       ),
 
       tags$hr(style = "border-color:#2d3741;margin:4px 0;"),
@@ -674,7 +1420,31 @@ MaxQuantMSMS_sidebar_ui <- function(id) {
           "PEP Distribution" = "pep",
           "Taxonomy Names" = "taxonomy"
         ),
-        selected = "charge_rt"
+        selected = "mz_rt"
+      ),
+
+      tags$hr(style = "border-color:#2d3741;margin:4px 0;"),
+
+      # ── Peptides QC Parameters ────────────────────────────────────────────
+      tags$div(class = "sidebar-section-label", "Peptides QC Parameters"),
+
+      selectInput(
+        ns("pep_plot_select"),
+        "Select Peptides Plot",
+        choices = plot_registry_choices(PEP_PLOTS),
+        selected = "msms_count"
+      ),
+
+      tags$hr(style = "border-color:#2d3741;margin:4px 0;"),
+
+      # ── MS/MS Scans QC Parameters ─────────────────────────────────────────
+      tags$div(class = "sidebar-section-label", "MS/MS Scans QC Parameters"),
+
+      selectInput(
+        ns("scan_plot_select"),
+        "Select Scans Plot",
+        choices = plot_registry_choices(SCAN_PLOTS),
+        selected = "id_rate"
       ),
 
       tags$hr(style = "border-color:#2d3741;margin:4px 0;"),
@@ -683,14 +1453,20 @@ MaxQuantMSMS_sidebar_ui <- function(id) {
       tags$div(
         style = "padding:0 8px;text-align:center;",
         actionButton(
-          ns("run_msms"),
-          "Plot MS/MS Spectrum",
-          class = "btn-primary",
-          style = "width:80%;font-weight:bold;margin-top:8px;margin-bottom:6px;"
-        ),
-        actionButton(
           ns("run_evidence"),
           "Plot Evidence QC",
+          class = "btn-primary",
+          style = "width:80%;font-weight:bold;margin-top:2px;margin-bottom:6px;"
+        ),
+        actionButton(
+          ns("run_peptides"),
+          "Plot Peptides QC",
+          class = "btn-primary",
+          style = "width:80%;font-weight:bold;margin-top:2px;margin-bottom:6px;"
+        ),
+        actionButton(
+          ns("run_scans"),
+          "Plot MS/MS Scans QC",
           class = "btn-primary",
           style = "width:80%;font-weight:bold;margin-top:2px;margin-bottom:10px;"
         )
@@ -698,18 +1474,6 @@ MaxQuantMSMS_sidebar_ui <- function(id) {
 
       tags$div(
         style = "padding:0 8px;",
-        downloadButton(
-          ns("download_msms_plot"),
-          "\u2B07 MS/MS Plot (.pdf)",
-          class = "dl-btn",
-          style = "width:100%;text-align:left;margin-bottom:6px;"
-        ),
-        downloadButton(
-          ns("download_msms_data"),
-          "\u2B07 MS/MS Tidy Data (.tsv)",
-          class = "dl-btn",
-          style = "width:100%;text-align:left;margin-bottom:6px;"
-        ),
         downloadButton(
           ns("download_ev_plot"),
           "\u2B07 Evidence Plot (.pdf)",
@@ -719,6 +1483,30 @@ MaxQuantMSMS_sidebar_ui <- function(id) {
         downloadButton(
           ns("download_ev_data"),
           "\u2B07 Evidence Data (.tsv)",
+          class = "dl-btn",
+          style = "width:100%;text-align:left;margin-bottom:6px;"
+        ),
+        downloadButton(
+          ns("download_pep_plot"),
+          "\u2B07 Peptides Plot (.pdf)",
+          class = "dl-btn",
+          style = "width:100%;text-align:left;margin-bottom:6px;"
+        ),
+        downloadButton(
+          ns("download_pep_data"),
+          "\u2B07 Peptides Data (.tsv)",
+          class = "dl-btn",
+          style = "width:100%;text-align:left;margin-bottom:6px;"
+        ),
+        downloadButton(
+          ns("download_scan_plot"),
+          "\u2B07 MS/MS Scans Plot (.pdf)",
+          class = "dl-btn",
+          style = "width:100%;text-align:left;margin-bottom:6px;"
+        ),
+        downloadButton(
+          ns("download_scan_data"),
+          "\u2B07 MS/MS Scans Data (.tsv)",
           class = "dl-btn",
           style = "width:100%;text-align:left;margin-bottom:6px;"
         ),
@@ -808,31 +1596,9 @@ MaxQuantMSMS_body_ui <- function(id) {
       )
     ),
 
-    # ── Tab 2: MS/MS Spectrum ─────────────────────────────────────────────
-    tabPanel(
-      title = tagList(icon("chart-bar"), "MS/MS Spectrum"),
-      fluidRow(
-        box(
-          title = "Annotated MS/MS Fragmentation Spectrum",
-          status = "primary",
-          solidHeader = TRUE,
-          width = 12,
-          div(
-            class = "plot-wrap",
-            tags$div(
-              class = "spinner-overlay",
-              id = ns("sp_spectrum"),
-              icon("spinner", class = "fa-spin")
-            ),
-            uiOutput(ns("spectrum_ui"))
-          )
-        )
-      )
-    ),
-
     # ── Tab 2: Evidence QC ────────────────────────────────────────────────
     tabPanel(
-      title = tagList(icon("microscope"), "Evidence QC"),
+      title = tagList(icon("bar"), "Evidence QC"),
       fluidRow(
         box(
           title = uiOutput(ns("ev_plot_title")),
@@ -852,16 +1618,57 @@ MaxQuantMSMS_body_ui <- function(id) {
       )
     ),
 
-    # ── Tab 3: MS/MS Tidy Data ────────────────────────────────────────────
+    # ── Tab: Peptides QC (peptides.txt) ──────────────────────────────────
     tabPanel(
-      title = tagList(icon("table"), "MS/MS Data"),
+      title = tagList(icon("chart-column"), "Peptides QC"),
       fluidRow(
         box(
-          title = "Fragment ion data for selected peptide",
+          title = uiOutput(ns("pep_plot_title")),
           status = "primary",
           solidHeader = TRUE,
           width = 12,
-          DT::dataTableOutput(ns("tidy_table"))
+          div(
+            class = "plot-wrap",
+            tags$div(
+              class = "spinner-overlay",
+              id = ns("sp_peptides"),
+              icon("spinner", class = "fa-spin")
+            ),
+            uiOutput(ns("peptides_plot_ui"))
+          )
+        )
+      )
+    ),
+
+    # ── Tab: MS/MS Scans QC (msmsScans.txt) ──────────────────────────────
+    tabPanel(
+      title = tagList(icon("wave-square"), "MS/MS Scans QC"),
+      fluidRow(
+        box(
+          title = uiOutput(ns("scan_plot_title")),
+          status = "primary",
+          solidHeader = TRUE,
+          width = 12,
+          div(
+            class = "plot-wrap",
+            tags$div(
+              class = "spinner-overlay",
+              id = ns("sp_scans"),
+              icon("spinner", class = "fa-spin")
+            ),
+            uiOutput(ns("scans_plot_ui"))
+          )
+        )
+      ),
+      fluidRow(
+        box(
+          title = "MS/MS scans table preview (first 500 rows)",
+          status = "primary",
+          solidHeader = TRUE,
+          width = 12,
+          collapsible = TRUE,
+          collapsed = TRUE,
+          DT::dataTableOutput(ns("scans_table"))
         )
       )
     ),
@@ -880,12 +1687,12 @@ MaxQuantMSMS_body_ui <- function(id) {
       )
     ),
 
-    # ── Tab 5: File Summary ───────────────────────────────────────────────
+    # ── Tab 5: Peptides Summary (peptides.txt) ────────────────────────────
     tabPanel(
-      title = tagList(icon("list"), "MS/MS File Summary"),
+      title = tagList(icon("list"), "Peptides Summary"),
       fluidRow(
         box(
-          title = "Peptide sequences in msms.txt",
+          title = "Identified peptides (peptides.txt; reverse hits and contaminants removed)",
           status = "primary",
           solidHeader = TRUE,
           width = 12,
@@ -985,10 +1792,11 @@ MaxQuantMSMS_server <- function(id) {
     }
 
     mq_files <- reactiveVal(NULL)
-    raw_msms_rv <- reactiveVal(NULL)
+    raw_scans_rv <- reactiveVal(NULL)
     raw_evidence_rv <- reactiveVal(NULL)
     raw_summary_rv <- reactiveVal(NULL)
     protein_groups_rv <- reactiveVal(NULL)
+    peptides_rv <- reactiveVal(NULL)
 
     # Read one file with progress + log; returns NULL on failure
     load_one <- function(label, path, reader, step, n_steps) {
@@ -1020,15 +1828,23 @@ MaxQuantMSMS_server <- function(id) {
       })
       if (!is.null(res)) {
         secs <- round(as.numeric(difftime(Sys.time(), t0, units = "secs")), 1)
-        log_step(
+        msg <- if (is.character(res)) {
+          # Lazy table: only the parquet path is kept
+          sprintf(
+            "%s ready for on-demand queries (%s) in %s s",
+            label,
+            basename(res),
+            secs
+          )
+        } else {
           sprintf(
             "%s loaded: %s rows in %s s",
             label,
             format(nrow(res), big.mark = ","),
             secs
-          ),
-          "ok"
-        )
+          )
+        }
+        log_step(msg, "ok")
       }
       res
     }
@@ -1038,10 +1854,11 @@ MaxQuantMSMS_server <- function(id) {
       on.exit(shinyjs::enable("load_files"), add = TRUE)
 
       # Reset previous state
-      raw_msms_rv(NULL)
+      raw_scans_rv(NULL)
       raw_evidence_rv(NULL)
       raw_summary_rv(NULL)
       protein_groups_rv(NULL)
+      peptides_rv(NULL)
       status_log(status_log()[0, ])
 
       folder <- trimws(input$mq_folder)
@@ -1069,8 +1886,9 @@ MaxQuantMSMS_server <- function(id) {
       missing <- setdiff(names(files), found)
       log_step(
         sprintf(
-          "Found %d/4 files%s",
+          "Found %d/%d files%s",
           length(found),
+          length(files),
           if (length(missing)) {
             paste0(" (missing: ", paste(missing, collapse = ", "), ")")
           } else {
@@ -1084,20 +1902,28 @@ MaxQuantMSMS_server <- function(id) {
       }
 
       withProgress(message = "Loading MaxQuant files", value = 0, {
+        n_steps <- 5
         # Small files first so the Run Summary tab populates quickly
         raw_summary_rv(load_one(
           "summary.txt",
           files$summary,
           read_summary_file,
           1,
-          4
+          n_steps
         ))
         protein_groups_rv(load_one(
           "proteinGroups.txt",
           files$proteinGroups,
           read_protein_groups,
           2,
-          4
+          n_steps
+        ))
+        peptides_rv(load_one(
+          "peptides.txt",
+          files$peptides,
+          read_peptides_file,
+          3,
+          n_steps
         ))
         # Offer only the quantity types actually present in this run
         if (!is.null(protein_groups_rv())) {
@@ -1124,14 +1950,22 @@ MaxQuantMSMS_server <- function(id) {
             selected = if ("Intensity" %in% avail) "Intensity" else avail[1]
           )
         }
+        # Heavy tables go through the parquet cache; conversion is logged
+        cache_log <- function(msg, level) log_step(msg, level, notify = FALSE)
         raw_evidence_rv(load_one(
           "evidence.txt",
           files$evidence,
-          read_evidence_file,
-          3,
-          4
+          function(p) read_evidence_file(p, log = cache_log),
+          4,
+          n_steps
         ))
-        raw_msms_rv(load_one("msms.txt", files$msms, read_msms_file, 4, 4))
+        raw_scans_rv(load_one(
+          "msmsScans.txt",
+          files$msmsScans,
+          function(p) read_msmsscans_file(p, log = cache_log),
+          5,
+          n_steps
+        ))
         setProgress(1, message = "Loading complete", detail = "")
       })
 
@@ -1151,8 +1985,9 @@ MaxQuantMSMS_server <- function(id) {
       loaded <- list(
         summary = raw_summary_rv(),
         proteinGroups = protein_groups_rv(),
+        peptides = peptides_rv(),
         evidence = raw_evidence_rv(),
-        msms = raw_msms_rv()
+        msmsScans = raw_scans_rv()
       )
       row <- function(nm) {
         if (is.na(files[[nm]])) {
@@ -1161,31 +1996,48 @@ MaxQuantMSMS_server <- function(id) {
             icon("xmark"),
             " ",
             nm,
-            ".txt missing"
+            if (nm %in% MQ_PARQUET_TABLES) {
+              ".parquet / .txt missing"
+            } else {
+              ".txt missing"
+            }
           )
         } else if (is.null(loaded[[nm]])) {
           tags$li(
             style = "color:#f39c12;",
             icon("spinner", class = "fa-spin"),
             " ",
-            nm,
-            ".txt found — loading…"
+            basename(files[[nm]]),
+            " found — loading…"
           )
         } else {
+          # Show the file actually used (parquet cache when available)
+          shown <- files[[nm]]
+          if (
+            nm %in% MQ_PARQUET_TABLES && file.exists(mq_parquet_path(shown))
+          ) {
+            shown <- mq_parquet_path(shown)
+          }
+          detail <- if (is.character(loaded[[nm]])) {
+            " (queried on demand)"
+          } else {
+            paste0(" (", format(nrow(loaded[[nm]]), big.mark = ","), " rows)")
+          }
           tags$li(
             style = "color:#2ecc71;",
             icon("check"),
             " ",
-            nm,
-            ".txt (",
-            format(nrow(loaded[[nm]]), big.mark = ","),
-            " rows)"
+            basename(shown),
+            detail
           )
         }
       }
       tags$ul(
         style = "list-style:none;padding-left:4px;font-size:11px;margin-top:4px;",
-        lapply(c("summary", "proteinGroups", "evidence", "msms"), row)
+        lapply(
+          c("summary", "proteinGroups", "peptides", "evidence", "msmsScans"),
+          row
+        )
       )
     })
 
@@ -1226,66 +2078,6 @@ MaxQuantMSMS_server <- function(id) {
           )
         })
       )
-    })
-
-    # ════════════════════════════════════════════════════════════════════
-    # A. msms.txt REACTIVES
-    # ════════════════════════════════════════════════════════════════════
-
-    raw_msms <- reactive({
-      req(raw_msms_rv())
-    })
-
-    # Populate peptide selector after upload
-    observeEvent(raw_msms(), {
-      peptides <- sort(unique(raw_msms()$Sequence))
-      updateSelectizeInput(
-        session,
-        "peptide_seq",
-        choices = peptides,
-        selected = peptides[1],
-        server = TRUE
-      )
-    })
-
-    # Tidy MS/MS data — recalculate only on button click
-    tidy_msms_data <- eventReactive(input$run_msms, {
-      if (is.null(raw_msms_rv())) {
-        log_step(
-          "msms.txt is not loaded — load the MaxQuant folder first.",
-          "warn"
-        )
-      }
-      req(raw_msms(), nchar(input$peptide_seq) > 0)
-      show_spinner("sp_spectrum")
-      log_step(
-        paste0("Building MS/MS spectrum for ", input$peptide_seq, "…"),
-        "info",
-        notify = FALSE
-      )
-      withProgress(message = "Tidying MS/MS data…", value = 0.5, {
-        result <- tidy_msms(raw_msms(), input$peptide_seq)
-        incProgress(0.5, detail = "Done.")
-        result
-      })
-      log_step(
-        sprintf("MS/MS spectrum ready (%d fragment ions).", nrow(result)),
-        "ok"
-      )
-      result
-    })
-
-    # Number of facets for dynamic height
-    n_msms_facets <- reactive({
-      req(tidy_msms_data())
-      tidy_msms_data() |>
-        dplyr::distinct(`Raw file`, Charge, `Retention time`) |>
-        nrow()
-    })
-
-    msms_plot_height_px <- reactive({
-      n_rows <- ceiling(n_msms_facets() / 3)
-      max(400L, n_rows * 350L)
     })
 
     # ════════════════════════════════════════════════════════════════════
@@ -1344,6 +2136,99 @@ MaxQuantMSMS_server <- function(id) {
     ev_plot_height_px <- reactive({
       req(raw_evidence())
       facet_height_px(raw_evidence())
+    })
+
+    # ════════════════════════════════════════════════════════════════════
+    # B2. peptides.txt REACTIVES
+    # ════════════════════════════════════════════════════════════════════
+
+    peptides <- reactive({
+      req(peptides_rv())
+    })
+
+    current_pep_plot <- eventReactive(input$run_peptides, {
+      if (is.null(peptides_rv())) {
+        log_step(
+          "peptides.txt is not loaded — load the MaxQuant folder first.",
+          "warn"
+        )
+      }
+      req(peptides())
+      show_spinner("sp_peptides")
+
+      sel <- input$pep_plot_select
+      log_step(
+        paste0("Building peptides QC plot: ", sel, "…"),
+        "info",
+        notify = FALSE
+      )
+      p <- tryCatch(
+        PEP_PLOTS[[sel]][[2]](peptides()),
+        error = function(e) {
+          log_step(
+            sprintf("Peptides plot '%s' failed: %s", sel, conditionMessage(e)),
+            "error"
+          )
+          hide_spinner("sp_peptides")
+          NULL
+        }
+      )
+      req(p)
+      log_step("Peptides QC plot built — rendering…", "ok", notify = FALSE)
+      p
+    })
+
+    pep_plot_height_px <- reactive({
+      PEP_PLOTS[[input$pep_plot_select]][[3]]
+    })
+
+    # ════════════════════════════════════════════════════════════════════
+    # B3. msmsScans.txt REACTIVES
+    # ════════════════════════════════════════════════════════════════════
+
+    raw_scans <- reactive({
+      req(raw_scans_rv())
+    })
+
+    current_scan_plot <- eventReactive(input$run_scans, {
+      if (is.null(raw_scans_rv())) {
+        log_step(
+          "msmsScans.txt is not loaded — load the MaxQuant folder first.",
+          "warn"
+        )
+      }
+      req(raw_scans())
+      show_spinner("sp_scans")
+
+      sel <- input$scan_plot_select
+      log_step(
+        paste0("Building MS/MS scans QC plot: ", sel, "…"),
+        "info",
+        notify = FALSE
+      )
+      p <- tryCatch(
+        SCAN_PLOTS[[sel]][[2]](raw_scans()),
+        error = function(e) {
+          log_step(
+            sprintf("Scans plot '%s' failed: %s", sel, conditionMessage(e)),
+            "error"
+          )
+          hide_spinner("sp_scans")
+          NULL
+        }
+      )
+      req(p)
+      log_step("MS/MS scans QC plot built — rendering…", "ok", notify = FALSE)
+      p
+    })
+
+    scan_plot_height_px <- reactive({
+      req(raw_scans())
+      if (identical(input$scan_plot_select, "id_rate")) {
+        max(300L, 60L * dplyr::n_distinct(raw_scans()$`Raw file`) + 150L)
+      } else {
+        facet_height_px(raw_scans())
+      }
     })
 
     # ════════════════════════════════════════════════════════════════════
@@ -1429,43 +2314,72 @@ MaxQuantMSMS_server <- function(id) {
         )
     })
 
+    # Peptide-level summary from peptides.txt (replaces the former msms.txt
+    # sequence count, which required the whole msms table in memory)
+    output$summary_table <- DT::renderDataTable({
+      req(peptides())
+      tbl <- pep_summary_table(peptides())
+      DT::datatable(
+        tbl,
+        rownames = FALSE,
+        filter = "top",
+        options = list(dom = "frtip", pageLength = 25, scrollX = TRUE),
+        class = "display compact"
+      ) |>
+        DT::formatSignif(
+          columns = intersect(c("Score", "PEP", "Intensity"), names(tbl)),
+          digits = 4
+        )
+    })
+
     # ════════════════════════════════════════════════════════════════════
-    # C. OUTPUTS — MS/MS
+    # D2. OUTPUTS — Peptides QC
     # ════════════════════════════════════════════════════════════════════
 
-    # Dynamic container so the plot height can scale with facets
-    output$spectrum_ui <- renderUI({
+    output$pep_plot_title <- renderUI({
+      PEP_PLOTS[[input$pep_plot_select]][[1]]
+    })
+
+    output$peptides_plot_ui <- renderUI({
       plotOutput(
-        ns("msms_spectrum"),
-        height = paste0(msms_plot_height_px(), "px")
+        ns("peptides_plot"),
+        height = paste0(pep_plot_height_px(), "px")
       )
     })
 
-    output$msms_spectrum <- renderPlot({
-      on.exit(hide_spinner("sp_spectrum"), add = TRUE)
-      req(tidy_msms_data())
-      build_msms_spectrum(tidy_msms_data(), label_size = input$label_size)
+    output$peptides_plot <- renderPlot({
+      on.exit(hide_spinner("sp_peptides"), add = TRUE)
+      req(current_pep_plot())
+      current_pep_plot()
     })
 
-    output$tidy_table <- DT::renderDataTable({
-      req(tidy_msms_data())
+    # ════════════════════════════════════════════════════════════════════
+    # D3. OUTPUTS — MS/MS Scans QC
+    # ════════════════════════════════════════════════════════════════════
+
+    output$scan_plot_title <- renderUI({
+      SCAN_PLOTS[[input$scan_plot_select]][[1]]
+    })
+
+    output$scans_plot_ui <- renderUI({
+      plotOutput(
+        ns("scans_plot"),
+        height = paste0(scan_plot_height_px(), "px")
+      )
+    })
+
+    output$scans_plot <- renderPlot({
+      on.exit(hide_spinner("sp_scans"), add = TRUE)
+      req(current_scan_plot())
+      current_scan_plot()
+    })
+
+    output$scans_table <- DT::renderDataTable({
+      req(raw_scans())
       DT::datatable(
-        tidy_msms_data(),
+        head(raw_scans(), 500),
         rownames = FALSE,
         options = list(dom = "frtip", pageLength = 20, scrollX = TRUE),
-        class = "display compact"
-      )
-    })
-
-    output$summary_table <- DT::renderDataTable({
-      req(raw_msms())
-      summary_df <- raw_msms() |>
-        dplyr::count(Sequence, `Gene Names`, name = "n_spectra") |>
-        dplyr::arrange(dplyr::desc(n_spectra))
-      DT::datatable(
-        summary_df,
-        rownames = FALSE,
-        options = list(dom = "frtip", pageLength = 25, scrollX = TRUE),
         class = "display compact"
       )
     })
@@ -1523,38 +2437,6 @@ MaxQuantMSMS_server <- function(id) {
     # E. DOWNLOAD HANDLERS
     # ════════════════════════════════════════════════════════════════════
 
-    # MS/MS spectrum PDF
-    output$download_msms_plot <- downloadHandler(
-      filename = function() {
-        paste0("msms_spectrum_", input$peptide_seq, "_", Sys.Date(), ".pdf")
-      },
-      content = function(file) {
-        p <- build_msms_spectrum(
-          tidy_msms_data(),
-          label_size = input$label_size
-        )
-        n_rows <- ceiling(n_msms_facets() / 3)
-        ggplot2::ggsave(
-          file,
-          plot = p,
-          device = "pdf",
-          width = 16,
-          height = max(5, n_rows * 4),
-          units = "in"
-        )
-      }
-    )
-
-    # MS/MS tidy TSV
-    output$download_msms_data <- downloadHandler(
-      filename = function() {
-        paste0("msms_tidy_", input$peptide_seq, "_", Sys.Date(), ".tsv")
-      },
-      content = function(file) {
-        data.table::fwrite(tidy_msms_data(), file = file, sep = ",", na = "NA")
-      }
-    )
-
     # Evidence plot PDF
     output$download_ev_plot <- downloadHandler(
       filename = function() {
@@ -1583,6 +2465,62 @@ MaxQuantMSMS_server <- function(id) {
       },
       content = function(file) {
         data.table::fwrite(raw_evidence(), file = file, sep = ",", na = "NA")
+      }
+    )
+
+    # Peptides plot PDF
+    output$download_pep_plot <- downloadHandler(
+      filename = function() {
+        paste0("peptides_", input$pep_plot_select, "_", Sys.Date(), ".pdf")
+      },
+      content = function(file) {
+        ggplot2::ggsave(
+          file,
+          plot = current_pep_plot(),
+          device = "pdf",
+          width = 10,
+          # ~90 px per inch keeps the PDF proportions close to the screen
+          height = max(6, pep_plot_height_px() / 90),
+          units = "in"
+        )
+      }
+    )
+
+    # MS/MS scans plot PDF
+    output$download_scan_plot <- downloadHandler(
+      filename = function() {
+        paste0("msmsScans_", input$scan_plot_select, "_", Sys.Date(), ".pdf")
+      },
+      content = function(file) {
+        n_rows <- ceiling(dplyr::n_distinct(raw_scans()$`Raw file`) / 3)
+        ggplot2::ggsave(
+          file,
+          plot = current_scan_plot(),
+          device = "pdf",
+          width = 16,
+          height = max(5, n_rows * 4),
+          units = "in"
+        )
+      }
+    )
+
+    # MS/MS scans TSV
+    output$download_scan_data <- downloadHandler(
+      filename = function() {
+        paste0("msmsScans_data_", Sys.Date(), ".tsv")
+      },
+      content = function(file) {
+        data.table::fwrite(raw_scans(), file = file, sep = "\t", na = "NA")
+      }
+    )
+
+    # Peptides table TSV (filtered peptides.txt)
+    output$download_pep_data <- downloadHandler(
+      filename = function() {
+        paste0("peptides_data_", Sys.Date(), ".tsv")
+      },
+      content = function(file) {
+        data.table::fwrite(peptides(), file = file, sep = "\t", na = "NA")
       }
     )
 
