@@ -4,7 +4,7 @@
 
 # proteOmni
 
-**proteOmni** is a comprehensive, unified Shiny-based dashboard for visual quality control (QC), diagnostics, and differential abundance analysis of proteomics results from multiple search engines and acquisition strategies. It centralizes eight specialized modules covering DDA, DIA, and *de novo* sequencing workflows into a single interactive application.
+**proteOmni** is a comprehensive, unified Shiny-based dashboard for visual quality control (QC), diagnostics, and differential abundance analysis of proteomics results from multiple search engines and acquisition strategies. It centralizes eight specialized modules covering DDA, DIA, and *de novo* sequencing workflows into a single interactive application, plus an in-app *Documentation* page describing the PwrQuant statistical workflow.
 
 <p align="center">
 <img src="https://github.com/41ison/proteOmni/blob/main/images/proteomni_interface.png" width="700">
@@ -127,30 +127,36 @@ Rscript run.R
 
 ```
 proteOmni/
-├── proteOmni.R                  # Main app entry point (UI + server + package bootstrap)
+├── run.R                        # Launch script (sources bootstrap.R, then starts the app)
+├── bootstrap.R                  # Checks for and installs missing packages
+├── proteOmni.r                  # Main app file (UI + server, sources all modules)
 ├── proteOmni_MacOS.command      # One-click launcher for macOS / Linux
 ├── proteOmni_Windows.bat        # One-click launcher for Windows
 ├── modules/
 │   ├── mod_PSManalyst.r         # PSManalyst module (FragPipe / DDA)
 │   ├── mod_QC4DIANN.r           # QC4DIANN module (DIA-NN / DIA)
 │   ├── mod_PwrQuant.r           # PwrQuant module (limma / differential abundance)
+│   ├── mod_PwrQuantDocs.r       # In-app Documentation page for PwrQuant
 │   ├── dash_deNovo.r            # Casanovo de novo module
 │   ├── mod_InstaNovo.r          # InstaNovo de novo module
 │   ├── mod_EncyclopeDIA.r       # EncyclopeDIA module
 │   ├── mod_Sage.r               # Sage module
 │   ├── mod_MaxQuantMSMS.r       # MaxQuant module
-│   ├── utils_fasta.r            # Shared FASTA parsing utilities
+│   ├── utils_fasta.r            # Shared FASTA parsing / digestion + Global FASTA sidebar
 │   └── mod_TEMPLATE.r           # Template for adding new modules
 ├── www/
 │   └── favicon.svg              # App favicon
 ├── images/                      # Screenshots and GIFs for README
+├── LICENSE
 └── README.md
 ```
 
 Each module follows the standard Shiny module pattern with three exported functions:
-- `<Module>_sidebar_ui(id)` — sidebar controls
+- `<Module>_sidebar_ui(id)` — sidebar controls (rendered dynamically for the active module)
 - `<Module>_body_ui(id)` — main panel tabs and plots
 - `<Module>_server(id, ...)` — reactive server logic
+
+The sidebar menu lists the modules in this order: **Home**, **PwrQuant**, **PSManalyst**, **QC4DIANN**, **MaxQuant**, **Casanovo**, **InstaNovo**, **EncyclopeDIA**, **Sage**, **Documentation**. Below the module-specific controls, a **Global FASTA Mapping** panel (FASTA upload + max missed cleavages) is always visible; its *in silico* digest is shared by the InstaNovo, EncyclopeDIA, and Sage modules.
 
 ---
 
@@ -158,15 +164,17 @@ Each module follows the standard Shiny module pattern with three exported functi
 
 ### 1. PSManalyst — *FragPipe / DDA*
 
-Visual QC for FragPipe DDA results. Requires `psm.tsv` and `combined_protein.tsv`; optionally accepts a FASTA file for peptide-to-protein mapping.
+Visual QC for FragPipe DDA results. Point the module at the folder containing the `psm.tsv` files (one per experiment) and upload `combined_protein.tsv`; optionally upload a FASTA file for peptide-to-protein mapping. Sidebar filters include sample selection, Hyperscore and PeptideProphet probability sliders, protease specificity, and a plot colour picker. A protein abundance matrix (choice of metric and protein identifier) can be exported from the sidebar, as can a ZIP of all plots.
 
 **Tabs:**
 
 | Tab | Content |
 |---|---|
-| **PSM Viewer** | Protease fingerprint heatmap, N/C-termini sequence logos, m/z over retention time, mass error distributions (ppm and Da), charge state and peptide length distributions, amino acid frequencies, missed cleavage analysis, and pairwise sample scatter plots |
-| **MS/MS Spectrum Viewer** | Annotated b/y fragment ion spectra for any selected PSM with colour-coded ion series |
-| **Protein Viewer** | Peptide sequence coverage mapped onto FASTA sequences with a colour-coded viewer; sample-to-sample comparison via cosine and Jaccard similarity matrices |
+| **PSM Viewer** | Single-plot builder with 21 graphics: protease fingerprint, N/C-termini sequence logos, m/z over RT, mass error (ppm), peptide length, GRAVY, pI, charge state, missed cleavages, uniqueness, Hyperscore, Next Score, PeptideProphet probability, Expectation, assigned modifications, top-20 proteins, N:C-terminus matrix, cysteine counts, AA frequency vs FASTA, and peptide yield vs. FDR |
+| **MS/MS Spectrum Viewer** | Annotated b/y fragment ion spectrum for any selected PSM with colour-coded ion series (PDF download), plus a tidy fragment-ion table |
+| **Protein Viewer** | Protein-level plots from `combined_protein.tsv` (coverage, organisms, protein existence, protein/top-peptide probability, total peptides, razor spectral count and intensity, MaxLFQ distribution, top-20 by MaxLFQ or spectral count) and a colour-coded **Sequence Coverage View** mapping peptides onto FASTA sequences |
+| **Modification Diagnostic** | RT-shift profile of modified vs. unmodified peptide pairs (adjustable RT tolerance) with a paired-peptide table |
+| **Similarity & Distance** | Pairwise sample scatterplot matrix (`GGally::ggpairs`), cosine similarity, Euclidean distance, and Jaccard similarity heatmaps |
 
 ---
 
@@ -174,34 +182,42 @@ Visual QC for FragPipe DDA results. Requires `psm.tsv` and `combined_protein.tsv
 
 **Observation:** From version 2.6.0 DIA-NN have a nice `Analyze` module to help you process your data.
 
-Diagnostics for DIA-NN `.parquet` report files. Optionally integrates a FASTA file for sequence-level coverage.
+Diagnostics for DIA-NN `report.parquet` files. Optionally accepts a FASTA file (module sidebar) for peptide mapping and protease-specificity analysis. Sidebar controls include the protein identifier header (`Protein.Ids` / `Protein.Names` / `Genes`), `PG.MaxLFQ.Quality` and `Empirical.Quality` sliders, number of EFA factors, and a protein-matrix download.
 
 **Tabs:**
 
 | Tab | Content |
 |---|---|
-| **QC Filters & Distributions** | XIC reconstruction quality, ion density in m/z–RT space, RT prediction error, charge state and peptide length distributions, missed cleavages, FASTA sequence coverage |
-| **Interactive Viewer** | Sample correlation heatmap, cosine/Euclidean/Jaccard similarity matrices, 3D QuantUMS score distribution (interactive Plotly), PCA plot, and full pairwise sample correlation matrix |
+| **QC Filters & Distributions** | Single-plot builder with 15 graphics: XIC reconstruction, ion density (m/z vs RT), RT prediction error, charge state, peptide length, peptides and proteins per sample, cysteine counts, sparsity profile, missing values vs. median abundance, abundance before/after MAD normalization, missed cleavage sites, MS1 profile correlation, QuantUMS score distributions (interactive 3D Plotly), gene quantity distribution |
+| **Interactive Viewer** | Sample correlation heatmap (Plotly), cosine/Euclidean/Jaccard similarity matrices, PCA, full pairwise sample correlation matrix (`ggpairs`), and exploratory factor analysis (EFA); all plots downloadable as a ZIP |
+| **Peptide Mapping** | Colour-coded protein sequence coverage view (per protein and sample), amino acid frequencies, proteotypic vs. shared peptide counts and proportions, and a peptide mapping summary table — requires a FASTA file |
+| **Protease Specificity** | Schechter–Berger P4–P4' sequence logos, for all runs combined and per run — requires a FASTA file |
+| **Modification Diagnostic** | RT-shift profile of modified vs. unmodified peptides (adjustable RT tolerance and number of peptides shown) with a diagnostic table |
 
 ---
 
 ### 3. PwrQuant — *limma / stats*
 
-End-to-end differential abundance and statistical power analysis pipeline. Accepts any protein abundance matrix in `.tsv` or `.csv` format (proteins × samples). See [PwrQuant — Analytical Pipeline](#pwrquant--analytical-pipeline) for full details.
+End-to-end differential abundance and statistical power analysis pipeline. Accepts any protein abundance matrix in `.tsv`, `.txt`, or `.csv` format (proteins × samples), with a checkbox to declare the values as already log2-transformed. See [PwrQuant — Analytical Pipeline](#pwrquant--analytical-pipeline) for full details, and the in-app **Documentation** menu item for a step-by-step explanation of the statistics.
 
 **Tabs:**
 
 | Tab | Content |
 |---|---|
-| **Metadata Mapping** | Editable table for assigning samples to conditions and batches |
+| **Metadata Mapping** | Editable table for assigning samples to conditions and batches; samples can be excluded from the analysis |
 | **Sparsity** | Missing-value heatmap (`naniar::vis_miss`) |
-| **Pre-processing QC** | CV distributions per condition, mean–variance relationship (loess trend), raw and normalized abundance boxplots |
-| **Differential Abundance** | MA/Bland-Altman plots, volcano plots, top-20 DAP bar mirror chart, raw p-value histograms per contrast |
-| **Correlation** | Inter-contrast logFC scatter with Spearman ρ and concordant/inverse/mismatch classification |
-| **Power Statistics** | Prospective MDD power curve from simulated data, an MDD-vs-replicates design sweep, and a conditional per-protein sensitivity map (diagnostic only) |
+| **Pre-processing QC** | CV distributions per condition, mean–variance relationship (loess trend), raw and normalized abundance boxplots, PCA and PLS-DA on raw and processed data |
+| **Differential Abundance** | MA/Bland-Altman plots, volcano plots with user-selected protein labels, top-20 DAP bar mirror chart, raw p-value histograms per contrast |
+| **Correlation** | Inter-contrast logFC scatter with Spearman ρ and concordant/inverse/mismatch classification, with a downloadable table |
+| **Power Statistics** | Prospective MDD power curve from simulated data (with summary table), an MDD-vs-replicates design sweep, and a conditional per-protein sensitivity map (diagnostic only) |
 | **Enrichment** | GO over-representation analysis with `clusterProfiler::enrichGO`, run per contrast and split by up/down direction; results shown as a dotplot (top terms per contrast) and a Manhattan plot (all enriched terms), across 20 supported OrgDb organisms |
 | **Interaction Network** | STRING protein-protein interaction network (`STRINGdb`) for a selected contrast, with nodes halo-coloured by regulation and edges filtered by a confidence score; unmapped proteins are listed for transparency |
-| **UpSet Plots** | Visualize intersections of proteins across multiple sample groups; you can download the table |
+| **Selected Proteins** | Abundance profiles for a user-selected set of proteins across conditions (adjustable grid columns) |
+| **UpSet — Proteins by Condition** | Intersections of detected proteins across conditions, with a downloadable membership table |
+| **limma Results Table** | Full `topTable` output filterable by significance status, downloadable as `.tsv` |
+| **Z-Score Heatmap** | Row-scaled heatmap of significant or top-N proteins (`ComplexHeatmap`) with row clustering, downloadable cluster assignments, per-cluster abundance profiles, and per-cluster GO enrichment |
+
+Sidebar downloads: limma results, ORA results, STRING network, and a ZIP of all plots.
 
 ---
 
@@ -209,58 +225,74 @@ End-to-end differential abundance and statistical power analysis pipeline. Accep
 
 **Observation:** Starting from July 2026, Casanovo have a dedicated GUI built in Java language. Please, use the [CasanovoGUI app](https://github.com/Noble-Lab/CasanovoGUI).
 
-Visualiser for [Casanovo](https://github.com/Noble-Lab/casanovo) *de novo* sequencing output. Loads all `.mztab` files from a user-specified directory.
+Visualiser for [Casanovo](https://github.com/Noble-Lab/casanovo) *de novo* sequencing output. Loads all `.mztab` files from a user-specified directory. Sidebar filters: Casanovo score, mean per-amino-acid score, RT tolerance for the modification diagnostic, plot colour, and N/C-terminus logo widths.
 
-**Features:** score and per-amino-acid score filtering, peptide length and score distributions, N/C-termini sequence logos, amino acid frequency heatmap.
+**Tabs:**
+
+| Tab | Content |
+|---|---|
+| **Interactive Plot Viewer** | Run metadata and ingest summary, plus a single-plot builder with 19 graphics: score and mean AA-score distributions, peptide length, charge state, m/z error, score vs. mean AA score, retained PSMs vs. score threshold (elbow), RT vs. m/z error, RT vs. PSM count, modifications summary, modified vs. unmodified PSMs, GRAVY, pI, median score by peptide length, m/z error vs. score, amino acid frequencies, N/C-terminus sequence logos, N:C-terminus co-occurrence probability |
+| **PSM Table** | Filtered PSM table |
 
 ---
 
 ### 5. InstaNovo — *de novo*
 
-Visualiser for [InstaNovo](https://github.com/instadeepai/InstaNovo) *de novo* sequencing results. Accepts a `.csv` results file; optionally integrates a FASTA file.
+Visualiser for [InstaNovo](https://github.com/instadeepai/InstaNovo) *de novo* sequencing results. Loads all `.csv` result files from a user-specified directory; optionally uses the **Global FASTA Mapping** digest. Sidebar filters: score (`log_probs`), RT tolerance, plot colour, and N/C-terminus logo widths.
 
 **Tabs:**
 
 | Tab | Content |
 |---|---|
-| **Overview** | Score distribution, peptide length, charge state, mass error in ppm, PSM retention vs. score threshold curve |
-| **Peptide Analysis** | Median score by peptide length, ppm error vs. score, GRAVY hydrophobicity index, pI distribution, N/C-termini sequence logos |
+| **Interactive Plot Viewer** | Single-plot builder with 12 graphics: score distribution, peptide length, charge state, mass error (ppm), retained PSMs vs. score threshold, median score by peptide length, ppm error vs. score, GRAVY index, pI distribution, amino acid frequencies, N/C-terminus sequence logos |
+| **PSM Table** | Filtered PSM table |
+| **Modification Diagnostic** | RT-shift profile of modified vs. unmodified peptides with a diagnostic table |
 
 ---
 
 ### 6. EncyclopeDIA — *EncyclopeDIA / DIA*
 
-Aggregates and explores EncyclopeDIA DIA results. Reads all `.txt` result files from a user-specified directory.
+Aggregates and explores EncyclopeDIA DIA results. Reads all `*.encyclopedia2.txt` result files from a user-specified directory; optionally uses the **Global FASTA Mapping** digest. Sidebar controls: q-value filter and bar/line colours.
 
 **Tabs:**
 
 | Tab | Content |
 |---|---|
-| **Overview** | Protein and peptide identifications per file, score distribution, posterior error probability (PEP), q-value, peptide yield vs. FDR curve |
-| **Peptide Properties** | Charge state distribution, post-translational modifications, peptide length, GRAVY index, pI distribution, amino acid frequencies |
+| **Interactive Plot Viewer** | Single-plot builder with 11 graphics: protein and peptide identifications per file, score distribution, posterior error probability (PEP), q-value distribution, peptide yield vs. FDR, charge state, modifications, peptide length, GRAVY index, pI distribution, amino acid frequencies |
+| **Data Table** | Aggregated results table |
 
 ---
 
 ### 7. Sage — *Sage / DDA*
 
-QC dashboard for [Sage](https://github.com/lazear/sage) search engine results. Accepts `results.sage.tsv` or `.parquet` format.
+QC dashboard for [Sage](https://github.com/lazear/sage) search engine results. Accepts `results.sage.tsv` or `results.sage.parquet`. Sidebar filters: LDA discriminant score, q-value, RT tolerance, decoy removal, and separate target/decoy colours.
 
 **Tabs:**
 
 | Tab | Content |
 |---|---|
-| **Overview** | PSM counts, unique proteins and peptides per file, LDA discriminant score distribution |
-| **Peptide Properties** | Charge state, length density, missed cleavages, GRAVY hydrophobicity, pI distribution |
-| **Mass Errors** | RT vs. mass error scatter, fragment error in Da and ppm, RT vs. precursor error, precursor mass error density |
-| **Scoring & Validation** | Peptide and protein q-value distributions, peptide yield vs. FDR curve |
+| **Interactive Plot Viewer** | Single-plot builder with 15 graphics: number of PSMs, proteins & peptides by file, Sage discriminant score (LDA), charge state density, peptide length density, missed cleavages, GRAVY index, pI distribution, RT vs. mass error (Da), fragment error (ppm), RT vs. precursor error (ppm), precursor mass error density, peptide vs. protein q-value, peptide vs. spectrum q-value, peptide yield vs. FDR |
+| **Modification Diagnostic** | RT-shift profile of modified vs. unmodified peptides (per sample, adjustable top-N) with a diagnostic table |
 
 ---
 
 ### 8. MaxQuant — *MaxQuant / DDA*
 
-QC module for MaxQuant results. Requires the path to the combined MaxQuant output directory. The module finds the necessary files to use as input. To understand the files and meaning of each column variable from MaxQuant outputs, see [here](https://cox-labs.github.io/coxdocs/output_tables.html).
+QC module for MaxQuant results. Requires the path to the MaxQuant `combined` output directory; the module locates `msmsScans.txt`, `evidence.txt`, `peptides.txt`, `summary.txt`, and `proteinGroups.txt` in the `txt/` subfolder. To understand the files and meaning of each column variable from MaxQuant outputs, see [here](https://cox-labs.github.io/coxdocs/output_tables.html).
 
-**Features:** Annotated MS/MS fragmentation spectrum viewer (b/y ions colour-coded by series) for any peptide in `msms.txt`; evidence-level QC metrics from `evidence.txt` including mass error distributions, charge states, PTM profiles, missed cleavages, and more.
+The sidebar offers one plot selector per input table (Evidence, Peptides, MS/MS Scans), each with plot (PDF) and data (TSV) downloads, and a protein abundance matrix export from `proteinGroups.txt` (Intensity / LFQ intensity / iBAQ, optional zero→NA and log2).
+
+**Tabs:**
+
+| Tab | Content |
+|---|---|
+| **Run Summary** | Processing status log, MaxQuant run summary (`summary.txt`), and a preview of the protein abundance matrix |
+| **Evidence QC** | 14 plots from `evidence.txt`: m/z vs RT, data points distribution and vs m/z, peptide length, modifications, missed cleavages, identification type, charge state, m/z and mass distributions, mass error (ppm and Da), PEP distribution, taxonomy names |
+| **Peptides QC** | Plots from `peptides.txt`: MS/MS spectra per peptide, peptides per experiment, experiment overlap (counts and UpSet), and more |
+| **MS/MS Scans QC** | Plots from `msmsScans.txt`: identification rate per raw file and over RT, MS/MS scans over RT, precursor m/z vs RT, total ion current, ion injection time, base peak and precursor intensity, precursor apex fraction, precursor charge, identification rate by scan event (TopN), filtered peaks per spectrum, Andromeda score; plus a preview of the scans table |
+| **Evidence Data** | Filtered `evidence.txt` table |
+| **Peptides Summary** | Peptide-level summary table |
+| **Modification Diagnostic** | RT-shift profile of modified vs. unmodified peptides (adjustable RT tolerance) with a diagnostic table |
 
 ---
 
@@ -268,14 +300,14 @@ QC module for MaxQuant results. Requires the path to the combined MaxQuant outpu
 
 | Module | Required files | Optional |
 |---|---|---|
-| **PSManalyst** | `path/to/search_results`, `combined_protein.tsv` | FASTA file |
-| **QC4DIANN** | `report.parquet` (DIA-NN output) | FASTA file |
-| **PwrQuant** | Protein abundance matrix (`.tsv` / `.csv`, proteins × samples) | — |
+| **PSManalyst** | Directory path containing `psm.tsv` files, `combined_protein.tsv` (upload) | FASTA file (module sidebar) |
+| **QC4DIANN** | `report.parquet` (DIA-NN output) | FASTA file (module sidebar) |
+| **PwrQuant** | Protein abundance matrix (`.tsv` / `.txt` / `.csv`, proteins × samples) | — |
 | **Casanovo** | Directory path containing `.mztab` files | — |
-| **InstaNovo** | InstaNovo results `.csv` file | FASTA file |
-| **EncyclopeDIA** | Directory path containing EncyclopeDIA `.txt` result files | FASTA file |
-| **Sage** | `results.sage.tsv` or `results.sage.parquet` | FASTA file |
-| **MaxQuant** | `path/to/combined` | — |
+| **InstaNovo** | Directory path containing InstaNovo `.csv` result files | Global FASTA Mapping |
+| **EncyclopeDIA** | Directory path containing `*.encyclopedia2.txt` result files | Global FASTA Mapping |
+| **Sage** | `results.sage.tsv` or `results.sage.parquet` | Global FASTA Mapping |
+| **MaxQuant** | Path to the MaxQuant `combined` directory (`txt/` subfolder is located automatically) | — |
 
 ### PwrQuant abundance matrix format
 
@@ -288,7 +320,7 @@ EGFR         NA           8.3e6        9.1e6        NA
 ...
 ```
 
-Accepted delimiters: tab (`.tsv`, `.txt`) or comma (`.csv`). Duplicate row IDs are resolved automatically with `make.unique()`.
+Accepted delimiters: tab (`.tsv`, `.txt`) or comma (`.csv`). Duplicate row IDs are resolved automatically with `make.unique()`. If your values are already log2-transformed, tick the *already log2* checkbox in the sidebar.
 
 ---
 
