@@ -13,6 +13,7 @@
 
 # User-specific files
 .Ruserdata
+README.html
 
 # Example code in package build process
 *-Ex.R
