@@ -14,6 +14,153 @@ compute_cv_mtx <- function(protein_matrix, group_labels) {
   return(cv_results)
 }
 
+#' TMM normalization of a log2 intensity matrix
+#'
+#' Trimmed Mean of M-values (Robinson & Oshlack 2010) estimates one scaling
+#' factor per sample from the trimmed, precision-weighted mean of log-ratios
+#' against a reference sample. It assumes most proteins are *not*
+#' differentially abundant and is robust to asymmetric regulation and to a
+#' few dominant high-abundance proteins, where median or total-intensity
+#' scaling fail.
+#'
+#' Adaptations for MS proteomics, which differs from RNA-seq counts:
+#'
+#' * TMM needs linear intensities, so the matrix is back-transformed with
+#'   `2^x`. Cells with `x <= nondetect_log2` (raw zeros that became
+#'   `log2(0 + 1) = 0`) and non-finite cells are treated as non-detects.
+#' * edgeR cannot take NAs, so every sample is normalized against the
+#'   reference on the *pairwise complete-case* intersection of detected
+#'   proteins. The library sizes used inside TMM are the column sums over that
+#'   same shared set, so the two columns are always measured on the same
+#'   features.
+#' * The reference is the sample whose upper-quartile relative intensity is
+#'   closest to the across-sample mean (edgeR's rule), restricted to samples
+#'   with at least median completeness so the pairwise overlap stays large.
+#' * Only the scaling factors are applied - on the log2 scale, as a per-column
+#'   shift - so missing values stay missing and can be handled natively by
+#'   `lmFit` in least-squares mode. Factors are centred at a geometric mean of
+#'   1 to preserve the overall intensity level.
+#' * A pair with fewer than `min_shared` shared proteins gets a plain
+#'   median-of-M factor instead (or 1, with a warning, below 10 proteins);
+#'   the 30 % / 5 % trimming would otherwise leave nothing to average.
+#'
+#' @param log2_mat Numeric matrix, proteins x samples, log2 scale, may have NAs.
+#' @param logratio_trim,sum_trim Fractions of M and A values trimmed from
+#'   each tail, as in `edgeR::calcNormFactors()`.
+#' @param nondetect_log2 Values at or below this log2 threshold are treated as
+#'   non-detects.
+#' @param min_shared Minimum shared detected proteins for a full TMM fit.
+#' @return The normalized log2 matrix with attribute `"tmm"`: a data.frame
+#'   with one row per sample (`sample`, `scale_factor`, `n_shared`,
+#'   `method`, `is_reference`).
+tmm_normalize_log2 <- function(
+  log2_mat,
+  logratio_trim = 0.3,
+  sum_trim = 0.05,
+  nondetect_log2 = 0,
+  min_shared = 50L
+) {
+  if (!requireNamespace("edgeR", quietly = TRUE)) {
+    stop("TMM normalization requires the Bioconductor package 'edgeR'.")
+  }
+  log2_mat <- as.matrix(log2_mat)
+  n_samp <- ncol(log2_mat)
+  if (n_samp < 2L) {
+    stop("TMM normalization needs at least two samples.")
+  }
+  samp_names <- colnames(log2_mat)
+  if (is.null(samp_names)) {
+    samp_names <- paste0("S", seq_len(n_samp))
+  }
+
+  # edgeR >= 4.0 renamed calcNormFactors(); the old name still works but
+  # emits a message on every call.
+  tmm_fun <- if (exists("normLibSizes", envir = asNamespace("edgeR"))) {
+    edgeR::normLibSizes
+  } else {
+    edgeR::calcNormFactors
+  }
+
+  lin <- 2^log2_mat
+  detected <- is.finite(log2_mat) & log2_mat > nondetect_log2
+  lin[!detected] <- NA_real_
+
+  completeness <- colMeans(detected)
+  if (any(colSums(detected) < 2L)) {
+    stop(
+      "TMM normalization: sample(s) with fewer than two detected proteins: ",
+      paste(samp_names[colSums(detected) < 2L], collapse = ", ")
+    )
+  }
+
+  # Reference: edgeR's upper-quartile rule among well-covered samples
+  rel <- sweep(lin, 2, colSums(lin, na.rm = TRUE), "/")
+  uq <- apply(rel, 2, stats::quantile, probs = 0.75, na.rm = TRUE)
+  eligible <- which(completeness >= stats::median(completeness))
+  ref <- eligible[which.min(abs(uq[eligible] - mean(uq)))]
+
+  scale_log2 <- numeric(n_samp)
+  n_shared <- integer(n_samp)
+  method <- character(n_samp)
+
+  for (j in seq_len(n_samp)) {
+    if (j == ref) {
+      n_shared[j] <- sum(detected[, ref])
+      method[j] <- "reference"
+      next
+    }
+    shared <- detected[, j] & detected[, ref]
+    n_shared[j] <- sum(shared)
+    pair <- lin[shared, c(j, ref), drop = FALSE]
+    lib <- colSums(pair)
+
+    if (n_shared[j] >= min_shared) {
+      # edgeR returns factors with product 1; their ratio is the raw TMM
+      # factor of sample j relative to the reference.
+      f <- tmm_fun(
+        pair,
+        lib.size = lib,
+        method = "TMM",
+        refColumn = 2L,
+        logratioTrim = logratio_trim,
+        sumTrim = sum_trim,
+        doWeighting = TRUE
+      )
+      # Effective size of j relative to the reference, on shared features
+      scale_log2[j] <- log2(lib[1] * f[1]) - log2(lib[2] * f[2])
+      method[j] <- "TMM"
+    } else if (n_shared[j] >= 10L) {
+      scale_log2[j] <- stats::median(log2(pair[, 1]) - log2(pair[, 2]))
+      method[j] <- "median-M (too few shared proteins for TMM)"
+    } else {
+      warning(
+        sprintf(
+          "TMM: sample '%s' shares only %d detected proteins with the reference; scaling factor set to 1.",
+          samp_names[j],
+          n_shared[j]
+        )
+      )
+      scale_log2[j] <- 0
+      method[j] <- "none (insufficient overlap)"
+    }
+  }
+
+  # Centre so the geometric mean of the factors is 1
+  scale_log2 <- scale_log2 - mean(scale_log2)
+  out <- sweep(log2_mat, 2, scale_log2, "-")
+  dimnames(out) <- dimnames(log2_mat)
+
+  attr(out, "tmm") <- data.frame(
+    sample = samp_names,
+    scale_factor = 2^scale_log2,
+    n_shared = n_shared,
+    method = method,
+    is_reference = seq_len(n_samp) == ref,
+    stringsAsFactors = FALSE
+  )
+  out
+}
+
 # method: "knn" (fast, MAR), "minprob" (fastest, MNAR-aware),
 #         "missforest" (slow legacy), "bpca" (global Bayesian PCA, not groupwise)
 groupwise_imputation <- function(
@@ -1407,7 +1554,13 @@ PwrQuant_sidebar_ui <- function(id) {
       selectInput(
         ns("norm_method"),
         "Normalization Method",
-        choices = c("none", "scale", "quantile", "cyclicloess"),
+        choices = c(
+          "none",
+          "scale",
+          "quantile",
+          "cyclicloess",
+          "TMM (edgeR)"
+        ),
         selected = "cyclicloess"
       ),
       selectInput(
@@ -3396,6 +3549,33 @@ PwrQuant_server <- function(id) {
             method = "none"
           ) %>%
             as.data.frame()
+        } else if (norm_meth == "TMM") {
+          incProgress(0, detail = "TMM: pairwise complete-case scaling factors")
+          tmm_mtx <- withCallingHandlers(
+            tmm_normalize_log2(as.matrix(mtx_batch_correct)),
+            warning = function(w) {
+              showNotification(
+                conditionMessage(w),
+                type = "warning",
+                duration = 12
+              )
+              invokeRestart("muffleWarning")
+            }
+          )
+          tmm_info <- attr(tmm_mtx, "tmm")
+          showNotification(
+            sprintf(
+              "TMM: reference sample '%s'; scaling factors %.2f–%.2f; shared detected proteins per sample %d–%d.",
+              tmm_info$sample[tmm_info$is_reference],
+              min(tmm_info$scale_factor),
+              max(tmm_info$scale_factor),
+              min(tmm_info$n_shared[!tmm_info$is_reference]),
+              max(tmm_info$n_shared[!tmm_info$is_reference])
+            ),
+            type = "message",
+            duration = 12
+          )
+          limma_mtx <- as.data.frame(tmm_mtx)
         } else {
           limma_mtx <- limma::normalizeBetweenArrays(
             as.matrix(mtx_batch_correct),

@@ -40,6 +40,7 @@ library(grid)
 library(GGally)
 library(Biostrings)
 library(limma)
+library(edgeR)
 library(lavaan)
 library(patchwork)
 library(ComplexHeatmap)
@@ -76,6 +77,7 @@ writeLines(
   "tidyverse",
   "ggplot2",
   "limma",
+  "edgeR",
   "sva",
   "STRINGdb",
   "clusterProfiler",

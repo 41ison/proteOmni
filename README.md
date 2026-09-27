@@ -41,7 +41,7 @@
 - **Deep QC Insights** — Generate detailed metrics including protease fingerprints, sequence logos, mass accuracy (ppm), retention time prediction errors, charge state and peptide length distributions, missed cleavages, GRAVY index, and isoelectric point (pI) profiles.
 - **Interactive Visualization** — Explore 3D QuantUMS score distributions, interactive PCA plots, sample correlation matrices, cosine/Euclidean/Jaccard similarity heatmaps, and annotated MS/MS fragmentation spectra directly in the browser.
 - **Peptide-to-Protein Mapping** — Map identified peptides onto user-provided FASTA sequences with a colour-coded protein sequence viewer.
-- **Differential Abundance Analysis** — Full limma-based workflow with normalization, batch correction (ComBat/SVA), flexible missing value imputation (KNN, MinProb, BPCA or missForest), MA plots, volcano plots, and a simulation-based prospective power analysis.
+- **Differential Abundance Analysis** — Full limma-based workflow with normalization (limma between-array methods or edgeR TMM), batch correction (ComBat/SVA), flexible missing value imputation (KNN, MinProb, BPCA or missForest), MA plots, volcano plots, and a simulation-based prospective power analysis.
 - **Prospective Power / Sensitivity Analysis** — Minimum detectable difference (MDD) estimated by simulating fresh datasets from the fitted empirical Bayes priors, spiking in known fold changes, and re-running the real design through `lmFit` → `eBayes` → BH — optionally including intensity-dependent missingness and imputation. A replicate sweep answers "how many replicates would I need?".
 - **Functional Enrichment** — GO over-representation analysis (ORA) with `clusterProfiler::enrichGO`, run per contrast and split by regulation direction, using Bioconductor OrgDb annotation packages for 20 supported organisms.
 - **Protein-Protein Interaction Networks** — STRING interaction networks for the significant proteins of any contrast via the `STRINGdb` package, with nodes halo-coloured by up/down regulation and confidence-score edge filtering.
@@ -72,7 +72,7 @@ proteOmni auto-installs all required packages on first launch via boostrap.R scr
 
 **CRAN packages:** `shiny`, `shinydashboard`, `shinyjs`, `fresh`, `devtools`, `tidyverse`, `tidytext`, `janitor`, `ggpointdensity`, `ggtext`, `ggrepel`, `ggseqlogo`, `ggsci`, `lsa`, `vegan`, `plotly`, `viridis`, `RColorBrewer`, `ggfortify`, `seqinr`, `zip`, `DT`, `colourpicker`, `R6`, `gridExtra`, `scales`, `lavaan`, `naniar`, `patchwork`, `missForest`, `data.table`, `GGally`, `arrow`, `httr`, `jsonlite`, `BiocManager`
 
-**Bioconductor packages:** `limma`, `Biostrings`, `sva`, `impute`, `pcaMethods`, `ComplexHeatmap`, `clusterProfiler`, `GO.db`, `enrichplot`, `AnnotationDbi`, `STRINGdb`
+**Bioconductor packages:** `limma`, `edgeR`, `Biostrings`, `sva`, `impute`, `pcaMethods`, `ComplexHeatmap`, `clusterProfiler`, `GO.db`, `enrichplot`, `AnnotationDbi`, `STRINGdb`
 
 > The power analysis is implemented directly against limma's empirical Bayes objects and the non-central *t* distribution in base R, so the `pwr` package is **not** a dependency anymore. See [Step 7](#step-7--power-analysis--minimum-detectable-difference-mdd) for why a textbook power calculation does not apply here.
 
@@ -353,7 +353,7 @@ When `ls` (ordinary least squares) regression is selected, imputation is skipped
 If more than one unique batch label is present, `sva::ComBat` is applied to the imputed matrix using empirical Bayes priors.
 
 ### Step 5 — Normalization
-Three between-array normalization methods are available via `limma::normalizeBetweenArrays`:
+Four between-array normalization methods are available via `limma::normalizeBetweenArrays`, plus TMM via `edgeR`:
 
 | Method | When to use |
 |---|---|
@@ -361,6 +361,16 @@ Three between-array normalization methods are available via `limma::normalizeBet
 | `cyclicloess` (default) | General purpose; robust to composition effects |
 | `quantile` | When identical distributions across samples is a valid assumption |
 | `scale` | Per-sample mean/variance scaling |
+| `TMM` | Trimmed Mean of M-values (Robinson & Oshlack 2010). Asymmetric/directional proteome shifts (stress, infection, Myc overexpression), or un-depleted biofluids and tissues dominated by a few very abundant proteins (albumin, actin), where median and total-intensity scaling are biased |
+
+**TMM adaptation for MS intensities.** TMM assumes that most proteins are *not* differentially abundant and estimates one scaling factor per sample from the trimmed (30 % of *M*, 5 % of *A*), inverse-variance-weighted mean of log-ratios to a reference sample. Because it was designed for RNA-seq counts, proteOmni:
+
+1. back-transforms the log2 matrix to linear intensities and treats `log2 ≤ 0` (raw zeros) and `NA` as non-detects;
+2. computes each sample's factor against the reference on the **pairwise complete-case** set of proteins detected in both, using library sizes over that same shared set (edgeR cannot take `NA`);
+3. picks as reference the sample whose upper-quartile intensity is closest to the across-sample mean, among samples of at least median completeness;
+4. applies only the factor, as a per-sample shift on the log2 scale, so the missing-value structure is preserved for `lmFit` in `ls` mode; factors are centred at a geometric mean of 1.
+
+Pairs sharing fewer than 50 detected proteins fall back to a median-of-*M* factor (fewer than 10: factor 1, with a warning). A notification reports the reference sample, the factor range and the pairwise overlap range. Note that TMM is a single scaling factor per sample and does not correct intensity-dependent curvature; use `cyclicloess` for that.
 
 ### Step 6 — Linear modelling and eBayes
 A `~ 0 + condition` design matrix is built and contrasts are constructed from user-specified pairs (e.g. `Treatment-Control`). `limma::lmFit` is called with the selected regression method (`ls` or `robust`), followed by `limma::contrasts.fit` and `limma::eBayes`.

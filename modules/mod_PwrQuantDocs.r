@@ -280,7 +280,7 @@ PwrQuantDocs_body_ui <- function(id) {
             pq_eq(
               "log2(x + 1)*  \u2192  min-valid filter  \u2192  imputation (robust mode only)",
               tags$br(),
-              "  \u2192  ComBat  \u2192  normalizeBetweenArrays  \u2192  lmFit  \u2192  contrasts.fit  \u2192  eBayes"
+              "  \u2192  ComBat  \u2192  normalizeBetweenArrays / TMM  \u2192  lmFit  \u2192  contrasts.fit  \u2192  eBayes"
             ),
             tags$p(
               tags$small(
@@ -464,8 +464,71 @@ PwrQuantDocs_body_ui <- function(id) {
                   "<code>cyclicloess</code> (default)",
                   "Intensity-dependent bias, pairwise",
                   "Bias varies smoothly with abundance; slowest but gentlest"
+                ),
+                c(
+                  "<code>TMM</code> (edgeR)",
+                  "One scaling factor per sample from the trimmed, weighted mean of log-ratios to a reference",
+                  "Most proteins are not differentially abundant; robust to asymmetric regulation and a few dominant proteins"
                 )
               )
+            ),
+            tags$p(
+              tags$b("When to prefer TMM."),
+              " Trimmed Mean of M-values trims ",
+              "the 30% most extreme log-ratios (",
+              tags$i("M"),
+              ") and the 5% most extreme mean intensities (",
+              tags$i("A"),
+              ") before averaging, weighting the remainder by inverse ",
+              "asymptotic variance. It therefore ignores both a directional ",
+              "bulk shift (e.g. 20% of the proteome strongly up-regulated after ",
+              "stress, infection or Myc overexpression) and a handful of ",
+              "dominant proteins (albumin in un-depleted plasma, actin/myosin ",
+              "in muscle) that would otherwise drive a median or total-intensity ",
+              "factor. Choose it for biofluids, secretomes and severe ",
+              "perturbations; for homogeneous lysates with mild effects ",
+              tags$code("cyclicloess"),
+              " remains the gentler default.",
+              "This implementation is here because of a discussion between Bini Ramachandran and Phillip Wilmarth on Bluesky."
+            ),
+            tags$p(
+              tags$b("How proteOmni adapts TMM to MS intensities."),
+              " TMM was written for RNA-seq counts, so the log2 matrix is ",
+              "back-transformed to linear intensities first; cells at ",
+              "log2 \u2264 0 (raw zeros) and missing cells are treated as ",
+              "non-detects. Because edgeR cannot take NAs, each sample is ",
+              "scaled against the reference on the ",
+              tags$i("pairwise complete-case"),
+              " set of proteins detected in both, with library sizes computed ",
+              "over that same shared set. The reference is the sample whose ",
+              "upper-quartile intensity is closest to the across-sample mean, ",
+              "restricted to samples of at least median completeness. Only the ",
+              "resulting per-sample factor is applied, as a shift on the log2 ",
+              "scale, so missing values stay missing and ",
+              tags$code("lmFit"),
+              " handles them natively in ",
+              tags$code("ls"),
+              " mode. Factors are centred at a geometric mean of 1. A ",
+              "notification reports the reference sample, the factor range and ",
+              "the smallest pairwise overlap."
+            ),
+            pq_warn(
+              tags$b("TMM caveats."),
+              " (1) The invariant-majority assumption must hold: if more than ",
+              "~70% of proteins genuinely change, no global method is valid and ",
+              "TMM will silently mis-centre. (2) Pairs sharing fewer than 50 ",
+              "detected proteins fall back to a median-of-M factor (fewer than ",
+              "10: factor 1, with a warning) \u2014 raise ",
+              tags$b("Min. valid values per group"),
+              " if this happens. (3) TMM is a single scaling factor per ",
+              "sample; unlike ",
+              tags$code("cyclicloess"),
+              " it does not correct intensity-dependent curvature. (4) In ",
+              "robust mode the down-shifted imputed values enter the linear ",
+              "matrix at very low intensities; they are largely removed by the ",
+              tags$i("A"),
+              "-trim and inverse-variance weights, but the factors are still ",
+              "best interpreted on the observed data."
             ),
 
             tags$h3("Batch correction"),
@@ -511,7 +574,11 @@ PwrQuantDocs_body_ui <- function(id) {
                 tags$b("Raw vs normalized boxplots"),
                 " \u2014 after ",
                 "normalization the medians should line up. If they do not, the ",
-                "chosen method is too weak."
+                "chosen method is too weak. Exception: ",
+                tags$code("TMM"),
+                " centres on the invariant trimmed core, not the median, so ",
+                "small residual median offsets are expected when the bulk ",
+                "distribution has genuinely shifted."
               ),
               tags$li(
                 tags$b("PCA raw vs post-processed"),

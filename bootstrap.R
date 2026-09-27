@@ -125,6 +125,7 @@ if (!isTRUE(getOption("proteOmni.bootstrapped"))) {
     .omni_install(
       c(
         "limma",
+        "edgeR",
         "Biostrings",
         "sva",
         "impute",
