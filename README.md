@@ -361,7 +361,7 @@ Four between-array normalization methods are available via `limma::normalizeBetw
 | `cyclicloess` (default) | General purpose; robust to composition effects |
 | `quantile` | When identical distributions across samples is a valid assumption |
 | `scale` | Per-sample mean/variance scaling |
-| `TMM` | Trimmed Mean of M-values (Robinson & Oshlack 2010). Asymmetric/directional proteome shifts (stress, infection, Myc overexpression), or un-depleted biofluids and tissues dominated by a few very abundant proteins (albumin, actin), where median and total-intensity scaling are biased |
+| `TMM` | Trimmed Mean of M-values [(Robinson & Oshlack 2010)](https://link.springer.com/article/10.1186/gb-2010-11-3-r25). Asymmetric/directional proteome shifts stress, infection, Myc overexpression, or un-depleted biofluids and tissues dominated by a few very abundant proteins (albumin, actin), where median and total-intensity scaling are biased |
 
 **TMM adaptation for MS intensities.** TMM assumes that most proteins are *not* differentially abundant and estimates one scaling factor per sample from the trimmed (30 % of *M*, 5 % of *A*), inverse-variance-weighted mean of log-ratios to a reference sample. Because it was designed for RNA-seq counts, proteOmni:
 
@@ -370,7 +370,7 @@ Four between-array normalization methods are available via `limma::normalizeBetw
 3. picks as reference the sample whose upper-quartile intensity is closest to the across-sample mean, among samples of at least median completeness;
 4. applies only the factor, as a per-sample shift on the log2 scale, so the missing-value structure is preserved for `lmFit` in `ls` mode; factors are centred at a geometric mean of 1.
 
-Pairs sharing fewer than 50 detected proteins fall back to a median-of-*M* factor (fewer than 10: factor 1, with a warning). A notification reports the reference sample, the factor range and the pairwise overlap range. Note that TMM is a single scaling factor per sample and does not correct intensity-dependent curvature; use `cyclicloess` for that.
+Pairs sharing fewer than 50 detected proteins fall back to a median-of-*M* factor (fewer than 10: factor 1, with a warning). A notification reports the reference sample, the factor range and the pairwise overlap range. Note that TMM is a single scaling factor per sample and does not correct intensity-dependent curvature; use `cyclicloess` for that. For in depth understanding of normalization methods, see the manuscript by [Välikangas, Suomi & Elo, 2018](https://academic.oup.com/bib/article/19/1/1/2562889).
 
 ### Step 6 — Linear modelling and eBayes
 A `~ 0 + condition` design matrix is built and contrasts are constructed from user-specified pairs (e.g. `Treatment-Control`). `limma::lmFit` is called with the selected regression method (`ls` or `robust`), followed by `limma::contrasts.fit` and `limma::eBayes`.
@@ -389,7 +389,7 @@ A textbook two-sample calculation (`pwr.t.test`, `power.t.test`) at α = 0.05 do
 
 1. **The alpha is not the operating threshold.** Significance is called on BH-adjusted p-values across thousands of proteins. At the BH boundary the largest rejected raw p-value is `FDR × R / m` — with 5,000 proteins and 1,000 rejections that is 0.01, and far smaller with few rejections. Using 0.05 is anti-conservative.
 2. **The degrees of freedom are wrong.** A two-sample t-test has `2n − 2` df; the moderated statistic actually used has `2n − 2 + d₀`. Pairing a shrunken variance with unshrunken df is internally inconsistent, and conservative.
-3. **It is circular.** Comparing each protein's MDD against that same protein's observed fold change is the observed-power fallacy (see 7b).
+3. **It is circular.** Comparing each protein's MDD against that same protein's observed fold change is the [observed-power fallacy (see 7b)](https://www.tandfonline.com/doi/abs/10.1198/000313001300339897).
 
 Errors (1) and (2) push in opposite directions, so a naive number can look plausible while being unjustifiable — the magnitude is not the real problem, the interpretation is.
 
