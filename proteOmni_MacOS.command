@@ -17,4 +17,4 @@ cd "$SCRIPT_DIR"
 # run.R installs any missing dependencies (including shiny itself) before
 # starting the app. Do NOT call shiny::runApp() here: on a fresh R installation
 # shiny does not exist yet.
-Rscript run.R "$@"
+Rscript run.R

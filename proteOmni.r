@@ -192,22 +192,6 @@ source("modules/mod_MaxQuantMSMS.r")
 # ── Global options ────────────────────────────────────────────────────────────
 options(shiny.maxRequestSize = 5000 * 1024^2)
 
-args  <- commandArgs(trailingOnly = TRUE)
-verbose <- "--verbose" %in% args
-debug <- "--debug" %in% args
-
-if (verbose) {
-  message("[verbose] mode activated")
-  options(
-    shiny.error = function() {
-      browser()
-      traceback(3)
-    },
-    shiny.fullstacktrace = TRUE,
-    shiny.trace = TRUE
-    )
-  }
-
 theme_set(theme_bw(base_size = 13))
 ggplot2::theme_update(
   text = element_text(color = "black", family = "sans"),
