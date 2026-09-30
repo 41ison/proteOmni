@@ -272,11 +272,22 @@ find_psm_files <- function(root_path) {
 
 # Read one psm.tsv and add a sample_name column derived from the Spectrum column.
 read_single_psm <- function(path) {
-  suppressMessages(readr::read_tsv(path)) %>%
-    janitor::clean_names() %>%
-    dplyr::mutate(
-      sample_name = stringr::str_extract(spectrum, "^[^.]+")
-    )
+  df <- suppressMessages(
+    readr::read_tsv(path, col_types = readr::cols(.default = "c"))
+  ) %>%
+    janitor::clean_names()
+
+  if (nrow(df) == 0) {
+    linha_vazia <- as.list(rep(NA_character_, ncol(df)))
+    names(linha_vazia) <- names(df)
+    df <- dplyr::bind_rows(df, linha_vazia) %>%
+      dplyr::mutate(sample_name = basename(dirname(path)))
+  } else {
+    df <- df %>%
+      dplyr::mutate(sample_name = stringr::str_extract(spectrum, "^[^.]+"))
+  }
+
+  df
 }
 
 # Read and row-bind all psm.tsv files found under \code{root_path}.
@@ -285,7 +296,8 @@ read_all_psm_files <- function(root_path) {
   if (length(paths) == 0L) {
     stop("No psm.tsv files found under: ", root_path)
   }
-  purrr::map_dfr(paths, read_single_psm)
+  purrr::map_dfr(paths, read_single_psm) %>%
+    readr::type_convert(na = c("", "NA"))
 }
 
 
@@ -1936,10 +1948,11 @@ PSManalyst_server <- function(id) {
       # Read every protein.tsv and tag each with a sample_name derived from its
       # parent folder so that plots can be faceted / filtered by sample.
       purrr::map_dfr(prot_files, function(f) {
-        data.table::fread(f, sep = "\t", header = TRUE) %>%
+        data.table::fread(f, sep = "\t", header = TRUE, colClasses = "character") %>%
           janitor::clean_names() %>%
           dplyr::mutate(sample_name = basename(dirname(f)))
       }) %>%
+      dplyr::mutate(dplyr::across(dplyr::everything(), ~ utils::type.convert(.x, as.is = TRUE))) %>%
         filter_samples()
     })
 
@@ -2901,7 +2914,7 @@ PSManalyst_server <- function(id) {
         req(input$combined_protein)
         metric <- input$export_abundance_metric %||% "max_lfq_intensity"
         id_col <- input$export_protein_id %||% "protein_id"
-
+        
         raw <- data.table::fread(
           input$combined_protein$datapath,
           sep = "\t",
