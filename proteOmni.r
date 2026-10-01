@@ -200,8 +200,8 @@ if (verbose) {
   message("[verbose] mode activated")
   options(
     shiny.error = function() {
-      browser()
-      traceback(3)
+       traceback(3)
+       browser()
     },
     shiny.fullstacktrace = TRUE,
     shiny.trace = TRUE
