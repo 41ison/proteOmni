@@ -503,6 +503,52 @@ Every proteOmni session automatically writes a log file (`Session_Info_log.txt`)
 
 The log file can be downloaded at any time using the **Download Log History** button at the top of the sidebar. This is useful for reproducing analyses and reporting issues.
 
+## Command-line options
+
+**Windows**
+```bash
+C:\path\to\proteOmni> ./proteOmni_Windows.bat [option]
+```
+**MacOS**
+```bash
+whoami@PC proteOmni % ./proteOmni_MacOS.command [option]
+```
+**Linux**
+```bash
+[whoami@PC path/for/proteOmni] ./proteOmni_MacOS.command [option]
+```
+
+
+### Options
+
+| Option | Description |
+|---|---|
+| `--verbose` | Enables Shiny debugging mode (see below). |
+
+To debug proteOmni in real time from the terminal, pass the `--verbose` option when launching the app. When `--verbose` is used, the following Shiny options are set:
+
+```r
+options(
+    shiny.error = function() {
+      traceback(3)
+      browser()
+    },
+    shiny.fullstacktrace = TRUE,
+    shiny.trace = TRUE
+    )
+```
+### What `--verbose` does
+
+- `shiny.error`: when an error occurs, prints the call stack (`traceback(3)`) and opens the interactive debugger (`browser()`);
+- `shiny.fullstacktrace`: shows the full stack trace, including Shiny's internal calls;
+- `shiny.trace`: logs all messages exchanged between the app and the browser (very verbose).
+
+### Running in debug mode
+
+```bash
+C:\path\to\proteOmni> ./proteOmni_Windows.bat --verbose
+```
+
 ---
 
 ## Troubleshooting
