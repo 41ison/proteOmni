@@ -278,9 +278,9 @@ read_single_psm <- function(path) {
     janitor::clean_names()
 
   if (nrow(df) == 0) {
-    linha_vazia <- as.list(rep(NA_character_, ncol(df)))
-    names(linha_vazia) <- names(df)
-    df <- dplyr::bind_rows(df, linha_vazia) %>%
+    empty_line <- as.list(rep(NA_character_, ncol(df)))
+    names(empty_line) <- names(df)
+    df <- dplyr::bind_rows(df, empty_line) %>%
       dplyr::mutate(sample_name = basename(dirname(path)))
   } else {
     df <- df %>%
