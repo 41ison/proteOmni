@@ -63,6 +63,177 @@ sp_wrap_sage <- function(sid, ui_el) {
   )
 }
 
+# ── Sage folder discovery ─────────────────────────────────────────────────────
+
+#' Locate Sage output files under a user-supplied folder.
+#'
+#' Searches recursively for \code{results.sage.parquet} and
+#' \code{lfq.parquet}. The \code{.tsv} equivalents are accepted as a fallback
+#' when no parquet exists. When several matches are found, the one with the
+#' shortest path (closest to the given folder) is used, and the parquet is
+#' preferred over the tsv within the same directory.
+#'
+#' @param path Character. Folder to search.
+#' @return Named list with elements \code{results} and \code{lfq}
+#'   (full path or \code{NA}).
+SAGE_FILE_TARGETS <- c(results = "results\\.sage", lfq = "lfq")
+
+find_sage_files <- function(path) {
+  targets <- SAGE_FILE_TARGETS
+  path <- path.expand(trimws(path))
+  if (!nzchar(path) || !dir.exists(path)) {
+    return(setNames(
+      as.list(rep(NA_character_, length(targets))),
+      names(targets)
+    ))
+  }
+  lapply(targets, function(f) {
+    hits <- list.files(
+      path,
+      pattern = paste0("^", f, "\\.(parquet|tsv)$"),
+      recursive = TRUE,
+      full.names = TRUE
+    )
+    if (length(hits) == 0) {
+      return(NA_character_)
+    }
+    # Shallowest directory first, then prefer parquet within it
+    hits <- hits[order(nchar(dirname(hits)))]
+    hits <- hits[dirname(hits) == dirname(hits[1])]
+    is_pq <- grepl("\\.parquet$", hits)
+    if (any(is_pq)) hits[is_pq][1] else hits[1]
+  })
+}
+
+#' Read a Sage table from parquet or tsv according to its extension.
+read_sage_table <- function(path) {
+  if (grepl("\\.parquet$", path)) {
+    as.data.frame(arrow::read_parquet(path))
+  } else {
+    as.data.frame(data.table::fread(path, sep = "\t", header = TRUE))
+  }
+}
+
+# ── Sage LFQ -> protein abundance matrix ──────────────────────────────────────
+
+#' Columns of the Sage LFQ table that are not per-sample intensities.
+SAGE_LFQ_ID_COLS <- c(
+  "peptide",
+  "stripped_peptide",
+  "charge",
+  "proteins",
+  "is_decoy",
+  "q_value",
+  "score",
+  "spectral_angle"
+)
+
+#' Protein roll-up methods available for the LFQ matrix.
+SAGE_ROLLUP_METHODS <- c(
+  "Sum of peptide intensities" = "sum",
+  "Median of peptide intensities" = "median",
+  "Mean of top-3 peptides" = "top3"
+)
+
+#' Bring the Sage LFQ table to long format (one row per peptide x file).
+#'
+#' \code{lfq.parquet} is already long (\code{filename}, \code{intensity});
+#' \code{lfq.tsv} is wide with one column per raw file.
+sage_lfq_long <- function(lfq) {
+  if (all(c("filename", "intensity") %in% names(lfq))) {
+    return(lfq)
+  }
+  sample_cols <- setdiff(names(lfq), SAGE_LFQ_ID_COLS)
+  if (length(sample_cols) == 0) {
+    stop("No per-sample intensity columns found in the Sage LFQ table.")
+  }
+  lfq |>
+    tidyr::pivot_longer(
+      dplyr::all_of(sample_cols),
+      names_to = "filename",
+      values_to = "intensity"
+    )
+}
+
+#' Build a protein abundance matrix from the Sage LFQ table.
+#'
+#' Peptides are filtered (decoys, q-value, optionally shared peptides) and
+#' rolled up per protein and raw file. Zero intensities are treated as
+#' "not quantified" (NA), as in MaxQuant. The output has a \code{Protein ID}
+#' column followed by one numeric column per raw file, which is the layout
+#' expected by the PwrQuant module.
+#'
+#' @param lfq            data.frame read from lfq.parquet / lfq.tsv.
+#' @param q_max          Maximum LFQ q-value for a peptide to be kept.
+#' @param remove_shared  Drop peptides mapping to more than one protein.
+#' @param method         One of \code{SAGE_ROLLUP_METHODS}.
+#' @param min_peptides   Minimum distinct peptides per protein (across all
+#'   files) for the protein to be reported.
+#' @param log2_transform Apply log2 to the abundance columns.
+#' @return A data.frame.
+build_sage_protein_matrix <- function(
+  lfq,
+  q_max = 0.01,
+  remove_shared = TRUE,
+  method = "sum",
+  min_peptides = 1L,
+  log2_transform = FALSE
+) {
+  method <- match.arg(method, unname(SAGE_ROLLUP_METHODS))
+  d <- sage_lfq_long(lfq)
+
+  if ("is_decoy" %in% names(d)) {
+    d <- d |> dplyr::filter(!is_decoy)
+  }
+  if ("q_value" %in% names(d)) {
+    d <- d |> dplyr::filter(is.na(q_value) | q_value <= q_max)
+  }
+  if (remove_shared) {
+    d <- d |> dplyr::filter(!grepl(";", proteins, fixed = TRUE))
+  }
+  d <- d |>
+    dplyr::mutate(intensity = as.numeric(intensity)) |>
+    dplyr::filter(!is.na(intensity), intensity > 0, !is.na(proteins))
+
+  if (nrow(d) == 0) {
+    stop("No peptides left after filtering the Sage LFQ table.")
+  }
+
+  rollup <- switch(
+    method,
+    sum = function(x) sum(x),
+    median = function(x) stats::median(x),
+    top3 = function(x) {
+      mean(sort(x, decreasing = TRUE)[seq_len(min(3L, length(x)))])
+    }
+  )
+
+  prot <- d |>
+    dplyr::group_by(proteins, filename) |>
+    dplyr::summarise(abundance = rollup(intensity), .groups = "drop")
+
+  n_pep <- d |>
+    dplyr::group_by(proteins) |>
+    dplyr::summarise(n_peptides = dplyr::n_distinct(peptide), .groups = "drop")
+  keep <- n_pep$proteins[n_pep$n_peptides >= min_peptides]
+
+  out <- prot |>
+    dplyr::filter(proteins %in% keep) |>
+    tidyr::pivot_wider(
+      names_from = filename,
+      values_from = abundance
+    ) |>
+    dplyr::rename(`Protein ID` = proteins) |>
+    dplyr::arrange(`Protein ID`) |>
+    as.data.frame()
+
+  if (log2_transform) {
+    val_cols <- setdiff(names(out), "Protein ID")
+    out[val_cols] <- lapply(out[val_cols], log2)
+  }
+  out
+}
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # MODULE — SIDEBAR UI
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -74,10 +245,30 @@ Sage_sidebar_ui <- function(id) {
       icon("leaf", lib = "font-awesome"),
       " Sage DDA/DIA"
     ),
-    fileInput(
-      ns("sage_file"),
-      "Choose results.sage.tsv or .parquet",
-      accept = c(".tsv", ".parquet")
+    tags$div(
+      style = "padding:0 8px;",
+      textInput(
+        ns("sage_folder"),
+        "Path to Sage output folder",
+        value = "",
+        placeholder = "/path/to/sage_search"
+      ),
+      tags$p(
+        style = "color:#adb5bd;font-size:11px;margin-top:-6px;",
+        "results.sage.parquet (PSMs) and lfq.parquet (quantification) are ",
+        "located automatically, searching subfolders. The .tsv versions ",
+        "are used when no parquet is found."
+      ),
+      tags$div(
+        style = "text-align:center;",
+        actionButton(
+          ns("load_files"),
+          "Load Sage Files",
+          class = "btn-primary",
+          style = "width:80%;font-weight:bold;margin-bottom:6px;"
+        )
+      ),
+      uiOutput(ns("file_status"))
     ),
     tags$hr(style = "border-color:#2d3741;margin:6px 0;"),
     sliderInput(
@@ -155,6 +346,57 @@ Sage_sidebar_ui <- function(id) {
       downloadButton(
         ns("download_plot"),
         "⬇ Download Plot (.png)",
+        class = "dl-btn",
+        style = "width:100%;text-align:left;"
+      )
+    ),
+    tags$hr(style = "border-color:#2d3741;margin:6px 0;"),
+    tags$div(
+      style = "padding:12px 16px 4px;color:#ffffff;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:1px;",
+      "Protein Abundance Matrix (LFQ)"
+    ),
+    div(
+      style = "padding:0 8px;",
+      tags$p(
+        style = "color:#adb5bd;font-size:11px;",
+        "Built from lfq.parquet. Decoys are removed and zero intensities ",
+        "are treated as missing. Output is compatible with PwrQuant."
+      ),
+      sliderInput(
+        ns("pm_qval"),
+        "Max LFQ peptide q-value",
+        min = 0,
+        max = 0.05,
+        value = 0.01,
+        step = 0.005
+      ),
+      selectInput(
+        ns("pm_method"),
+        "Protein roll-up",
+        choices = SAGE_ROLLUP_METHODS,
+        selected = "sum"
+      ),
+      numericInput(
+        ns("pm_min_peptides"),
+        "Min peptides per protein",
+        value = 1,
+        min = 1,
+        max = 10,
+        step = 1
+      ),
+      checkboxInput(
+        ns("pm_remove_shared"),
+        "Remove shared peptides (multi-protein)",
+        value = TRUE
+      ),
+      checkboxInput(
+        ns("pm_log2"),
+        "log2-transform values",
+        value = FALSE
+      ),
+      downloadButton(
+        ns("download_protein_matrix"),
+        "⬇ Protein Abundance Matrix (.tsv)",
         class = "dl-btn",
         style = "width:100%;text-align:left;"
       )
@@ -272,25 +514,78 @@ Sage_server <- function(id, fasta_digest) {
       max(400L, n * 350L) # ncol=1 for precursor_error
     })
 
-    # ── Load data
+    # ── Load data from a Sage output folder ───────────────────────────────────
+    sage_data_rv <- reactiveVal(NULL)
+    lfq_data_rv <- reactiveVal(NULL)
+    sage_files_rv <- reactiveVal(NULL)
+    status_log <- reactiveVal(character(0))
+
+    log_step <- function(msg, level = "info", notify = TRUE) {
+      icon_chr <- switch(
+        level,
+        ok = "\u2714",
+        warn = "\u26A0",
+        error = "\u2716",
+        "\u2139"
+      )
+      status_log(c(status_log(), paste(icon_chr, msg)))
+      if (notify && level %in% c("warn", "error")) {
+        showNotification(
+          msg,
+          type = if (level == "error") "error" else "warning"
+        )
+      }
+    }
+
     sage_data <- reactive({
-      req(input$sage_file)
+      req(sage_data_rv())
+      sage_data_rv()
+    })
+    lfq_data <- reactive({
+      req(lfq_data_rv())
+      lfq_data_rv()
+    })
+
+    observeEvent(input$load_files, {
+      sage_data_rv(NULL)
+      lfq_data_rv(NULL)
+      status_log(character(0))
+
+      folder <- trimws(input$sage_folder)
+      if (!nzchar(folder)) {
+        log_step("Please enter the path to the Sage output folder.", "error")
+        return()
+      }
+      if (!dir.exists(path.expand(folder))) {
+        log_step(paste0("Folder not found: ", folder), "error")
+        return()
+      }
+
+      files <- find_sage_files(folder)
+      sage_files_rv(files)
+      if (is.na(files$results)) {
+        log_step(
+          "results.sage.parquet (or .tsv) not found under this folder.",
+          "error"
+        )
+        return()
+      }
+      log_step(paste0("PSMs: ", basename(files$results)), "ok", notify = FALSE)
+      if (is.na(files$lfq)) {
+        log_step(
+          "lfq.parquet not found; protein matrix export unavailable.",
+          "warn"
+        )
+      } else {
+        log_step(paste0("LFQ: ", basename(files$lfq)), "ok", notify = FALSE)
+      }
+
       show_all()
-      withProgress(message = "Parsing Sage results...", value = 0.5, {
-        ext <- tools::file_ext(input$sage_file$name)
+      withProgress(message = "Loading Sage results", value = 0, {
+        incProgress(0.1, detail = basename(files$results))
         res <- tryCatch(
           {
-            df <- NULL
-            if (ext == "parquet") {
-              df <- arrow::read_parquet(input$sage_file$datapath)
-            } else {
-              df <- data.table::fread(
-                input$sage_file$datapath,
-                sep = "\t",
-                header = TRUE
-              )
-            }
-
+            df <- read_sage_table(files$results)
             if (
               !"stripped_peptide" %in% names(df) && "peptide" %in% names(df)
             ) {
@@ -303,20 +598,63 @@ Sage_server <- function(id, fasta_digest) {
             if (!"filename" %in% names(df)) {
               df$filename <- "Unknown"
             }
-
             df
           },
           error = function(e) {
-            showNotification(
-              paste("Error reading Sage file:", e$message),
-              type = "error"
-            )
+            log_step(paste("Error reading Sage results:", e$message), "error")
             NULL
           }
         )
+        sage_data_rv(res)
+        if (!is.null(res)) {
+          log_step(
+            sprintf(
+              "%s PSMs across %d files loaded.",
+              format(nrow(res), big.mark = ","),
+              dplyr::n_distinct(res$filename)
+            ),
+            "ok",
+            notify = FALSE
+          )
+        }
+
+        if (!is.na(files$lfq)) {
+          incProgress(0.6, detail = basename(files$lfq))
+          lfq <- tryCatch(
+            read_sage_table(files$lfq),
+            error = function(e) {
+              log_step(paste("Error reading Sage LFQ:", e$message), "error")
+              NULL
+            }
+          )
+          lfq_data_rv(lfq)
+          if (!is.null(lfq)) {
+            log_step(
+              sprintf(
+                "%s LFQ peptide rows loaded.",
+                format(nrow(lfq), big.mark = ",")
+              ),
+              "ok",
+              notify = FALSE
+            )
+          }
+        }
         setProgress(1)
-        res
       })
+    })
+
+    output$file_status <- renderUI({
+      lines <- status_log()
+      if (length(lines) == 0) {
+        return(tags$p(
+          style = "color:#adb5bd;font-size:11px;",
+          "No folder loaded yet."
+        ))
+      }
+      tags$div(
+        style = "color:#adb5bd;font-size:11px;line-height:1.4;",
+        lapply(lines, function(l) tags$div(l))
+      )
     })
 
     observe({
@@ -423,10 +761,17 @@ Sage_server <- function(id, fasta_digest) {
       }
 
       d |>
-        group_by(filename) |>
-        summarise(is_decoy = is_decoy, .groups = "drop") |>
-        ggplot(aes(x = filename, fill = as.character(is_decoy))) +
-        geom_bar(position = "dodge") +
+        count(filename, is_decoy, name = "n_psm") |>
+        ggplot(aes(x = filename, y = n_psm, fill = as.character(is_decoy))) +
+        geom_col(position = position_dodge(preserve = "single")) +
+        geom_text(
+          aes(label = n_psm),
+          position = position_dodge(width = 0.9, preserve = "single"),
+          vjust = -0.3,
+          size = 3,
+          fontface = "bold"
+        ) +
+        scale_y_continuous(expand = expansion(mult = c(0, 0.1))) +
         labs(x = "File", y = "Number of PSMs", fill = "Is decoy?") +
         scale_fill_manual(values = vals_decoy()) +
         theme_sage() +
@@ -866,6 +1211,55 @@ Sage_server <- function(id, fasta_digest) {
       }
     )
 
+    # ── Protein abundance matrix (PwrQuant-compatible) ────────────────────────
+    protein_matrix <- reactive({
+      req(lfq_data())
+      build_sage_protein_matrix(
+        lfq_data(),
+        q_max = input$pm_qval,
+        remove_shared = isTRUE(input$pm_remove_shared),
+        method = input$pm_method,
+        min_peptides = max(1L, as.integer(input$pm_min_peptides)),
+        log2_transform = isTRUE(input$pm_log2)
+      )
+    })
+
+    output$download_protein_matrix <- downloadHandler(
+      filename = function() {
+        tag <- paste0("sage_", input$pm_method)
+        if (isTRUE(input$pm_log2)) {
+          tag <- paste0(tag, "_log2")
+        }
+        paste0("protein_abundance_matrix_", tag, "_", Sys.Date(), ".tsv")
+      },
+      content = function(file) {
+        if (is.null(lfq_data_rv())) {
+          showNotification(
+            "lfq.parquet is not loaded; load a Sage folder containing it first.",
+            type = "error"
+          )
+          req(FALSE)
+        }
+        pm <- withProgress(
+          message = "Building protein matrix...",
+          value = 0.5,
+          protein_matrix()
+        )
+        data.table::fwrite(pm, file = file, sep = "\t", na = "NA")
+        log_step(
+          sprintf(
+            "Protein matrix downloaded: %s proteins x %d samples (%s%s).",
+            format(nrow(pm), big.mark = ","),
+            ncol(pm) - 1,
+            names(SAGE_ROLLUP_METHODS)[SAGE_ROLLUP_METHODS == input$pm_method],
+            if (isTRUE(input$pm_log2)) ", log2" else ""
+          ),
+          "ok",
+          notify = FALSE
+        )
+      }
+    )
+
     # ════════════════════════════════════════════════════════════════════════
     # MODIFICATION DIAGNOSTIC
     # ════════════════════════════════════════════════════════════════════════
@@ -979,7 +1373,7 @@ Sage_server <- function(id, fasta_digest) {
       if (is.null(paired) || nrow(paired) == 0) {
         return(tags$p(
           style = "color:#adb5bd;text-align:center;padding:20px;",
-          "No paired modified/unmodified peptides found. Load a Sage results file and ensure it contains 'peptide', 'stripped_peptide', 'rt', and 'filename' columns."
+          "No paired modified/unmodified peptides found. Load a Sage output folder and ensure results.sage.parquet contains 'peptide', 'stripped_peptide', 'rt', and 'filename' columns."
         ))
       }
       n_samples <- dplyr::n_distinct(paired$sample_name)
