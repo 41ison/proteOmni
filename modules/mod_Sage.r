@@ -179,7 +179,19 @@ build_sage_protein_matrix <- function(
   min_peptides = 1L,
   log2_transform = FALSE
 ) {
-  method <- match.arg(method, unname(SAGE_ROLLUP_METHODS))
+  filter_sage_lfq(lfq, q_max = q_max, remove_shared = remove_shared) |>
+    rollup_sage_proteins(
+      method = method,
+      min_peptides = min_peptides,
+      log2_transform = log2_transform
+    )
+}
+
+#' Filter the Sage LFQ table to quantifiable target peptides (long format).
+#'
+#' Removes decoys, peptides above \code{q_max}, optionally shared peptides,
+#' and zero / missing intensities (Sage writes 0 for "not quantified").
+filter_sage_lfq <- function(lfq, q_max = 0.01, remove_shared = TRUE) {
   d <- sage_lfq_long(lfq)
 
   if ("is_decoy" %in% names(d)) {
@@ -198,7 +210,20 @@ build_sage_protein_matrix <- function(
   if (nrow(d) == 0) {
     stop("No peptides left after filtering the Sage LFQ table.")
   }
+  d
+}
 
+#' Roll filtered LFQ peptides up to a protein x sample matrix.
+#'
+#' @param d Output of \code{filter_sage_lfq()}.
+#' @return data.frame with \code{Protein ID} followed by one column per file.
+rollup_sage_proteins <- function(
+  d,
+  method = "sum",
+  min_peptides = 1L,
+  log2_transform = FALSE
+) {
+  method <- match.arg(method, unname(SAGE_ROLLUP_METHODS))
   rollup <- switch(
     method,
     sum = function(x) sum(x),
@@ -232,6 +257,113 @@ build_sage_protein_matrix <- function(
     out[val_cols] <- lapply(out[val_cols], log2)
   }
   out
+}
+
+#' Distribution of distinct peptides per protein in the filtered LFQ table.
+#'
+#' Bars are coloured by whether the protein passes the \code{min_peptides}
+#' threshold used for the abundance matrix.
+plot_sage_peptides_per_protein <- function(
+  d,
+  min_peptides = 1L,
+  color = "#1b9e77",
+  cap = 20L
+) {
+  n_pep <- d |>
+    dplyr::group_by(proteins) |>
+    dplyr::summarise(n_peptides = dplyr::n_distinct(peptide), .groups = "drop")
+  n_keep <- sum(n_pep$n_peptides >= min_peptides)
+
+  n_pep |>
+    dplyr::mutate(
+      bin = factor(
+        ifelse(n_peptides >= cap, paste0(cap, "+"), as.character(n_peptides)),
+        levels = c(as.character(seq_len(cap - 1L)), paste0(cap, "+"))
+      ),
+      status = ifelse(
+        n_peptides >= min_peptides,
+        "In matrix",
+        "Below min peptides"
+      )
+    ) |>
+    ggplot(aes(x = bin, fill = status)) +
+    geom_bar(color = "white", linewidth = 0.25) +
+    scale_x_discrete(drop = FALSE) +
+    scale_y_continuous(expand = expansion(mult = c(0, 0.05))) +
+    scale_fill_manual(
+      values = c("In matrix" = color, "Below min peptides" = "grey70"),
+      name = NULL
+    ) +
+    labs(
+      title = sprintf(
+        "Peptides per protein (%s of %s proteins in matrix)",
+        format(n_keep, big.mark = ","),
+        format(nrow(n_pep), big.mark = ",")
+      ),
+      x = "Distinct peptides per protein",
+      y = "Number of proteins"
+    ) +
+    theme_sage() +
+    theme(
+      axis.text.x = element_text(angle = 0, hjust = 0.5),
+      legend.position = "top"
+    )
+}
+
+#' Missingness summary of a protein abundance matrix.
+#'
+#' Top: percentage of proteins missing in each sample. Bottom: number of
+#' samples in which each protein is quantified.
+plot_sage_missingness <- function(pm, color = "#1b9e77") {
+  val_cols <- setdiff(names(pm), "Protein ID")
+  mat <- as.matrix(pm[val_cols])
+  n_samp <- length(val_cols)
+
+  per_sample <- data.frame(
+    sample = factor(val_cols, levels = val_cols),
+    pct_missing = colMeans(is.na(mat)) * 100
+  )
+  per_protein <- data.frame(n_quant = rowSums(!is.na(mat))) |>
+    dplyr::count(n_quant, name = "n_proteins") |>
+    dplyr::mutate(n_quant = factor(n_quant, levels = 0:n_samp))
+
+  p1 <- ggplot(per_sample, aes(x = sample, y = pct_missing)) +
+    geom_col(fill = color, color = "white", linewidth = 0.25) +
+    geom_text(
+      aes(label = sprintf("%.2f%%", pct_missing)),
+      vjust = -0.3,
+      size = 3,
+      fontface = "bold"
+    ) +
+    scale_y_continuous(expand = expansion(mult = c(0, 0.15))) +
+    labs(
+      title = sprintf(
+        "Overall missingness: %.2f%%",
+        mean(is.na(mat)) * 100
+      ),
+      x = NULL,
+      y = "Proteins missing (%)"
+    ) +
+    theme_sage()
+
+  p2 <- ggplot(per_protein, aes(x = n_quant, y = n_proteins)) +
+    geom_col(fill = color, color = "white", linewidth = 0.25) +
+    geom_text(
+      aes(label = n_proteins),
+      vjust = -0.3,
+      size = 3,
+      fontface = "bold"
+    ) +
+    scale_x_discrete(drop = FALSE) +
+    scale_y_continuous(expand = expansion(mult = c(0, 0.1))) +
+    labs(
+      x = "Number of samples in which the protein is quantified",
+      y = "Number of proteins"
+    ) +
+    theme_sage() +
+    theme(axis.text.x = element_text(angle = 0, hjust = 0.5))
+
+  patchwork::wrap_plots(p1, p2, ncol = 1, heights = c(1.2, 1))
 }
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -445,7 +577,8 @@ Sage_body_ui <- function(id) {
                 selectInput(
                   ns("mod_diag_sample"),
                   "Select Sample",
-                  choices = NULL
+                  choices = c("All samples" = "__all__"),
+                  selected = "__all__"
                 )
               ),
               column(
@@ -457,6 +590,22 @@ Sage_body_ui <- function(id) {
                   min = 5,
                   max = 100,
                   step = 5
+                )
+              ),
+              column(
+                4,
+                tags$div(
+                  style = "margin-top:25px;display:flex;gap:6px;",
+                  downloadButton(
+                    ns("download_mod_diag_plot"),
+                    "Plot (.png)",
+                    style = "flex:1;"
+                  ),
+                  downloadButton(
+                    ns("download_mod_diag_table"),
+                    "Table (.tsv)",
+                    style = "flex:1;"
+                  )
                 )
               )
             ),
@@ -479,6 +628,73 @@ Sage_body_ui <- function(id) {
             width = 12,
             collapsible = TRUE,
             DT::dataTableOutput(ns("mod_diag_table"))
+          )
+        )
+      ),
+
+      # ── Protein Matrix (LFQ) ────────────────────────────────────────────
+      tabPanel(
+        "Protein Matrix",
+        fluidRow(
+          box(
+            title = "Protein Matrix Figure",
+            status = "primary",
+            solidHeader = TRUE,
+            width = 12,
+            collapsible = TRUE,
+            fluidRow(
+              column(
+                4,
+                selectInput(
+                  ns("pm_plot_select"),
+                  "Select Figure",
+                  choices = c(
+                    "Peptides per protein" = "peptides",
+                    "Missingness summary" = "missing"
+                  )
+                )
+              ),
+              column(
+                4,
+                tags$div(
+                  style = "margin-top:25px;",
+                  actionButton(
+                    ns("pm_build"),
+                    "Build Plot",
+                    icon = icon("chart-bar"),
+                    class = "btn-primary",
+                    style = "width:100%;"
+                  )
+                )
+              ),
+              column(
+                4,
+                tags$div(
+                  style = "margin-top:25px;",
+                  downloadButton(
+                    ns("pm_download_plot"),
+                    "Download Plot (.png)",
+                    style = "width:100%;"
+                  )
+                )
+              )
+            ),
+            plotOutput(ns("pm_plot"), height = "600px")
+          )
+        ),
+        fluidRow(
+          box(
+            title = "Protein Abundance Matrix — Preview",
+            status = "primary",
+            solidHeader = TRUE,
+            width = 12,
+            collapsible = TRUE,
+            tags$p(
+              style = "color:#6c757d;font-size:12px;",
+              "Settings are taken from the 'Protein Abundance Matrix (LFQ)' ",
+              "section of the sidebar. The download contains the full matrix."
+            ),
+            DT::dataTableOutput(ns("pm_table"))
           )
         )
       )
@@ -683,19 +899,20 @@ Sage_server <- function(id, fasta_digest) {
       req(sage_data())
       d <- sage_data()
       if ("peptide_q" %in% names(d)) {
-        d <- d |> filter(is.na(peptide_q) | peptide_q <= input$qval_filter)
+        d <- d |>
+          dplyr::filter(is.na(peptide_q) | peptide_q <= input$qval_filter)
       }
 
       if ("sage_discriminant_score" %in% names(d)) {
         d <- d |>
-          filter(
+          dplyr::filter(
             is.na(sage_discriminant_score) |
               sage_discriminant_score >= input$lda_filter
           )
       }
 
       if (input$filter_decoy && "is_decoy" %in% names(d)) {
-        d <- d |> filter(is_decoy == FALSE)
+        d <- d |> dplyr::filter(is_decoy == FALSE)
       }
 
       if ("stripped_peptide" %in% names(d)) {
@@ -728,7 +945,11 @@ Sage_server <- function(id, fasta_digest) {
       if (isTruthy(input$fasta_file)) {
         dig <- fasta_digest()
         classes <- classify_peptides(d$stripped_peptide, dig)
-        d <- left_join(d, classes, by = c("stripped_peptide" = "peptide"))
+        d <- dplyr::left_join(
+          d,
+          classes,
+          by = c("stripped_peptide" = "peptide")
+        )
       } else {
         d$classification <- "Unmapped"
         d$mapped_proteins <- NA_character_
@@ -761,7 +982,7 @@ Sage_server <- function(id, fasta_digest) {
       }
 
       d |>
-        count(filename, is_decoy, name = "n_psm") |>
+        dplyr::count(filename, is_decoy, name = "n_psm") |>
         ggplot(aes(x = filename, y = n_psm, fill = as.character(is_decoy))) +
         geom_col(position = position_dodge(preserve = "single")) +
         geom_text(
@@ -782,11 +1003,11 @@ Sage_server <- function(id, fasta_digest) {
       d <- filtered_data()
       req(nrow(d) > 0)
       summ <- d |>
-        group_by(filename) |>
-        summarise(
-          n_peptides = n_distinct(stripped_peptide),
+        dplyr::group_by(filename) |>
+        dplyr::summarise(
+          n_peptides = dplyr::n_distinct(stripped_peptide),
           n_proteins = if ("proteins" %in% names(d)) {
-            n_distinct(proteins)
+            dplyr::n_distinct(proteins)
           } else {
             0
           },
@@ -866,9 +1087,9 @@ Sage_server <- function(id, fasta_digest) {
         )
       }
       m_df <- d |>
-        filter(!is.na(!!sym(col_sym))) |>
-        group_by(filename) |>
-        summarise(m = median(!!sym(col_sym)), .groups = "drop")
+        dplyr::filter(!is.na(!!sym(col_sym))) |>
+        dplyr::group_by(filename) |>
+        dplyr::summarise(m = median(!!sym(col_sym)), .groups = "drop")
 
       ggplot(d, aes(x = !!sym(col_sym))) +
         geom_density(fill = color, color = "black", alpha = 0.6) +
@@ -1212,16 +1433,108 @@ Sage_server <- function(id, fasta_digest) {
     )
 
     # ── Protein abundance matrix (PwrQuant-compatible) ────────────────────────
-    protein_matrix <- reactive({
-      req(lfq_data())
-      build_sage_protein_matrix(
+    pm_min_peptides <- reactive({
+      v <- suppressWarnings(as.integer(input$pm_min_peptides))
+      if (is.na(v)) 1L else max(1L, v)
+    })
+
+    # Sidebar inputs only exist while the Sage sidebar is rendered; fall back
+    # to the UI defaults otherwise.
+    or_default <- function(x, default) if (is.null(x)) default else x
+
+    # NB: shiny::validate / shiny::need are namespaced on purpose -
+    # jsonlite::validate() masks shiny's in proteOmni.
+    lfq_filtered <- reactive({
+      shiny::validate(shiny::need(
+        !is.null(lfq_data_rv()),
+        "Load a Sage output folder containing lfq.parquet."
+      ))
+      filter_sage_lfq(
         lfq_data(),
-        q_max = input$pm_qval,
-        remove_shared = isTRUE(input$pm_remove_shared),
-        method = input$pm_method,
-        min_peptides = max(1L, as.integer(input$pm_min_peptides)),
+        q_max = or_default(input$pm_qval, 0.01),
+        remove_shared = isTRUE(or_default(input$pm_remove_shared, TRUE))
+      )
+    })
+
+    protein_matrix <- reactive({
+      rollup_sage_proteins(
+        lfq_filtered(),
+        method = or_default(input$pm_method, "sum"),
+        min_peptides = pm_min_peptides(),
         log2_transform = isTRUE(input$pm_log2)
       )
+    })
+
+    pm_plot_obj <- eventReactive(input$pm_build, {
+      col <- or_default(input$color_target, "#1b9e77")
+      if (identical(input$pm_plot_select, "missing")) {
+        pm <- protein_matrix()
+        shiny::validate(shiny::need(
+          nrow(pm) > 0,
+          "No proteins pass the current filters."
+        ))
+        plot_sage_missingness(pm, color = col)
+      } else {
+        plot_sage_peptides_per_protein(
+          lfq_filtered(),
+          min_peptides = pm_min_peptides(),
+          color = col
+        )
+      }
+    })
+
+    output$pm_plot <- renderPlot({
+      shiny::validate(shiny::need(
+        input$pm_build > 0,
+        "Select a figure and click 'Build Plot'."
+      ))
+      pm_plot_obj()
+    })
+
+    output$pm_download_plot <- downloadHandler(
+      filename = function() {
+        paste0(
+          "Sage_protein_matrix_",
+          input$pm_plot_select,
+          "_",
+          Sys.Date(),
+          ".png"
+        )
+      },
+      content = function(file) {
+        req(input$pm_build > 0)
+        ggsave(
+          file,
+          pm_plot_obj(),
+          width = 11,
+          height = if (identical(input$pm_plot_select, "missing")) 10 else 7,
+          bg = "white",
+          device = "png"
+        )
+      }
+    )
+
+    output$pm_table <- DT::renderDataTable({
+      pm <- protein_matrix()
+      val_cols <- setdiff(names(pm), "Protein ID")
+      DT::datatable(
+        head(pm, 500),
+        rownames = FALSE,
+        caption = sprintf(
+          "%s proteins x %d samples (%s%s, %.1f%% missing) - first 500 rows shown",
+          format(nrow(pm), big.mark = ","),
+          length(val_cols),
+          names(SAGE_ROLLUP_METHODS)[SAGE_ROLLUP_METHODS == input$pm_method],
+          if (isTRUE(input$pm_log2)) ", log2" else "",
+          mean(is.na(as.matrix(pm[val_cols]))) * 100
+        ),
+        options = list(dom = "frtip", pageLength = 20, scrollX = TRUE),
+        class = "display compact"
+      ) |>
+        DT::formatRound(
+          columns = val_cols,
+          digits = if (isTRUE(input$pm_log2)) 3 else 0
+        )
     })
 
     output$download_protein_matrix <- downloadHandler(
@@ -1303,23 +1616,57 @@ Sage_server <- function(id, fasta_digest) {
         )
     })
 
-    mod_diag_plot_obj <- reactive({
+    # Populate the sample selector whenever new results are loaded
+    observeEvent(sage_data_rv(), ignoreNULL = FALSE, {
+      d <- sage_data_rv()
+      samples <- if (is.null(d)) character(0) else sort(unique(d$filename))
+      updateSelectInput(
+        session,
+        "mod_diag_sample",
+        choices = c("All samples" = "__all__", setNames(samples, samples)),
+        selected = "__all__"
+      )
+    })
+
+    mod_diag_top_n <- reactive({
+      v <- suppressWarnings(as.integer(input$mod_diag_top_n))
+      if (length(v) == 0 || is.na(v)) 30L else max(1L, v)
+    })
+
+    # Paired data restricted to the selected sample
+    mod_diag_selected <- reactive({
       paired <- mod_diag_data()
+      sel <- input$mod_diag_sample
+      if (!is.null(sel) && nzchar(sel) && sel != "__all__") {
+        paired <- paired |> dplyr::filter(sample_name == sel)
+      }
+      paired
+    })
+
+    mod_diag_plot_obj <- reactive({
+      paired <- mod_diag_selected()
       req(paired, nrow(paired) > 0)
 
-      top_peptides <- paired |>
+      # Top N peptides by largest |dRT|, chosen within each sample
+      top_pairs <- paired |>
         dplyr::group_by(sample_name, peptide_seq) |>
         dplyr::summarise(
           max_delta = max(delta_rt, na.rm = TRUE),
           .groups = "drop"
         ) |>
         dplyr::group_by(sample_name) |>
-        dplyr::slice_max(order_by = max_delta, n = 30) |>
-        dplyr::pull(peptide_seq) |>
-        unique()
+        dplyr::slice_max(
+          order_by = max_delta,
+          n = mod_diag_top_n(),
+          with_ties = FALSE
+        ) |>
+        dplyr::ungroup() |>
+        dplyr::select(sample_name, peptide_seq)
 
-      plot_data <- paired |> dplyr::filter(peptide_seq %in% top_peptides)
+      plot_data <- paired |>
+        dplyr::semi_join(top_pairs, by = c("sample_name", "peptide_seq"))
       req(nrow(plot_data) > 0)
+      n_facets <- dplyr::n_distinct(plot_data$sample_name)
 
       ggplot(plot_data, aes(y = reorder(peptide_seq, delta_rt))) +
         geom_segment(
@@ -1350,7 +1697,11 @@ Sage_server <- function(id, fasta_digest) {
             " min | Artifact if |\u0394RT| \u2264 threshold"
           )
         ) +
-        facet_wrap(~sample_name, ncol = 2, scales = "free") +
+        facet_wrap(
+          ~sample_name,
+          ncol = if (n_facets == 1) 1 else 2,
+          scales = "free"
+        ) +
         theme_bw() +
         theme(
           plot.title = element_text(size = 14, face = "bold", hjust = 0.5),
@@ -1368,7 +1719,7 @@ Sage_server <- function(id, fasta_digest) {
     })
 
     output$mod_diag_plot_ui <- renderUI({
-      paired <- tryCatch(mod_diag_data(), error = function(e) NULL)
+      paired <- tryCatch(mod_diag_selected(), error = function(e) NULL)
       hide_sp("sp_moddiag")
       if (is.null(paired) || nrow(paired) == 0) {
         return(tags$p(
@@ -1377,7 +1728,10 @@ Sage_server <- function(id, fasta_digest) {
         ))
       }
       n_samples <- dplyr::n_distinct(paired$sample_name)
-      dynamic_h <- max(400L, min(n_samples * 500L, 2000L))
+      n_rows <- if (n_samples == 1) 1L else ceiling(n_samples / 2)
+      # ~16 px per peptide label keeps the y axis readable as Top N grows
+      row_h <- max(400L, mod_diag_top_n() * 16L + 150L)
+      dynamic_h <- min(n_rows * row_h, 6000L)
       plotOutput(ns("mod_diag_plot"), height = paste0(dynamic_h, "px"))
     })
 
@@ -1385,10 +1739,11 @@ Sage_server <- function(id, fasta_digest) {
       mod_diag_plot_obj()
     })
 
-    output$mod_diag_table <- DT::renderDataTable({
-      paired <- mod_diag_data()
+    # Table shown in the tab and exported by the TSV download
+    mod_diag_table_data <- reactive({
+      paired <- mod_diag_selected()
       req(paired, nrow(paired) > 0)
-      tbl <- paired |>
+      paired |>
         dplyr::select(
           sample_name,
           peptide_seq,
@@ -1400,6 +1755,69 @@ Sage_server <- function(id, fasta_digest) {
         ) |>
         dplyr::rename(peptide = peptide_seq, modified_peptide = mod_seq) |>
         dplyr::arrange(dplyr::desc(delta_rt))
+    })
+
+    mod_diag_file_tag <- function() {
+      sel <- input$mod_diag_sample
+      if (is.null(sel) || sel == "__all__") {
+        "all_samples"
+      } else {
+        gsub("[^A-Za-z0-9]+", "_", tools::file_path_sans_ext(sel))
+      }
+    }
+
+    output$download_mod_diag_plot <- downloadHandler(
+      filename = function() {
+        paste0(
+          "Sage_mod_diagnostic_",
+          mod_diag_file_tag(),
+          "_top",
+          mod_diag_top_n(),
+          "_",
+          Sys.Date(),
+          ".png"
+        )
+      },
+      content = function(file) {
+        p <- mod_diag_plot_obj()
+        n_samples <- dplyr::n_distinct(p$data$sample_name)
+        n_rows <- if (n_samples == 1) 1L else ceiling(n_samples / 2)
+        # Same sizing rule as the on-screen plot, converted to inches
+        row_in <- max(4, (mod_diag_top_n() * 16 + 150) / 100)
+        ggsave(
+          file,
+          p,
+          width = if (n_samples == 1) 9 else 14,
+          height = min(n_rows * row_in, 49),
+          bg = "white",
+          device = "png",
+          limitsize = FALSE
+        )
+      }
+    )
+
+    output$download_mod_diag_table <- downloadHandler(
+      filename = function() {
+        paste0(
+          "Sage_mod_diagnostic_",
+          mod_diag_file_tag(),
+          "_",
+          Sys.Date(),
+          ".tsv"
+        )
+      },
+      content = function(file) {
+        data.table::fwrite(
+          mod_diag_table_data(),
+          file = file,
+          sep = "\t",
+          na = "NA"
+        )
+      }
+    )
+
+    output$mod_diag_table <- DT::renderDataTable({
+      tbl <- mod_diag_table_data()
       DT::datatable(
         tbl,
         rownames = FALSE,
