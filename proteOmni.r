@@ -65,6 +65,10 @@ writeLines(
     paste0("R version: ", R.version.string),
     paste0("Platform:  ", R.version$platform),
     paste0("Working directory: ", getwd()),
+    paste0(
+      "Package snapshot (proteOmni.lock): ",
+      getOption("proteOmni.snapshot", "unknown")
+    ),
     "",
     "=== Loaded Package Versions ==="
   ),
@@ -192,7 +196,7 @@ source("modules/mod_MaxQuantMSMS.r")
 # ── Global options ────────────────────────────────────────────────────────────
 options(shiny.maxRequestSize = 5000 * 1024^2)
 
-args  <- commandArgs(trailingOnly = TRUE)
+args <- commandArgs(trailingOnly = TRUE)
 verbose <- "--verbose" %in% args
 debug <- "--debug" %in% args
 
@@ -200,13 +204,13 @@ if (verbose) {
   message("[verbose] mode activated")
   options(
     shiny.error = function() {
-       traceback(3)
-       browser()
+      traceback(3)
+      browser()
     },
     shiny.fullstacktrace = TRUE,
     shiny.trace = TRUE
-    )
-  }
+  )
+}
 
 theme_set(theme_bw(base_size = 13))
 ggplot2::theme_update(
