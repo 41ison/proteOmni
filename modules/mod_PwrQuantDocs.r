@@ -366,64 +366,122 @@ PwrQuantDocs_body_ui <- function(id) {
                 c(
                   "<code>minprob</code> (default)",
                   "MNAR",
-                  "Draws from the protein's own left tail (mean &minus; 1.8 SD). Appropriate for below-detection dropout, but can manufacture apparent differences.",
+                  "Draws from each sample's own left tail: N(sample mean &minus; 1.8 SD, 0.3 SD), using that sample's observed values. Appropriate for below-detection dropout, but can manufacture apparent differences.",
                   "Fastest"
                 ),
                 c(
                   "<code>knn</code>",
                   "MAR",
-                  "Borrows from the 5 most similar proteins within the same group. Shrinks variance, so p-values skew optimistic &mdash; measurably so; see the warning below.",
+                  "Fills a gap in a sample with the mean of the values the k most similar proteins (similarity measured over the group's samples) have in that same sample. k counts proteins, not samples, and is chosen per dataset by hiding 5% of the observed values and keeping the k (3&ndash;20) that reconstructs them best. With few replicates its neighbours are matched on only 2&ndash;3 samples, so under heavy dropout it is conservative and loses power; see the warning below.",
                   "Fast"
                 ),
                 c(
                   "<code>missforest</code>",
                   "MAR",
-                  "Random-forest imputation. Most accurate on structured data.",
-                  "Very slow"
+                  "Random-forest imputation, one forest per sample, predicting it from the other samples of the same group with proteins as observations.",
+                  "Moderate"
                 ),
                 c(
                   "<code>bpca</code>",
                   "MAR",
-                  "Global latent-factor model across all samples \u2014 the only method not run per group.",
+                  "Global latent-factor model with samples as variables and proteins as observations, fitted across all samples \u2014 the only method not run per group.",
                   "Moderate"
                 )
               )
             ),
             pq_warn(
-              tags$b("KNN inflates the false-discovery rate. "),
-              "Simulating through this pipeline \u2014 6 vs 6, effects spiked into ",
-              "10% of proteins, missingness replayed from a real matrix \u2014 a BH ",
-              "cut-off of 5% produced a realised FDR near 4% with no ",
-              "imputation, 7\u20138% with ",
-              tags$code("minprob"),
-              ", and 14\u201315% with ",
-              tags$code("knn"),
-              ". The gap widens as dropout worsens: roughly 19% once a quarter ",
-              "of the matrix sits below the detection limit, and 34% at 40%. ",
-              "What that bought was 2\u20134 percentage points of power."
+              tags$b(
+                "Once dropout is substantial, imputation either breaks FDR ",
+                "control or costs power, depending on the method. "
+              ),
+              "These numbers come from simulating through this pipeline on the bundled ",
+              tags$code("mtx_maxLFQ.tsv"),
+              " training matrix: 3 conditions \u00d7 3 replicates, contrast ",
+              tags$code("m1 \u2212 m0"),
+              ", a log\u2082FC of 1 spiked into 10% of proteins, intensity-",
+              "dependent dropout fitted to the matrix and then scaled up, BH at ",
+              "5%, and 15 simulations per cell. Each cell is realised FDR / power (%)."
+            ),
+            pq_table(
+              c(
+                "Method",
+                "1.5% missing (native)",
+                "11% missing",
+                "18% missing"
+              ),
+              list(
+                c(
+                  "none (<code>ls</code> mode)",
+                  "4.6 / 85",
+                  "4.6 / 81",
+                  "4.3 / 78"
+                ),
+                c("<code>minprob</code>", "3.4 / 79", "1.1 / 40", "0.6 / 23"),
+                c(
+                  "<code>knn</code> (k by CV)",
+                  "5.6 / 86",
+                  "3.7 / 63",
+                  "0.3 / 36"
+                ),
+                c("<code>bpca</code>", "5.5 / 86", "10.4 / 87", "12.3 / 84"),
+                c(
+                  "<code>missforest</code>",
+                  "5.5 / 87",
+                  "15.7 / 90",
+                  "24.2 / 91"
+                )
+              )
             ),
             tags$p(
-              "The mechanism is the variance shrinkage noted in the table. ",
-              "Imputing a protein from its five nearest neighbours makes its ",
-              "replicates agree more closely than the measurements did, so ",
+              "At the matrix's own 1.5% dropout every method stays near the ",
+              "nominal 5%. As dropout grows the methods split. ",
+              tags$code("bpca"),
+              " and ",
+              tags$code("missforest"),
+              " keep their power but let the realised FDR climb to 10\u201324%. ",
+              "They reconstruct missing values from the protein's pattern in the ",
+              "other samples, so its replicates agree more closely than the ",
+              "measurements did, ",
               tags$code("eBayes"),
-              " sees less residual noise than the data actually contain and ",
-              "the moderated ",
+              " sees too little residual noise, and the moderated ",
               tags$i("t"),
-              " statistics come out too large. Nothing downstream can recover ",
-              "the lost noise, and the BH correction is applied to p-values ",
-              "that are already too small. If a false positive is expensive, ",
-              "prefer ",
+              " statistics come out too large. ",
+              tags$code("minprob"),
+              " and ",
+              tags$code("knn"),
+              " stay at or below 5% but lose a lot of power. Their filled values ",
+              "are not tied to the protein's own level: ",
+              tags$code("minprob"),
+              " uses the sample's detection limit and ",
+              tags$code("knn"),
+              " uses neighbours found on only 2\u20133 shared samples, so they add ",
+              "noise to the residual variance. The choice of k made no ",
+              "measurable difference (k = 3, 5 and 10 agreed within simulation ",
+              "noise). Only ",
               tags$code("ls"),
-              " mode and let limma fit each protein on the samples it has; if ",
-              "KNN is used, treat the hit list as a screen to be confirmed ",
-              "rather than a result. One dataset and one design were tested, so ",
-              "read the magnitudes as indicative \u2014 the direction is not in ",
-              "doubt, but the size of the inflation will depend on your data."
+              " mode, where limma fits each protein on the samples it has, held ",
+              "the FDR at 5% without losing power at every dropout level."
             ),
             tags$p(
-              "Values still missing after imputation (typically a protein absent ",
-              "from an entire group) are filled from ",
+              "If a false positive is expensive, prefer ",
+              tags$code("ls"),
+              " mode. If you need ",
+              tags$code("bpca"),
+              " or ",
+              tags$code("missforest"),
+              " on a sparse matrix, treat the hit list as a screen to be ",
+              "confirmed rather than a result. Read the magnitudes as ",
+              "indicative: they come from one matrix, one design and one seed. ",
+              "The simulator also ties dropout to each protein's mean abundance ",
+              "rather than to individual low values, which favours methods that ",
+              "make the same assumption. The simulation is reproducible with ",
+              tags$code("app/tests/imputation_strategies_sim.R"),
+              "."
+            ),
+            tags$p(
+              "The groupwise methods deliberately leave a protein's values ",
+              "missing in any group where it was never observed. Those values ",
+              "are filled from ",
               tags$code("N(global min \u2212 1, 0.3)"),
               ". Those proteins are ",
               "flagged and forced to ",
@@ -435,7 +493,11 @@ PwrQuantDocs_body_ui <- function(id) {
               " tab."
             ),
             pq_note(
-              "Groupwise imputation (all methods except BPCA) fills each ",
+              "All four methods are sample-wise: each sample is treated as a ",
+              "variable and the proteins as its observations, so a filled ",
+              "value is derived from the sample it belongs to rather than from ",
+              "the protein's other replicates. Groupwise imputation (all ",
+              "methods except BPCA) additionally fills each ",
               "condition using only its own samples. This avoids leaking ",
               "signal across the very contrast you are testing, but it also ",
               "means an all-missing group cannot be recovered."

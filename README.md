@@ -344,19 +344,39 @@ Assign each sample column a **Condition** and **Batch** label using the editable
 Proteins with fewer than `min_valid_pct`% of valid (non-missing) values per group are excluded before imputation and modelling. Set to 0 to disable filtering.
 
 ### Step 3 — Imputation (robust mode only)
-Imputation is performed when **Limma Regression Method** is set to `robust`. Four strategies are available (selectable in the sidebar):
+Imputation is performed when **Limma Regression Method** is set to `robust`. All four strategies are **sample-wise**: each sample (column) is a variable and the proteins are its observations, so every filled value is derived from the sample it belongs to, not from the protein's other replicates. MinProb, KNN and missForest are also **groupwise** (each condition is imputed from its own samples only); bPCA is fitted on the full matrix. Strategies are selectable in the sidebar:
 
-| Method | Speed | Missing-data model | Best for |
+| Method | Speed* | Missing-data model | Best for |
 |---|---|---|---|
-| **MinProb** (default) | ~0.03 s | MNAR — Gaussian draw at the detection limit (mean − 1.8 SD per column) | MNAR-dominated datasets, large matrices |
-| **KNN** | ~0.2 s | MAR / MCAR — borrows information from k=5 nearest proteins | General use; moderate missingness |
-| **missForest** | ~40 min | MAR / MCAR — random-forest multiple imputation | Maximum accuracy; small matrices are preferred |
-| **bPCA** | ~2 min | MAR / MCAR - BPCA borrows signal across all samples and conditions | Flexible statistical framework |
+| **MinProb** (default) | < 0.1 s | MNAR — Gaussian draw at each sample's detection limit, N(mean − 1.8 SD, 0.3 SD) of that sample's observed values | Low dropout, when proteins are missing mostly because they fall below detection; conservative, but loses power quickly as dropout grows |
+| **KNN** | < 0.1 s | MAR / MCAR — a gap in sample *j* gets the mean of the values the k nearest proteins have in sample *j*; k is chosen per dataset by masked-value cross-validation over {3, 5, 8, 10, 15, 20}, and the same k is reused in the power simulation | Low to moderate dropout; conservative, with less power loss than MinProb |
+| **missForest** | ~5 s | MAR / MCAR — one random forest per sample, predicting it from the other samples in the same condition | Low dropout only; keeps power, but FDR inflates as dropout grows |
+| **bPCA** | ~1–8 s | MAR / MCAR — Bayesian PCA with samples as variables, borrowing signal across all samples and conditions | Low dropout only; keeps power, but FDR inflates as dropout grows |
 
-> [!WARNING]
-> **Why missForest is slow:** after transposition, missForest receives a P-sample × N-protein matrix and builds one random forest per protein to predict missing values. For a typical proteomics dataset with 3,000 proteins across 3 groups, this means ~9,000 forests — reducing `ntree` or `maxiter` does not help because the bottleneck is the number of trees, not their depth. KNN is **~10,000× faster** and MinProb is **~73,000× faster** for equivalent datasets in our tests.
+\*Measured on the bundled 9-sample MaxLFQ training matrix (~4,000–5,800 proteins). missForest and bPCA cost grows with the number of samples.
+
+Proteins that are entirely missing within a condition are left empty by the groupwise methods and filled afterwards from N(global min − 1, 0.3); they are flagged as `imputation_driven` (see below).
 
 When `ls` (ordinary least squares) regression is selected, imputation is skipped entirely and the raw log2 matrix is passed directly to limma.
+
+#### Effect of imputation on FDR and power
+
+Simulated through this pipeline on `app/training/mtx_maxLFQ.tsv` (3 conditions × 3 replicates, contrast `m1 − m0`, log2FC = 1 spiked into 10% of proteins, intensity-dependent dropout fitted to the matrix and scaled up, BH 5%, 15 simulations per cell). Cells are realised FDR / power (%):
+
+| Method | 1.5% missing (native) | 11% missing | 18% missing |
+|---|---|---|---|
+| none (`ls` mode) | 4.6 / 85 | 4.6 / 81 | 4.3 / 78 |
+| MinProb | 3.4 / 79 | 1.1 / 40 | 0.6 / 23 |
+| KNN (k by CV) | 5.6 / 86 | 3.7 / 63 | 0.3 / 36 |
+| bPCA | 5.5 / 86 | 10.4 / 87 | 12.3 / 84 |
+| missForest | 5.5 / 87 | 15.7 / 90 | 24.2 / 91 |
+
+At low dropout, all methods behave about the same. As dropout grows, bPCA and missForest keep power but let FDR inflate, while MinProb and KNN stay conservative but lose much of their power. Only `ls` mode held FDR at 5% without losing power at every dropout level. The choice of KNN k (3, 5 or 10) made no measurable difference.
+
+> [!IMPORTANT]
+> **Recommendation:** use `ls` mode unless you specifically need robust regression. If you use `robust` mode on a matrix with more than a few percent missing, MinProb or KNN won't produce excess false positives, but expect reduced sensitivity. Treat bPCA or missForest hit lists as a screen to be confirmed. To check your own data, run the power simulation with **Include missingness + imputation** on and compare the *Mean realised FDP* with your cutoff.
+
+These figures come from one matrix, one design and one seed, so read them as indicative. The simulator ties dropout to each protein's mean abundance rather than to individual low values, which favours methods that make the same assumption. Reproduce or extend them with `Rscript app/tests/imputation_strategies_sim.R`.
 
 ### Step 4 — Batch correction
 If more than one unique batch label is present, `sva::ComBat` is applied to the imputed matrix using empirical Bayes priors.
@@ -646,9 +666,9 @@ source("/path/to/proteOmni/app/proteOmni.R")
 
 <summary><b>PwrQuant imputation is very slow</b></summary>
 
-If you selected **missForest** as the imputation method, imputation can take 30–40 minutes for a typical 3,000-protein dataset with 3 conditions. This is expected — missForest builds one random forest per protein per group.
+**missForest** and **bPCA** are the slowest methods. missForest builds one random forest per sample per iteration, and bPCA fits a factor model over the whole matrix, so both take seconds on a typical 9-sample dataset but grow with the number of samples and proteins. This cost is multiplied when **Include missingness + imputation** is on in the power simulation, which imputes every simulated matrix.
 
-**Solution:** switch to **MinProb** (default, ~73,000× faster) or **KNN** (~10,000× faster) in the *Imputation Method* dropdown, which appears in the sidebar when `robust` regression is selected. For most proteomics datasets with MNAR-type missingness, **MinProb** is the recommended choice.
+**Solution:** the fastest option is `ls` regression, which skips imputation entirely and also gave the best FDR/power balance in simulation (see [Effect of imputation on FDR and power](#effect-of-imputation-on-fdr-and-power)). If you need `robust` mode, **KNN** or **MinProb** in the *Imputation Method* dropdown run in well under a second. KNN loses less power than MinProb as dropout grows.
 
 </details>
 
