@@ -161,41 +161,190 @@ tmm_normalize_log2 <- function(
   out
 }
 
-# method: "knn" (fast, MAR), "minprob" (fastest, MNAR-aware),
-#         "missforest" (slow legacy), "bpca" (global Bayesian PCA, not groupwise)
+# Groupwise KNN core. Proteins entirely missing within a group are skipped and
+# stay NA. Errors propagate so the caller can fall back.
+knn_impute_groupwise <- function(data, group_labels, k, verbose = FALSE) {
+  imputed <- data
+  for (group in unique(group_labels)) {
+    g_cols <- which(group_labels == group)
+    g_mat <- data[, g_cols, drop = FALSE]
+    keep_rows <- rowSums(!is.na(g_mat)) > 0
+    g_mat <- g_mat[keep_rows, , drop = FALSE]
+    if (!anyNA(g_mat)) {
+      next
+    }
+    if (ncol(g_mat) < 2L) {
+      stop("KNN needs at least 2 samples in group '", group, "'")
+    }
+    k_use <- max(1L, min(as.integer(k), nrow(g_mat) - 1L))
+    # impute.knn writes cluster traces straight to stdout. Silence them unless
+    # asked: the MDD simulation imputes hundreds of matrices and would
+    # otherwise flood the console and the Shiny log.
+    knn_out <- NULL
+    if (verbose) {
+      knn_out <- impute::impute.knn(g_mat, k = k_use)$data
+    } else {
+      utils::capture.output(
+        knn_out <- impute::impute.knn(g_mat, k = k_use)$data
+      )
+    }
+    imputed[keep_rows, g_cols] <- knn_out
+  }
+  imputed
+}
+
+#' Choose k for KNN imputation by masked-value cross-validation
+#'
+#' k is the number of neighbouring *proteins*, so it is bounded by the number
+#' of proteins, not samples. Its best value depends on the data (Troyanskaya et
+#' al. 2001 found a broad optimum around 10-20 on expression arrays; with only
+#' a few replicates per group the protein-protein distances are noisier).
+#' A fraction of the observed cells is hidden, re-imputed for each candidate k,
+#' and the k with the lowest mean squared reconstruction error is returned.
+#' Masking never leaves a protein with fewer than 2 observed values in a group,
+#' so the held-out cells resemble the ones KNN actually has to fill.
+#'
+#' Runs under a fixed seed and restores the caller's RNG state, so the choice
+#' is reproducible and the KNN path stays deterministic.
+select_knn_k <- function(
+  data,
+  group_labels,
+  k_grid = c(3L, 5L, 8L, 10L, 15L, 20L),
+  mask_frac = 0.05,
+  n_rep = 3L,
+  seed = 7919L,
+  default_k = 10L
+) {
+  has_seed <- exists(".Random.seed", envir = globalenv(), inherits = FALSE)
+  if (has_seed) {
+    old_seed <- get(".Random.seed", envir = globalenv())
+  }
+  on.exit(
+    if (has_seed) {
+      assign(".Random.seed", old_seed, envir = globalenv())
+    } else if (exists(".Random.seed", envir = globalenv(), inherits = FALSE)) {
+      rm(".Random.seed", envir = globalenv())
+    }
+  )
+  set.seed(seed)
+
+  k_grid <- sort(unique(as.integer(k_grid)))
+  k_grid <- k_grid[k_grid <= nrow(data) - 1L]
+  if (length(k_grid) == 0L) {
+    return(max(1L, nrow(data) - 1L))
+  }
+  if (length(k_grid) == 1L) {
+    return(k_grid)
+  }
+
+  sq_err <- matrix(NA_real_, n_rep, length(k_grid))
+  observed <- which(!is.na(data))
+  for (r in seq_len(n_rep)) {
+    mask <- matrix(FALSE, nrow(data), ncol(data))
+    mask[sample(observed, max(1L, round(mask_frac * length(observed))))] <- TRUE
+    for (g in unique(group_labels)) {
+      cols <- which(group_labels == g)
+      left <- rowSums(
+        !is.na(data[, cols, drop = FALSE]) & !mask[, cols, drop = FALSE]
+      )
+      mask[left < 2L, cols] <- FALSE
+    }
+    if (!any(mask)) {
+      next
+    }
+    x <- data
+    x[mask] <- NA
+    for (i in seq_along(k_grid)) {
+      out <- knn_impute_groupwise(x, group_labels, k_grid[i])
+      sq_err[r, i] <- mean((out[mask] - data[mask])^2)
+    }
+  }
+  mse <- colMeans(sq_err, na.rm = TRUE)
+  if (all(!is.finite(mse))) {
+    return(min(default_k, max(k_grid)))
+  }
+  k_grid[which.min(mse)]
+}
+# All methods are sample-wise: each sample (column) is a variable and the
+# proteins (rows) are its observations, so every filled value is derived from
+# the sample it belongs to, never from the protein's own replicate values.
+#
+# method: "minprob" (fastest, MNAR-aware), "knn" (fast, MAR),
+#         "missforest" (slower, MAR), "bpca" (global Bayesian PCA, not groupwise)
+#
+# The groupwise methods (minprob, knn, missforest) leave a protein's cells NA
+# in any group where that protein has no observed value at all; the caller
+# fills those from N(global min - 1, 0.3) and flags them as imputation-driven.
+#
+# knn_k: number of neighbouring proteins for KNN. NULL selects it by masked-value
+# cross-validation (select_knn_k()); the value used is returned as attr "knn_k".
 groupwise_imputation <- function(
   data,
   group_labels,
   method = "minprob",
-  verbose = TRUE
+  verbose = TRUE,
+  knn_k = NULL
 ) {
   # If the dataset has zero NAs, don't waste time trying to impute
   if (sum(is.na(data)) == 0) {
     return(data)
   }
 
+  # TRUE for every cell whose protein is entirely missing within that cell's
+  # group. Groupwise methods leave these cells untouched.
+  group_all_na <- matrix(FALSE, nrow(data), ncol(data))
+  for (group in unique(group_labels)) {
+    g_cols <- which(group_labels == group)
+    all_na <- rowSums(!is.na(data[, g_cols, drop = FALSE])) == 0
+    group_all_na[all_na, g_cols] <- TRUE
+  }
+
+  # Sample-wise MinProb: each sample's NAs are drawn from that sample's own
+  # left tail, N(mean - 1.8 SD, 0.3 SD), using the sample's observed values.
+  minprob_fill <- function(x, cols) {
+    for (j in cols) {
+      fill <- which(is.na(x[, j]) & !group_all_na[, j])
+      if (length(fill) == 0) {
+        next
+      }
+      col_mean <- mean(x[, j], na.rm = TRUE)
+      col_sd <- stats::sd(x[, j], na.rm = TRUE)
+      if (is.na(col_sd) || col_sd == 0) {
+        col_sd <- 0.1
+      }
+      x[fill, j] <- stats::rnorm(
+        length(fill),
+        mean = col_mean - 1.8 * col_sd,
+        sd = 0.3 * col_sd
+      )
+    }
+    x
+  }
+
   if (method == "bpca") {
     # ── Bayesian PCA: GLOBAL (full matrix, not groupwise) ────────────────────
-    # BPCA is a latent-factor Bayesian model that borrows signal across ALL
-    # samples/conditions via principal axes. Unlike KNN/MinProb/missForest it is
-    # intentionally NOT run per-group; running it groupwise would undercut the
-    # factor model. Falls back to KNN if pcaMethods is unavailable or fails.
+    # Proteins are observations and samples are variables (as in Oba et al.
+    # 2003): the latent factors describe how samples co-vary, and a missing
+    # value is reconstructed from the protein's scores and the sample's
+    # loadings. Intentionally NOT run per group; running it groupwise would
+    # undercut the factor model. Falls back to KNN if pcaMethods fails.
     if (verbose) {
-      message("Imputation: Bayesian PCA (global, full matrix)...")
+      message("Imputation: Bayesian PCA (sample-wise, global, full matrix)...")
     }
     result <- tryCatch(
       {
-        # pcaMethods expects samples in rows, features in columns.
-        n_pcs <- min(10L, ncol(data) - 1L, nrow(data) - 1L)
-        n_pcs <- max(1L, n_pcs)
+        # Proteins with no observation anywhere carry no information for the
+        # model; leave them NA for the caller's downshift.
+        keep_rows <- rowSums(!is.na(data)) > 0
+        n_pcs <- max(1L, min(10L, ncol(data) - 1L))
         pc <- pcaMethods::pca(
-          t(data),
+          data[keep_rows, , drop = FALSE],
           method = "bpca",
           nPcs = n_pcs,
           verbose = FALSE
         )
-        completed <- t(pcaMethods::completeObs(pc))
-        dimnames(completed) <- dimnames(data)
+        completed <- data
+        completed[keep_rows, ] <- pcaMethods::completeObs(pc)
         completed
       },
       error = function(e) {
@@ -216,86 +365,49 @@ groupwise_imputation <- function(
   }
 
   if (method == "knn") {
-    # ── KNN: groupwise, proteins × samples within each group ─────────────────
-    # Running per-group prevents cross-condition borrowing during imputation
-    if (verbose) {
-      message("Imputation: KNN (k=5, groupwise)...")
-    }
-    imputed_data <- data
-    knn_failed <- FALSE
-    for (group in unique(group_labels)) {
-      g_cols <- which(group_labels == group)
-      g_mat <- data[, g_cols, drop = FALSE]
-      k_use <- min(5L, ncol(g_mat) - 1L)
-      result <- tryCatch(
-        {
-          # impute.knn writes cluster traces straight to stdout. Silence them
-          # unless asked: the MDD simulation imputes hundreds of matrices and
-          # would otherwise flood the console and the Shiny log.
-          knn_out <- NULL
-          if (verbose) {
-            knn_out <- impute::impute.knn(g_mat, k = k_use)$data
-          } else {
-            utils::capture.output(
-              knn_out <- impute::impute.knn(g_mat, k = k_use)$data
-            )
-          }
-          knn_out
-        },
-        error = function(e) {
-          warning(
-            "KNN imputation failed for group '",
-            group,
-            "', falling back to MinProb: ",
-            e$message
-          )
-          NULL
+    # ── KNN: sample-wise, groupwise ──────────────────────────────────────────
+    # A missing value in sample j is the average of the values that the k most
+    # similar proteins (distance over the group's samples) have in that same
+    # sample j. Running per group prevents cross-condition borrowing. k counts
+    # neighbouring proteins, so it is unrelated to the number of samples; it is
+    # chosen by masked-value cross-validation unless supplied.
+    result <- tryCatch(
+      {
+        if (is.null(knn_k)) {
+          knn_k <- select_knn_k(data, group_labels)
         }
-      )
-      if (is.null(result)) {
-        knn_failed <- TRUE
-        break
+        if (verbose) {
+          message(sprintf(
+            "Imputation: KNN (k=%d, sample-wise, groupwise)...",
+            as.integer(knn_k)
+          ))
+        }
+        knn_impute_groupwise(data, group_labels, knn_k, verbose = verbose)
+      },
+      error = function(e) {
+        warning("KNN imputation failed, falling back to MinProb: ", e$message)
+        NULL
       }
-      imputed_data[, g_cols] <- result
-    }
-    if (knn_failed) {
+    )
+    if (is.null(result)) {
       method <- "minprob"
     } else {
       if (verbose) {
         message("KNN imputation complete.")
       }
-      return(imputed_data)
+      attr(result, "knn_k") <- as.integer(knn_k)
+      return(result)
     }
   }
-
   if (method == "minprob") {
-    # ── MinProb: protein-level (row-wise) Gaussian draw, groupwise ───────────
-    # Statistics are derived from each protein's own distribution within the
-    # group, not from the sample columns, to better reflect MNAR missingness patterns.
+    # ── MinProb: sample-wise Gaussian draw ───────────────────────────────────
+    # Each sample's distribution sets its own detection limit, which is what
+    # MNAR (below-detection) dropout depends on. Proteins entirely missing in a
+    # group are left NA (see group_all_na).
     if (verbose) {
-      message("Imputation: MinProb (protein-level, groupwise) ...")
+      message("Imputation: MinProb (sample-wise) ...")
     }
-    imputed_data <- data
-    for (group in unique(group_labels)) {
-      g_cols <- which(group_labels == group)
-      for (i in seq_len(nrow(imputed_data))) {
-        row_vals <- imputed_data[i, g_cols]
-        na_pos <- which(is.na(row_vals))
-        if (length(na_pos) > 0) {
-          row_mean <- mean(row_vals, na.rm = TRUE)
-          row_sd <- sd(row_vals, na.rm = TRUE)
-          if (is.na(row_sd) || row_sd == 0) {
-            row_sd <- 0.1
-          }
-          # draw from left tail: mean - 1.8 SD (standard MinProb shift)
-          imputed_data[i, g_cols[na_pos]] <- rnorm(
-            length(na_pos),
-            mean = row_mean - 1.8 * row_sd,
-            sd = 0.3 * row_sd
-          )
-        }
-      }
-    }
+    imputed_data <- minprob_fill(data, seq_len(ncol(data)))
     if (verbose) {
       message("MinProb imputation complete.")
     }
@@ -303,27 +415,48 @@ groupwise_imputation <- function(
   }
 
   if (method == "missforest") {
-    # ── missForest: random-forest strategy, accurate but extremely slow ────
+    # ── missForest: sample-wise, groupwise ───────────────────────────────────
+    # Proteins are observations and the group's samples are variables, so one
+    # forest per sample predicts its missing values from the other samples in
+    # the same condition.
     if (verbose) {
-      message(
-        "Imputation: missForest (groupwise) — this may take a long time ☕"
-      )
+      message("Imputation: missForest (sample-wise, groupwise) ...")
     }
     imputed_data <- data
     for (group in unique(group_labels)) {
-      group_cols <- which(group_labels == group)
-      group_data <- data[, group_cols, drop = FALSE]
-      keep_rows <- !apply(group_data, 1, function(x) all(is.na(x)))
-      group_data_filtered <- group_data[keep_rows, , drop = FALSE]
-
-      if (nrow(group_data_filtered) > 0) {
-        imputed_group <- missForest::missForest(
-          as.data.frame(t(group_data_filtered)),
-          verbose = verbose
-        )$ximp
-        imputed_data[keep_rows, group_cols] <- t(imputed_group)
-        if (verbose) message(sprintf("         Group '%s' done.", group))
+      g_cols <- which(group_labels == group)
+      keep_rows <- !group_all_na[, g_cols[1]]
+      g_mat <- data[keep_rows, g_cols, drop = FALSE]
+      if (!anyNA(g_mat)) {
+        next
       }
+      result <- tryCatch(
+        {
+          if (ncol(g_mat) < 2L) {
+            stop("missForest needs at least 2 samples per group")
+          }
+          ximp <- missForest::missForest(
+            as.data.frame(g_mat),
+            verbose = verbose
+          )$ximp
+          as.matrix(ximp)
+        },
+        error = function(e) {
+          warning(
+            "missForest imputation failed for group '",
+            group,
+            "', falling back to MinProb for that group: ",
+            e$message
+          )
+          NULL
+        }
+      )
+      if (is.null(result)) {
+        imputed_data <- minprob_fill(imputed_data, g_cols)
+      } else {
+        imputed_data[keep_rows, g_cols] <- result
+      }
+      if (verbose) message(sprintf("         Group '%s' done.", group))
     }
     if (verbose) {
       message("missForest imputation complete.")
@@ -334,7 +467,7 @@ groupwise_imputation <- function(
   stop(
     "Unknown imputation method: ",
     method,
-    ". Use 'knn', 'minprob', or 'missforest'."
+    ". Use 'minprob', 'knn', 'missforest', or 'bpca'."
   )
 }
 
@@ -577,6 +710,9 @@ apply_simulated_missingness <- function(
 #' @param impute_method Imputation passed to `groupwise_imputation()` when
 #'   missingness is simulated. NULL leaves NAs in place, matching the module's
 #'   least-squares path where limma handles them directly.
+#' @param knn_k Neighbour count for KNN imputation. Pass the k selected on the
+#'   real matrix so every simulated matrix is imputed with the same k; NULL
+#'   re-selects it by cross-validation on each simulated matrix (slower).
 #' @param group_labels Sample group labels, needed for groupwise imputation.
 #'   Derived from `design` when omitted.
 #' @param min_valid_per_group Minimum observed values per group to retain.
@@ -599,6 +735,7 @@ simulate_pipeline_mdd <- function(
   seed = NULL,
   miss_model = NULL,
   impute_method = NULL,
+  knn_k = NULL,
   group_labels = NULL,
   min_valid_per_group = 2L,
   search = c("grid", "bisect"),
@@ -699,7 +836,8 @@ simulate_pipeline_mdd <- function(
                 sim_data,
                 group_labels,
                 method = impute_method,
-                verbose = FALSE
+                verbose = FALSE,
+                knn_k = knn_k
               ))
               # Mirror the module's downshift for regions imputation left empty.
               still_na <- which(is.na(sim_data))
@@ -841,6 +979,7 @@ simulate_pipeline_mdd <- function(
       df_prior = stats::median(df_prior),
       missingness = !is.null(miss_model),
       impute_method = impute_method,
+      knn_k = if (identical(impute_method, "knn")) knn_k else NULL,
       realised_missing = mean(curve$Missing_Rate),
       target_missing = if (is.null(miss_model)) {
         NA_real_
@@ -1586,7 +1725,7 @@ PwrQuant_sidebar_ui <- function(id) {
           choices = c(
             "MinProb — fastest, MNAR-aware" = "minprob",
             "KNN — fast, MAR-appropriate" = "knn",
-            "missForest — accurate, very slow ☕" = "missforest",
+            "missForest — accurate, slower" = "missforest",
             "Bayesian PCA — global latent-factor model" = "bpca"
           ),
           selected = "minprob"
@@ -3466,7 +3605,7 @@ PwrQuant_server <- function(id) {
           imp_labels <- c(
             knn = "KNN imputation",
             minprob = "MinProb imputation",
-            missforest = "missForest imputation (this may take a long time) ☕",
+            missforest = "missForest imputation",
             bpca = "Bayesian PCA imputation (global)"
           )
           incProgress(
@@ -3707,6 +3846,12 @@ PwrQuant_server <- function(id) {
             input$imputation_method %||% "minprob"
           } else {
             NULL
+          },
+          # k selected on the real matrix, reused by the simulation.
+          knn_k = if (reg_method == "robust") {
+            attr(imputed_matrix, "knn_k")
+          } else {
+            NULL
           }
         )
       })
@@ -3745,6 +3890,7 @@ PwrQuant_server <- function(id) {
         seed = input$mdd_seed %||% 4817,
         miss_model = mm,
         impute_method = res$impute_method,
+        knn_k = res$knn_k,
         min_valid_per_group = min_valid
       )
     }
@@ -5133,7 +5279,10 @@ PwrQuant_server <- function(id) {
                 ),
                 100 * st$realised_missing,
                 100 * st$target_missing,
-                st$impute_method %||% "none (NAs kept)"
+                paste0(
+                  st$impute_method %||% "none (NAs kept)",
+                  if (!is.null(st$knn_k)) sprintf(" (k = %d)", st$knn_k) else ""
+                )
               )
             }
           ),
