@@ -1038,7 +1038,14 @@ ensure_orgdb <- function(taxon_id) {
   if (!requireNamespace(pkg, quietly = TRUE)) {
     ok <- tryCatch(
       {
-        BiocManager::install(pkg, update = FALSE, ask = FALSE)
+        # Install from the dated snapshot in proteOmni.lock (set by
+        # bootstrap.R) so the OrgDb version is pinned like everything else.
+        repos <- getOption("proteOmni.repos")
+        if (is.null(repos)) {
+          BiocManager::install(pkg, update = FALSE, ask = FALSE)
+        } else {
+          utils::install.packages(pkg, repos = repos)
+        }
         requireNamespace(pkg, quietly = TRUE)
       },
       error = function(e) FALSE
