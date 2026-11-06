@@ -1021,8 +1021,10 @@ ensure_orgdb <- function(taxon_id) {
   if (is.na(taxon_id) || !nzchar(taxon_id)) {
     taxon_id <- "9606"
   }
-  pkg <- pwrquant_orgdb_lookup[[taxon_id]]
-  if (is.null(pkg)) {
+  # Single-bracket lookup: `[[` on a named vector errors on unknown names
+  # before the informative message below could be raised.
+  pkg <- unname(pwrquant_orgdb_lookup[taxon_id])
+  if (is.na(pkg)) {
     stop(
       "GO enrichment via clusterProfiler requires a Bioconductor OrgDb ",
       "annotation package, but taxon ",
