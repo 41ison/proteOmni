@@ -1067,6 +1067,62 @@ extract_uniprot_lookup_id <- function(protein_ids) {
   ifelse(is.na(lookup) | lookup == "", protein_ids, lookup)
 }
 
+# ── limma run parameter log ─────────────────────────────────────────────────
+
+#' Format the parameters of a limma run as a block for the session log
+#'
+#' The app's session log (downloaded via "Download Log History") captures
+#' every `message()`, so emitting this block once per successful run makes the
+#' analysis reproducible from the log alone.
+#'
+#' @param p Named list of run parameters; `NULL` entries are shown as "n/a" and
+#'   vectors are collapsed with ", ".
+#' @return Character vector of log lines.
+format_limma_params_log <- function(p) {
+  fmt <- function(x) {
+    if (is.null(x) || length(x) == 0) {
+      return("n/a")
+    }
+    paste(as.character(x), collapse = ", ")
+  }
+  labels <- c(
+    input_file = "Input file",
+    already_log2 = "Input already log2",
+    n_samples = "Samples",
+    samples_per_group = "Samples per condition",
+    n_proteins_input = "Proteins in input",
+    min_valid_pct = "Min. valid values per group (%)",
+    n_proteins_filtered = "Proteins after valid-value filter",
+    regression_method = "lmFit method",
+    imputation = "Imputation",
+    knn_k = "KNN k",
+    downshift = "Downshift for all-NA cells",
+    batch_correction = "Batch correction",
+    normalization = "Normalization",
+    design = "Design",
+    contrasts = "Contrasts",
+    ebayes_trend = "eBayes trend",
+    n_trend_excluded = "Proteins excluded (unestimable, trend fit)",
+    p_adjust = "P-value adjustment",
+    sig_fdr = "Significance FDR",
+    sig_lfc = "Minimum |log2FC|",
+    mdd_target_power = "Conditional MDD target power",
+    limma_version = "limma version"
+  )
+  keys <- intersect(names(labels), names(p))
+  width <- max(nchar(labels[keys]))
+  c(
+    "=== PwrQuant limma parameters ===",
+    sprintf(
+      "  %-*s : %s",
+      width,
+      labels[keys],
+      vapply(p[keys], fmt, character(1))
+    ),
+    "================================="
+  )
+}
+
 # ── clusterProfiler GO enrichment (per-contrast enrichGO) helpers ───────────
 
 # Complete set of Bioconductor OrgDb (org.*) annotation packages that can be
@@ -1707,7 +1763,7 @@ PwrQuant_sidebar_ui <- function(id) {
           "scale",
           "quantile",
           "cyclicloess",
-          "TMM (edgeR)"
+          "TMM (edgeR)" = "TMM"
         ),
         selected = "cyclicloess"
       ),
@@ -3564,6 +3620,7 @@ PwrQuant_server <- function(id) {
         group_labels <- meta$Condition[match(colnames(raw), meta$Sample)]
         batch_labels <- meta$Batch[match(colnames(raw), meta$Sample)]
         log2_matrix <- log2_input()
+        n_proteins_input <- nrow(log2_matrix)
 
         # 1b. Groupwise missing value filter
         min_pct <- input$min_valid_pct
@@ -3645,6 +3702,7 @@ PwrQuant_server <- function(id) {
 
         # 3. Batch Correction
         n_batches <- length(unique(batch_labels))
+        combat_failed <- FALSE
         if (n_batches > 1) {
           incProgress(0.35, detail = "Calculating ComBat batch correction")
           batch_obj <- tryCatch(
@@ -3658,6 +3716,7 @@ PwrQuant_server <- function(id) {
               )
             },
             error = function(e) {
+              combat_failed <<- TRUE
               warning(
                 "ComBat failed or invalid NA structure: bypassing ComBat correction: ",
                 e$message
@@ -3751,11 +3810,13 @@ PwrQuant_server <- function(id) {
 
         use_trend <- as.logical(input$trend_param)
 
+        n_trend_excluded <- 0L
         if (use_trend) {
           # Exclude unestimatable proteins (NA sigma/Amean) to prevent eBayes trend calculation crashes
           valid_idx <- which(
             !is.na(contrast_fit$sigma) & !is.na(contrast_fit$Amean)
           )
+          n_trend_excluded <- nrow(contrast_fit) - length(valid_idx)
           contrast_fit <- contrast_fit[valid_idx, ]
         }
 
@@ -3825,6 +3886,59 @@ PwrQuant_server <- function(id) {
           )
 
         incProgress(1.0, detail = "Complete.")
+
+        # Record the run's parameters in the session log (captured by the
+        # app-level message handler and included in "Download Log History").
+        grp_n <- table(group_labels)
+        message(paste(
+          format_limma_params_log(list(
+            input_file = input$matrix_file$name,
+            already_log2 = already_log2(),
+            n_samples = ncol(log2_matrix),
+            samples_per_group = paste0(names(grp_n), " = ", as.integer(grp_n)),
+            n_proteins_input = n_proteins_input,
+            min_valid_pct = input$min_valid_pct %||% 0,
+            n_proteins_filtered = nrow(log2_matrix),
+            regression_method = reg_method,
+            imputation = if (reg_method == "robust") {
+              paste0(imp_labels[[imp_method]], " (groupwise)")
+            } else {
+              "none (NAs handled by lmFit)"
+            },
+            knn_k = if (reg_method == "robust") attr(imputed_matrix, "knn_k"),
+            downshift = if (reg_method == "robust") {
+              sprintf(
+                "rnorm(mean = global min - 1 = %.3f, sd = 0.3), seed 123",
+                global_min - 1
+              )
+            },
+            batch_correction = if (n_batches <= 1) {
+              "none (single batch)"
+            } else if (combat_failed) {
+              sprintf("ComBat failed and was bypassed (%d batches)", n_batches)
+            } else {
+              sprintf(
+                "sva::ComBat, parametric prior, mod = NULL (%d batches)",
+                n_batches
+              )
+            },
+            normalization = norm_meth,
+            design = paste0(
+              "~ 0 + condition [",
+              paste(colnames(design), collapse = ", "),
+              "]"
+            ),
+            contrasts = clean_contrasts,
+            ebayes_trend = use_trend,
+            n_trend_excluded = n_trend_excluded,
+            p_adjust = "BH",
+            sig_fdr = sig_fdr,
+            sig_lfc = sig_lfc,
+            mdd_target_power = 0.80,
+            limma_version = as.character(utils::packageVersion("limma"))
+          )),
+          collapse = "\n"
+        ))
 
         list(
           log2_mat = log2_matrix,
