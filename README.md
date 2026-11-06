@@ -58,9 +58,9 @@
 
 | Requirement | Minimum | Recommended |
 |---|---|---|
-| **R** | 4.2.0 | 4.5.0+ |
+| **R** | 4.6.x (required by the pinned package set) | 4.6.x |
 | **OS** | Windows 10, macOS, Linux | Latest stable release |
-| **RAM** | 8 GB | 16 GB+ (large DIA datasets) |
+| **RAM** | 8 GB | 16 GB+ (for large DIA datasets) |
 | **Browser** | Any modern browser | Chrome / Firefox / Safari |
 
 > [!IMPORTANT]
@@ -68,7 +68,13 @@
 
 ### R package dependencies
 
-proteOmni auto-installs all required packages on first launch via boostrap.R script. The key dependencies are:
+proteOmni auto-installs all required packages on first launch via the `bootstrap.R` script. No virtual environment or extra tooling is involved: packages go into your normal R library.
+
+**Pinned versions.** Every package version (including indirect dependencies) is fixed in `proteOmni.lock`. Packages are downloaded from a dated [Posit Package Manager](https://packagemanager.posit.co) snapshot (CRAN + Bioconductor, as pre-built binaries on Windows and macOS), and `diann` from a fixed GitHub commit. On each launch, `bootstrap.R` checks your library against the lock and reinstalls any package whose version differs. This can downgrade or upgrade packages you also use outside proteOmni. If you update such a package for other work, proteOmni will restore its pinned version the next time it starts. The snapshot date is recorded in `Session_Info_log.txt`.
+
+> **Maintainers:** to move to newer package versions, run `Rscript tools/update_lockfile.R <YYYY-MM-DD>` from the `app/` folder. Then run `source("bootstrap.R")` in a fresh R session, test the app, and commit the new `proteOmni.lock`. To add or remove a dependency, edit the lists at the top of `tools/update_lockfile.R`; never edit the lockfile by hand.
+
+The key dependencies are:
 
 **CRAN packages:** `shiny`, `shinydashboard`, `shinyjs`, `fresh`, `devtools`, `tidyverse`, `tidytext`, `janitor`, `ggpointdensity`, `ggtext`, `ggrepel`, `ggseqlogo`, `ggsci`, `lsa`, `vegan`, `plotly`, `viridis`, `RColorBrewer`, `ggfortify`, `seqinr`, `zip`, `DT`, `colourpicker`, `R6`, `gridExtra`, `scales`, `lavaan`, `naniar`, `patchwork`, `missForest`, `data.table`, `GGally`, `arrow`, `httr`, `jsonlite`, `BiocManager`
 
@@ -76,7 +82,7 @@ proteOmni auto-installs all required packages on first launch via boostrap.R scr
 
 > The power analysis is implemented directly against limma's empirical Bayes objects and the non-central *t* distribution in base R, so the `pwr` package is **not** a dependency anymore. See [Step 7](#step-7--power-analysis--minimum-detectable-difference-mdd) for why a textbook power calculation does not apply here.
 
-**OrgDb annotation packages (auto-installed on demand):** the organism selected in the PwrQuant *GO Enrichment* dropdown determines which Bioconductor `org.*` package is required (e.g. `org.Hs.eg.db` for human, `org.Mm.eg.db` for mouse). proteOmni installs the matching package via `BiocManager` the first time that organism is used. 20 organisms are supported — see [Step 9](#step-9--functional-enrichment-ora-with-clusterprofiler).
+**OrgDb annotation packages (auto-installed on demand):** the organism selected in the PwrQuant *GO Enrichment* dropdown determines which Bioconductor `org.*` package is required (e.g. `org.Hs.eg.db` for human, `org.Mm.eg.db` for mouse). proteOmni installs the matching package (at the version pinned in `proteOmni.lock`) the first time that organism is used. 20 organisms are supported — see [Step 9](#step-9--functional-enrichment-ora-with-clusterprofiler).
 
 **GitHub packages:** `diann` ([vdemichev/diann-rpackage](https://github.com/vdemichev/diann-rpackage))
 
@@ -114,7 +120,7 @@ cd /path/to/proteOmni/app
 Rscript run.R
 ```
 
-> **First launch note:** On the first run, `run.R` sources `bootstrap.R`, which checks for and installs any missing packages (including Shiny itself) before the app starts. This may take several minutes. Subsequent launches are fast.
+> **First launch note:** On the first run, `run.R` sources `bootstrap.R`, which installs every package at its pinned version (including Shiny itself) before the app starts. This may take several minutes. Subsequent launches are fast.
 
 > Always start proteOmni through `run.R`. Calling `shiny::runApp("proteOmni.R")` directly fails on a fresh R installation, because R has to load the `shiny` package before it ever reads the app file. If you only want to install dependencies without launching the app, run `Rscript -e 'source("bootstrap.R")'`.
 
@@ -128,7 +134,10 @@ Rscript run.R
 ```
 proteOmni/
 ├── run.R                        # Launch script (sources bootstrap.R, then starts the app)
-├── bootstrap.R                  # Checks for and installs missing packages
+├── bootstrap.R                  # Installs packages at the versions pinned in proteOmni.lock
+├── proteOmni.lock               # Pinned package versions (generated, do not edit)
+├── tools/
+│   └── update_lockfile.R        # Maintainers: regenerate proteOmni.lock
 ├── proteOmni.r                  # Main app file (UI + server, sources all modules)
 ├── proteOmni_MacOS.command      # One-click launcher for macOS / Linux
 ├── proteOmni_Windows.bat        # One-click launcher for Windows
