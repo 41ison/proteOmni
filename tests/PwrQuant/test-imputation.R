@@ -20,16 +20,33 @@ test_that("MinProb fills every gap, keeps observed values, and draws low", {
   expect_false(anyNA(out))
   expect_identical(out[observed], imp_input[observed])
 
-  # Draws come from mean - 1.8 SD of the protein's own group values, so they
-  # should sit below the observed group mean almost always.
-  below <- c()
-  for (g in unique(pq_groups)) {
-    cols <- pq_groups == g
-    grp_mean <- rowMeans(imp_input[, cols], na.rm = TRUE)
-    miss <- which(!observed[, cols], arr.ind = TRUE)
-    below <- c(below, out[, cols][miss] < grp_mean[miss[, "row"]])
+  # Sample-wise: draws come from N(mean - 1.8 SD, 0.3 SD) of each sample's own
+  # observed values, so they sit well below that sample's mean.
+  for (j in seq_len(ncol(imp_input))) {
+    col_obs <- imp_input[observed[, j], j]
+    draws <- out[!observed[, j], j]
+    if (!length(draws)) {
+      next
+    }
+    expect_true(all(draws < mean(col_obs)))
+    expect_lt(
+      abs(mean(draws) - (mean(col_obs) - 1.8 * sd(col_obs))),
+      0.5 * sd(col_obs)
+    )
   }
-  expect_gt(mean(below), 0.95)
+})
+
+test_that("MinProb draws do not depend on the protein's own values", {
+  # Shifting one protein's observed values must not move its imputed draws.
+  row <- which(rowSums(!observed) > 0)[1]
+  shifted <- imp_input
+  shifted[row, ] <- shifted[row, ] + 5
+  set.seed(5108)
+  a <- groupwise_imputation(imp_input, pq_groups, "minprob", verbose = FALSE)
+  set.seed(5108)
+  b <- groupwise_imputation(shifted, pq_groups, "minprob", verbose = FALSE)
+  miss <- !observed[row, ]
+  expect_equal(a[row, miss], b[row, miss], tolerance = 0.05)
 })
 
 test_that("MinProb is reproducible under a seed", {
@@ -60,6 +77,20 @@ test_that("MinProb leaves rows that are all-NA within a group as NA", {
   expect_false(anyNA(out["A0A0U1RRL7", pq_groups == "m1"]))
 })
 
+test_that("KNN and missForest also leave all-NA-within-group rows as NA", {
+  skip_if_not_installed("impute")
+  skip_if_not_installed("missForest")
+  x <- rbind(pq_log2["A0A0U1RRL7", , drop = FALSE], imp_input[1:60, ])
+  set.seed(6620)
+  for (m in c("knn", "missforest")) {
+    out <- suppressWarnings(
+      groupwise_imputation(x, pq_groups, method = m, verbose = FALSE)
+    )
+    expect_true(all(is.na(out["A0A0U1RRL7", pq_groups == "m0"])))
+    expect_false(anyNA(out[-1, ]))
+  }
+})
+
 test_that("KNN imputation fills gaps and keeps observed values", {
   skip_if_not_installed("impute")
   out <- groupwise_imputation(
@@ -71,6 +102,32 @@ test_that("KNN imputation fills gaps and keeps observed values", {
   expect_false(anyNA(out))
   expect_equal(out[observed], imp_input[observed])
   expect_equal(dimnames(out), dimnames(imp_input))
+})
+
+test_that("KNN k is chosen by cross-validation, reproducibly, without touching the RNG", {
+  skip_if_not_installed("impute")
+  set.seed(2207)
+  before <- .Random.seed
+  k1 <- select_knn_k(imp_input, pq_groups)
+  expect_identical(.Random.seed, before)
+  expect_identical(select_knn_k(imp_input, pq_groups), k1)
+  expect_true(k1 %in% c(3L, 5L, 8L, 10L, 15L, 20L))
+
+  out <- groupwise_imputation(imp_input, pq_groups, "knn", verbose = FALSE)
+  expect_identical(attr(out, "knn_k"), k1)
+  fixed <- groupwise_imputation(
+    imp_input,
+    pq_groups,
+    "knn",
+    verbose = FALSE,
+    knn_k = 7
+  )
+  expect_identical(attr(fixed, "knn_k"), 7L)
+})
+
+test_that("KNN k is bounded by the number of proteins, not samples", {
+  skip_if_not_installed("impute")
+  expect_identical(select_knn_k(imp_input[1:4, ], pq_groups), 3L)
 })
 
 test_that("BPCA imputation fills gaps and keeps observed values", {
