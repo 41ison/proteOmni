@@ -548,3 +548,71 @@ protein_coverage <- function(prot_seq, peptides, counts = NULL) {
   }
   list(depth = depth, mask = mask, n_unmapped = n_unmapped)
 }
+
+# Function to extract the protein abundace matrix from the output of the DIA-NN pipeline
+
+extract_diann_matrix <- function(
+  x,
+  id.header = "Genes",
+  quantity.header = "Genes.MaxLFQ.Unique",
+  proteotypic.only = FALSE,
+  q = 0.01,
+  protein.q = 0.01,
+  pg.q = 0.01,
+  gg.q = 0.01
+) {
+  df <- as.data.frame(x, stringsAsFactors = FALSE)
+
+  # 1. Filter by proteotypic status if requested
+  if (proteotypic.only) {
+    df <- df[which(df[["Proteotypic"]] != 0), , drop = FALSE]
+  }
+
+  # 2. Filter by validity, positive quantity, and Q-value thresholds
+  keep <- which(
+    !is.na(df[[id.header]]) &
+      df[[id.header]] != "" &
+      !is.na(df[[quantity.header]]) &
+      df[[quantity.header]] > 0 &
+      df[["Q.Value"]] <= q &
+      df[["Protein.Q.Value"]] <= protein.q &
+      df[["PG.Q.Value"]] <= pg.q &
+      df[["GG.Q.Value"]] <= gg.q
+  )
+
+  df <- unique(df[keep, c("Run", id.header, quantity.header), drop = FALSE])
+
+  if (nrow(df) == 0) {
+    return(matrix(numeric(0), nrow = 0, ncol = 0))
+  }
+
+  # 3. Check for duplicate (Run + ID) combinations
+  is_duplicated <- any(duplicated(paste0(df[["Run"]], ":", df[[id.header]])))
+  ids <- sort(unique(df[[id.header]]))
+  files <- sort(unique(df[["Run"]]))
+
+  # 4. Pivot to wide matrix (Rows = IDs, Columns = Run)
+  if (is_duplicated) {
+    warning(
+      "Multiple quantities per id: the maximum of these will be calculated"
+    )
+
+    row_fac <- factor(df[[id.header]], levels = ids)
+    col_fac <- factor(df[["Run"]], levels = files)
+    mat <- tapply(df[[quantity.header]], list(row_fac, col_fac), FUN = max)
+    attr(mat, "dimnames") <- list(ids, files)
+  } else {
+    mat <- matrix(
+      NA_real_,
+      nrow = length(ids),
+      ncol = length(files),
+      dimnames = list(ids, files)
+    )
+    row_idx <- match(df[[id.header]], ids)
+    col_idx <- match(df[["Run"]], files)
+
+    mat[cbind(row_idx, col_idx)] <- df[[quantity.header]]
+  }
+
+  return(mat)
+}
