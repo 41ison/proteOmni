@@ -15,7 +15,6 @@ library(shiny)
 library(shinydashboard)
 library(shinyjs)
 library(fresh)
-library(diann)
 library(arrow)
 library(tidyverse)
 library(tidytext)
@@ -96,7 +95,6 @@ writeLines(
   "Biostrings",
   "lavaan",
   "arrow",
-  "diann",
   "ggsci"
 )
 for (.pkg in .omni_pkgs) {
@@ -794,7 +792,6 @@ server <- function(input, output, session) {
       enc_tab = EncyclopeDIA_sidebar_ui("enc"),
       sag_tab = Sage_sidebar_ui("sag"),
       mqt_tab = MaxQuantMSMS_sidebar_ui("mqt"),
-      # The documentation tab is static and needs no controls of its own.
       doc_tab = tags$div(
         style = "padding:16px;color:#adb5bd;font-size:13px;",
         icon("book", style = "margin-right:6px;"),

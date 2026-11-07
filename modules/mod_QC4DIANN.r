@@ -592,7 +592,7 @@ QC4DIANN_server <- function(id) {
         input$id_header
       }
       req(id_header %in% names(data()))
-      diann::diann_matrix(
+      extract_diann_matrix(
         as.data.frame(data()),
         id.header = id_header,
         quantity.header = "Genes.MaxLFQ.Unique",
@@ -621,7 +621,7 @@ QC4DIANN_server <- function(id) {
         as.data.frame(check.names = FALSE) %>%
         tidyr::gather("Sample", "Intensity") %>%
         dplyr::mutate(norm = "MAD normalised")
-      dplyr::bind_rows(raw, mad) %>%
+        dplyr::bind_rows(raw, mad) %>%
         dplyr::mutate(
           norm = factor(norm, levels = c("Raw matrix", "MAD normalised"))
         )
