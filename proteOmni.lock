@@ -410,15 +410,6 @@ Repository: CRAN
 Direct: yes
 Optional: no
 
-Package: diann
-Version: 1.0.1
-Source: GitHub
-RemoteUsername: vdemichev
-RemoteRepo: diann-rpackage
-RemoteSha: af538f6e2cd5ab715e1381632e17cb8f234ebf53
-Direct: yes
-Optional: no
-
 Package: diffobj
 Version: 0.3.8
 Source: CRAN
