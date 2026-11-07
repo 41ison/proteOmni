@@ -84,8 +84,6 @@ The key dependencies are:
 
 **OrgDb annotation packages (auto-installed on demand):** the organism selected in the PwrQuant *GO Enrichment* dropdown determines which Bioconductor `org.*` package is required (e.g. `org.Hs.eg.db` for human, `org.Mm.eg.db` for mouse). proteOmni installs the matching package (at the version pinned in `proteOmni.lock`) the first time that organism is used. 20 organisms are supported — see [Step 9](#step-9--functional-enrichment-ora-with-clusterprofiler).
 
-**GitHub packages:** `diann` ([vdemichev/diann-rpackage](https://github.com/vdemichev/diann-rpackage))
-
 ---
 
 ## Installation & Launch
