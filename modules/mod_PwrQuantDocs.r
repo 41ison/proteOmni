@@ -372,13 +372,13 @@ PwrQuantDocs_body_ui <- function(id) {
                 c(
                   "<code>knn</code>",
                   "MAR",
-                  "Fills a gap in a sample with the mean of the values the k most similar proteins (similarity measured over the group's samples) have in that same sample. k counts proteins, not samples, and is chosen per dataset by hiding 5% of the observed values and keeping the k (3&ndash;20) that reconstructs them best. With few replicates its neighbours are matched on only 2&ndash;3 samples, so under heavy dropout it is conservative and loses power; see the warning below.",
+                  "Fills a gap in a sample with the mean of the values the k most similar proteins (similarity measured over the group's samples) have in that same sample. k counts proteins, not samples, and is chosen per dataset by hiding 5% of the observed values and keeping the k (3&ndash;20) that reconstructs them best. A protein observed only once in a group is still matched to neighbours, on that single sample, so its gaps are filled from proteins of similar abundance. With few replicates its neighbours are matched on only 2&ndash;3 samples, so under heavy dropout it is conservative and loses power; see the warning below.",
                   "Fast"
                 ),
                 c(
                   "<code>missforest</code>",
                   "MAR",
-                  "Random-forest imputation, one forest per sample, predicting it from the other samples of the same group with proteins as observations.",
+                  "Random-forest imputation, one forest per sample, predicting it from the other samples of the same group with proteins as observations. A gap is therefore predicted from the protein's own values in its other replicates.",
                   "Moderate"
                 ),
                 c(
@@ -450,9 +450,9 @@ PwrQuantDocs_body_ui <- function(id) {
               " and ",
               tags$code("knn"),
               " stay at or below 5% but lose a lot of power. Their filled values ",
-              "are not tied to the protein's own level: ",
+              "are tied weakly or not at all to the protein's own level: ",
               tags$code("minprob"),
-              " uses the sample's detection limit and ",
+              " ignores it and uses the sample's detection limit, and ",
               tags$code("knn"),
               " uses neighbours found on only 2\u20133 shared samples, so they add ",
               "noise to the residual variance. The choice of k made no ",
@@ -479,7 +479,9 @@ PwrQuantDocs_body_ui <- function(id) {
               "."
             ),
             tags$p(
-              "The groupwise methods deliberately leave a protein's values ",
+              "Every method except ",
+              tags$code("bpca"),
+              " deliberately leaves a protein's values ",
               "missing in any group where it was never observed. Those values ",
               "are filled from ",
               tags$code("N(global min \u2212 1, 0.3)"),
@@ -494,11 +496,24 @@ PwrQuantDocs_body_ui <- function(id) {
             ),
             pq_note(
               "All four methods are sample-wise: each sample is treated as a ",
-              "variable and the proteins as its observations, so a filled ",
-              "value is derived from the sample it belongs to rather than from ",
-              "the protein's other replicates. Groupwise imputation (all ",
-              "methods except BPCA) additionally fills each ",
-              "condition using only its own samples. This avoids leaking ",
+              "variable and the proteins as its observations, so the work is ",
+              "done once per sample across thousands of proteins rather than ",
+              "once per protein across a few replicates, and a filled value is ",
+              "on the scale of the sample it lands in. Only ",
+              tags$code("minprob"),
+              " is independent of the protein itself; ",
+              tags$code("knn"),
+              ", ",
+              tags$code("missforest"),
+              " and ",
+              tags$code("bpca"),
+              " use the protein's observed values in other samples to choose ",
+              "neighbours or as predictors. ",
+              tags$code("knn"),
+              " and ",
+              tags$code("missforest"),
+              " are also groupwise: each condition is filled using only its ",
+              "own samples. This avoids leaking ",
               "signal across the very contrast you are testing, but it also ",
               "means an all-missing group cannot be recovered."
             ),
