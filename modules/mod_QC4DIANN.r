@@ -474,6 +474,156 @@ QC4DIANN_ui <- function(id) {
             DT::dataTableOutput(ns("mod_diag_table"))
           )
         )
+      ),
+
+      # ── TAB: iBAQ ─────────────────────────────────────────────────────────
+      tabPanel(
+        "iBAQ",
+        fluidRow(uiOutput(ns("ibaq_banner"))),
+        fluidRow(box(
+          title = "iBAQ Controls",
+          status = "primary",
+          solidHeader = TRUE,
+          width = 12,
+          collapsible = TRUE,
+          fluidRow(
+            column(
+              3,
+              selectInput(
+                ns("ibaq_intensity_col"),
+                "Precursor intensity",
+                choices = c("Precursor.Normalised", "Precursor.Quantity")
+              )
+            ),
+            column(
+              2,
+              numericInput(
+                ns("ibaq_min_len"),
+                "Min peptide length",
+                value = 6,
+                min = 1,
+                max = 100,
+                step = 1
+              )
+            ),
+            column(
+              2,
+              numericInput(
+                ns("ibaq_max_len"),
+                "Max peptide length",
+                value = 30,
+                min = 1,
+                max = 100,
+                step = 1
+              )
+            ),
+            column(
+              2,
+              numericInput(
+                ns("ibaq_missed_cleavages"),
+                "Missed cleavages",
+                value = 0,
+                min = 0,
+                max = 3,
+                step = 1
+              )
+            ),
+            column(
+              3,
+              numericInput(
+                ns("ibaq_top_n"),
+                "Top N proteins (bar chart)",
+                value = 20,
+                min = 1,
+                max = 100,
+                step = 1
+              )
+            )
+          ),
+          fluidRow(
+            column(
+              3,
+              numericInput(
+                ns("ibaq_rank_labels"),
+                "Labels per facet (ranked abundance)",
+                value = 5,
+                min = 0,
+                max = 50,
+                step = 1
+              )
+            ),
+            column(
+              3,
+              style = "margin-top:25px;",
+              checkboxInput(
+                ns("ibaq_proteotypic"),
+                "Proteotypic precursors only",
+                value = TRUE
+              )
+            ),
+            column(
+              3,
+              style = "margin-top:25px;",
+              checkboxInput(
+                ns("ibaq_log2"),
+                "log₂(iBAQ + 1) in table / export",
+                value = TRUE
+              )
+            )
+          ),
+          actionButton(
+            ns("run_ibaq"),
+            "Compute iBAQ",
+            icon = icon("calculator"),
+            class = "btn-primary",
+            style = "margin-right:8px;margin-bottom:8px;"
+          ),
+          downloadButton(
+            ns("download_ibaq_table"),
+            tagList(icon("download"), " iBAQ Matrix (.tsv)"),
+            class = "dl-btn",
+            style = "margin-right:8px;margin-bottom:8px;"
+          ),
+          downloadButton(
+            ns("download_all_ibaq_plots"),
+            tagList(icon("file-zipper"), " Download All Plots (.zip)"),
+            class = "dl-btn",
+            style = "margin-bottom:8px;"
+          ),
+          uiOutput(ns("ibaq_summary"))
+        )),
+        fluidRow(box(
+          title = "iBAQ Distribution per Sample",
+          status = "primary",
+          solidHeader = TRUE,
+          width = 12,
+          collapsible = TRUE,
+          plotOutput(ns("ibaq_dist_plot"), height = "500px")
+        )),
+        fluidRow(box(
+          title = "Dynamic Range — Ranked Protein Abundance",
+          status = "primary",
+          solidHeader = TRUE,
+          width = 12,
+          collapsible = TRUE,
+          uiOutput(ns("ibaq_rank_plot_ui"))
+        )),
+        fluidRow(box(
+          title = "Most Abundant Proteins — Relative iBAQ",
+          status = "primary",
+          solidHeader = TRUE,
+          width = 12,
+          collapsible = TRUE,
+          uiOutput(ns("ibaq_top_plot_ui"))
+        )),
+        fluidRow(box(
+          title = "iBAQ Table",
+          status = "primary",
+          solidHeader = TRUE,
+          width = 12,
+          collapsible = TRUE,
+          DT::dataTableOutput(ns("ibaq_table"))
+        ))
       )
     )
   )
@@ -621,7 +771,7 @@ QC4DIANN_server <- function(id) {
         as.data.frame(check.names = FALSE) %>%
         tidyr::gather("Sample", "Intensity") %>%
         dplyr::mutate(norm = "MAD normalised")
-        dplyr::bind_rows(raw, mad) %>%
+      dplyr::bind_rows(raw, mad) %>%
         dplyr::mutate(
           norm = factor(norm, levels = c("Raw matrix", "MAD normalised"))
         )
@@ -2041,6 +2191,268 @@ QC4DIANN_server <- function(id) {
         }
       )
     })
+
+    # ════════════════════════════════════════════════════════════════════════
+    # H2. iBAQ  (compute_ibaq and helpers live in modules/utils_fasta.r)
+    # ════════════════════════════════════════════════════════════════════════
+    output$ibaq_banner <- renderUI({
+      if (is.null(input$fasta_file)) {
+        div(
+          class = "plot-placeholder",
+          icon("circle-info", style = "margin-right:10px;"),
+          "Upload a Protein FASTA file in the sidebar to enable iBAQ calculation."
+        )
+      }
+    })
+
+    # Untransformed iBAQ in long format. Starts from data(), so the sidebar
+    # Q-value and QuantUMS filters already apply; compute_ibaq() adds the
+    # precursor Q.Value and proteotypic filters on top.
+    ibaq_long <- eventReactive(input$run_ibaq, {
+      if (is.null(input$report) || is.null(input$fasta_file)) {
+        showNotification(
+          "Upload a report.parquet and a Protein FASTA to compute iBAQ.",
+          type = "warning"
+        )
+        req(FALSE)
+      }
+      num <- function(x, default) if (isTruthy(x)) as.integer(x) else default
+      min_len <- max(1L, num(input$ibaq_min_len, 6L))
+      max_len <- max(min_len, num(input$ibaq_max_len, 30L))
+      tryCatch(
+        withProgress(message = "Computing iBAQ…", value = 0.3, {
+          compute_ibaq(
+            data(),
+            ibaq_fasta_sequences(fasta_data()),
+            intensity_col = input$ibaq_intensity_col,
+            proteotypic_only = isTRUE(input$ibaq_proteotypic),
+            # PG.MaxLFQ.Quality is controlled by the sidebar slider
+            lfq_quality_cutoff = NULL,
+            min_peptide_len = min_len,
+            max_peptide_len = max_len,
+            max_missed_cleavages = min(
+              3L,
+              max(0L, num(input$ibaq_missed_cleavages, 0L))
+            ),
+            log2_transform = FALSE,
+            output_long = TRUE
+          )
+        }),
+        error = function(e) {
+          showNotification(
+            paste("iBAQ error:", conditionMessage(e)),
+            type = "error",
+            duration = 10
+          )
+          NULL
+        }
+      )
+    })
+
+    ibaq_top_n <- reactive({
+      n <- suppressWarnings(as.integer(input$ibaq_top_n))
+      if (length(n) == 0 || is.na(n)) 20L else max(1L, min(100L, n))
+    })
+
+    # Labels per facet in the ranked-abundance plot; 0 turns labels off
+    ibaq_rank_labels <- reactive({
+      n <- suppressWarnings(as.integer(input$ibaq_rank_labels))
+      if (length(n) == 0 || is.na(n)) 5L else max(0L, min(50L, n))
+    })
+
+    # Per-sample rank and relative iBAQ (riBAQ = share of the sample's total
+    # iBAQ), with a gene label that falls back to the protein ID.
+    ibaq_per_sample <- reactive({
+      d <- ibaq_long()
+      req(d, nrow(d) > 0)
+      labels <- d[!duplicated(d$protein_id), ]
+      lab <- labels$protein_id
+      if ("Genes" %in% names(labels)) {
+        has_gene <- !is.na(labels$Genes) & labels$Genes != ""
+        lab[has_gene] <- labels$Genes[has_gene]
+      }
+      d$label <- make.unique(lab)[match(d$protein_id, labels$protein_id)]
+      d %>%
+        dplyr::group_by(sample) %>%
+        dplyr::mutate(
+          riBAQ = iBAQ / sum(iBAQ) * 100,
+          rank = dplyr::row_number(dplyr::desc(iBAQ))
+        ) %>%
+        dplyr::ungroup()
+    })
+
+    # Facet layout and pixel heights for the per-sample plots
+    IBAQ_RANK_NCOL <- 5L
+    IBAQ_TOP_NCOL <- 4L
+    ibaq_rank_h <- reactive({
+      n <- dplyr::n_distinct(ibaq_per_sample()$sample)
+      max(500L, ceiling(n / IBAQ_RANK_NCOL) * 260L)
+    })
+    ibaq_top_h <- reactive({
+      n <- dplyr::n_distinct(ibaq_per_sample()$sample)
+      max(500L, ceiling(n / IBAQ_TOP_NCOL) * (ibaq_top_n() * 14L + 70L))
+    })
+
+    output$ibaq_rank_plot_ui <- renderUI({
+      plotOutput(ns("ibaq_rank_plot"), height = paste0(ibaq_rank_h(), "px"))
+    })
+    output$ibaq_top_plot_ui <- renderUI({
+      plotOutput(ns("ibaq_top_plot"), height = paste0(ibaq_top_h(), "px"))
+    })
+
+    ibaq_wide <- reactive({
+      d <- ibaq_long()
+      req(d, nrow(d) > 0)
+      if (isTRUE(input$ibaq_log2)) {
+        d$iBAQ <- log2(d$iBAQ + 1)
+      }
+      d %>%
+        dplyr::arrange(sample) %>%
+        tidyr::pivot_wider(names_from = sample, values_from = iBAQ) %>%
+        dplyr::arrange(protein_id)
+    })
+
+    output$ibaq_summary <- renderUI({
+      d <- ibaq_long()
+      req(d)
+      n_unmatched <- length(attr(d, "unmatched_proteins"))
+      tags$p(
+        style = "margin:6px 0 0 0;",
+        icon("circle-info"),
+        sprintf(
+          " iBAQ computed for %s proteins across %s samples.",
+          scales::comma(dplyr::n_distinct(d$protein_id)),
+          dplyr::n_distinct(d$sample)
+        ),
+        if (n_unmatched > 0) {
+          sprintf(
+            " %s protein group(s) were excluded because their Protein.Group ID is not an accession in the FASTA (multi-protein groups, or a FASTA that differs from the search database).",
+            scales::comma(n_unmatched)
+          )
+        }
+      )
+    })
+
+    ibaq_dist_obj <- reactive({
+      d <- ibaq_long()
+      req(d, nrow(d) > 0)
+      ggplot(d, aes(x = sample, y = log2(iBAQ + 1))) +
+        geom_boxplot(fill = pal[["blue2"]], alpha = 0.75) +
+        labs(x = NULL, y = "log₂(iBAQ + 1)") +
+        theme(axis.text.x = element_text(angle = 45, hjust = 1))
+    })
+
+    ibaq_rank_obj <- reactive({
+      s <- ibaq_per_sample()
+      ggplot(s, aes(x = rank, y = log2(iBAQ + 1))) +
+        geom_point(color = pal[["blue1"]], alpha = 0.6, size = 0.8) +
+        ggrepel::geom_text_repel(
+          data = dplyr::filter(s, rank <= ibaq_rank_labels()),
+          aes(label = label),
+          size = 3,
+          max.overlaps = Inf,
+          min.segment.length = 0
+        ) +
+        labs(x = "Protein rank", y = "log₂(iBAQ + 1)") +
+        facet_wrap(~sample, ncol = IBAQ_RANK_NCOL)
+    })
+
+    ibaq_top_obj <- reactive({
+      top <- ibaq_per_sample() %>%
+        dplyr::filter(rank <= ibaq_top_n())
+      ggplot(
+        top,
+        aes(y = tidytext::reorder_within(label, riBAQ, sample), x = riBAQ)
+      ) +
+        geom_col(fill = pal[["blue1"]], alpha = 0.85) +
+        tidytext::scale_y_reordered() +
+        labs(y = NULL, x = "Relative iBAQ (% of sample total)") +
+        facet_wrap(~sample, ncol = IBAQ_TOP_NCOL, scales = "free_y")
+    })
+
+    output$ibaq_dist_plot <- renderPlot({
+      ibaq_dist_obj()
+    })
+    output$ibaq_rank_plot <- renderPlot({
+      ibaq_rank_obj()
+    })
+    output$ibaq_top_plot <- renderPlot({
+      ibaq_top_obj()
+    })
+
+    output$ibaq_table <- DT::renderDT(
+      {
+        tbl <- ibaq_wide()
+        DT::datatable(
+          tbl,
+          rownames = FALSE,
+          filter = "top",
+          options = list(pageLength = 20, scrollX = TRUE)
+        ) %>%
+          DT::formatRound(
+            columns = unique(ibaq_long()$sample),
+            digits = 2
+          )
+      },
+      server = TRUE
+    )
+
+    output$download_ibaq_table <- downloadHandler(
+      filename = function() {
+        paste0(
+          if (isTRUE(input$ibaq_log2)) "log2_" else "",
+          "iBAQ_matrix_",
+          Sys.Date(),
+          ".tsv"
+        )
+      },
+      content = function(file) {
+        data.table::fwrite(ibaq_wide(), file = file, sep = "\t", na = "NA")
+      }
+    )
+
+    output$download_all_ibaq_plots <- downloadHandler(
+      filename = function() {
+        paste0("QC4DIANN_iBAQ_plots_", Sys.Date(), ".zip")
+      },
+      content = function(file) {
+        td <- tempdir()
+        fps <- character()
+        save_p <- function(nm, fn, w = 10, h = 8) {
+          fp <- file.path(td, nm)
+          tryCatch(
+            {
+              if (save_plot_obj(fp, fn(), w, h)) fps <<- c(fps, fp)
+            },
+            error = function(e) message("Skip ", nm, ": ", conditionMessage(e))
+          )
+        }
+
+        withProgress(message = "Saving plots...", value = 0, {
+          save_p("iBAQ_distribution.png", function() ibaq_dist_obj(), w = 12)
+          incProgress(1 / 3)
+          # Same proportions as on screen (px / 80), capped for ggsave
+          save_p(
+            "iBAQ_ranked_abundance.png",
+            function() ibaq_rank_obj(),
+            w = 16,
+            h = min(45, ibaq_rank_h() / 80)
+          )
+          incProgress(1 / 3)
+          save_p(
+            "iBAQ_top_proteins.png",
+            function() ibaq_top_obj(),
+            w = 16,
+            h = min(45, ibaq_top_h() / 80)
+          )
+          incProgress(1 / 3)
+        })
+
+        req(length(fps) > 0)
+        utils::zip(file, files = fps, flags = "-j")
+      },
+      contentType = "application/zip"
+    )
 
     # ════════════════════════════════════════════════════════════════════════
     # I. DOWNLOADS
