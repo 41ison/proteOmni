@@ -544,6 +544,7 @@ Every proteOmni session automatically writes a log file (`Session_Info_log.txt`)
 - Platform information
 - Installed package versions for all key dependencies
 - All R `message()` and `warning()` calls with timestamps
+- For PwrQuant, one entry per **Start limma** press: the limma parameters used and the sample metadata assignment (sample, display name, condition, batch, removed samples), or the reason the run did not start
 
 The log file can be downloaded at any time using the **Download Log History** button at the top of the sidebar. This is useful for reproducing analyses and reporting issues.
 
