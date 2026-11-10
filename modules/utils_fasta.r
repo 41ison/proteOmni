@@ -616,3 +616,204 @@ extract_diann_matrix <- function(
 
   return(mat)
 }
+
+# ── iBAQ from a DIA-NN report ─────────────────────────────────────────────────
+# Ported from the iBAQ_for_diann reference script (iBAQ_from_DIANN.R) so the
+# app does not need it as a package dependency.
+#   iBAQ = summed precursor intensity of a protein in a run /
+#          number of theoretically observable peptides of that protein
+# Schwanhäusser et al. (2011) Nature 473:337-342.
+
+# Accession for each FASTA header: the second '|' field of UniProt-style
+# headers ("sp|P02769|ALBU_BOVIN ..."), otherwise the first word.
+fasta_accessions <- function(headers) {
+  first <- sub("\\s.*$", "", trimws(sub("^>", "", headers)))
+  uniprot <- grepl("^[a-z]{2}\\|[^|]+\\|", first)
+  first[uniprot] <- sub("^[a-z]{2}\\|([^|]+)\\|.*$", "\\1", first[uniprot])
+  first
+}
+
+# Named character vector (accession -> sequence) from a FASTA path or from an
+# already-parsed FASTA (seqinr::read.fasta() list, read_fasta_custom() vector).
+ibaq_fasta_sequences <- function(fasta) {
+  if (is.character(fasta) && length(fasta) == 1 && is.null(names(fasta))) {
+    fasta <- read_fasta_custom(fasta)
+  }
+  seqs <- vapply(fasta, fasta_seq_normalize, character(1), USE.NAMES = FALSE)
+  names(seqs) <- fasta_accessions(names(fasta))
+  seqs[!duplicated(names(seqs))]
+}
+
+# Number of in-silico peptides within [min_len, max_len] for each sequence.
+# Peptide lengths with missed cleavages are sums of consecutive fragment
+# lengths, so nothing has to be pasted together. NA for empty sequences.
+count_theoretical_peptides <- function(
+  sequences,
+  protease_regex = "(?<=[KR])(?!P)",
+  min_len = 6,
+  max_len = 30,
+  max_missed = 0
+) {
+  fragments <- strsplit(as.character(sequences), protease_regex, perl = TRUE)
+  counts <- vapply(
+    fragments,
+    function(fr) {
+      len <- nchar(fr)
+      len <- len[!is.na(len) & len > 0]
+      n <- length(len)
+      if (n == 0) {
+        return(NA_integer_)
+      }
+      ends <- c(0L, cumsum(len))
+      total <- 0L
+      for (mc in 0:max_missed) {
+        if (n - mc < 1) {
+          break
+        }
+        pep_len <- ends[(mc + 2):(n + 1)] - ends[seq_len(n - mc)]
+        total <- total + sum(pep_len >= min_len & pep_len <= max_len)
+      }
+      as.integer(total)
+    },
+    integer(1)
+  )
+  names(counts) <- names(sequences)
+  counts
+}
+
+build_theoretical_peptide_counts <- function(sequences, ...) {
+  counts <- count_theoretical_peptides(sequences, ...)
+  tibble::tibble(
+    protein_id = names(counts),
+    n_theoretical_peptides = unname(counts)
+  )
+}
+
+# Quality filters for a DIA-NN report. A NULL cutoff (or a column absent from
+# the report) skips that filter.
+filter_diann_report <- function(
+  report,
+  q_value_cutoff = 0.01,
+  pg_q_value_cutoff = 0.01,
+  lib_pg_q_value_cutoff = 0.01,
+  proteotypic_only = TRUE,
+  lfq_quality_cutoff = 0.50
+) {
+  keep <- rep(TRUE, nrow(report))
+  at_most <- function(col, cutoff) {
+    if (!is.null(cutoff) && col %in% names(report)) {
+      keep <<- keep & !is.na(report[[col]]) & report[[col]] <= cutoff
+    }
+  }
+  at_most("Q.Value", q_value_cutoff)
+  at_most("PG.Q.Value", pg_q_value_cutoff)
+  at_most("Lib.PG.Q.Value", lib_pg_q_value_cutoff)
+  if (isTRUE(proteotypic_only) && "Proteotypic" %in% names(report)) {
+    keep <- keep & !is.na(report$Proteotypic) & report$Proteotypic == 1
+  }
+  if (
+    !is.null(lfq_quality_cutoff) &&
+      lfq_quality_cutoff > 0 &&
+      "PG.MaxLFQ.Quality" %in% names(report)
+  ) {
+    keep <- keep &
+      !is.na(report$PG.MaxLFQ.Quality) &
+      report$PG.MaxLFQ.Quality >= lfq_quality_cutoff
+  }
+  report[keep, , drop = FALSE]
+}
+
+# iBAQ per protein and run.
+#   report    : DIA-NN report data frame (e.g. from arrow::read_parquet()).
+#   sequences : named sequences from ibaq_fasta_sequences().
+# Returns a tibble, wide (one column per run) or long (sample, iBAQ). Protein
+# groups whose ID is not a FASTA accession (e.g. "P1;P2" groups, or a FASTA
+# that differs from the search database) are dropped; they are listed in the
+# "unmatched_proteins" attribute of the result.
+compute_ibaq <- function(
+  report,
+  sequences,
+  intensity_col = "Precursor.Normalised",
+  q_value_cutoff = 0.01,
+  pg_q_value_cutoff = 0.01,
+  lib_pg_q_value_cutoff = 0.01,
+  proteotypic_only = TRUE,
+  lfq_quality_cutoff = 0.50,
+  protease_regex = "(?<=[KR])(?!P)",
+  min_peptide_len = 6,
+  max_peptide_len = 30,
+  max_missed_cleavages = 0,
+  log2_transform = TRUE,
+  output_long = FALSE,
+  id_col = "Protein.Group"
+) {
+  report <- as.data.frame(report, stringsAsFactors = FALSE)
+  missing_cols <- setdiff(c(id_col, "Run", intensity_col), names(report))
+  if (length(missing_cols) > 0) {
+    stop(
+      "Missing required columns in the DIA-NN report: ",
+      paste(missing_cols, collapse = ", ")
+    )
+  }
+
+  report <- filter_diann_report(
+    report,
+    q_value_cutoff = q_value_cutoff,
+    pg_q_value_cutoff = pg_q_value_cutoff,
+    lib_pg_q_value_cutoff = lib_pg_q_value_cutoff,
+    proteotypic_only = proteotypic_only,
+    lfq_quality_cutoff = lfq_quality_cutoff
+  )
+  if (nrow(report) == 0) {
+    stop("No rows passed the quality filters; relax the filter thresholds.")
+  }
+
+  annot_cols <- intersect(c("Protein.Names", "Genes"), names(report))
+  annot <- report[!duplicated(report[[id_col]]), c(id_col, annot_cols)]
+  names(annot)[1] <- "protein_id"
+
+  intensity <- data.frame(
+    Run = report$Run,
+    protein_id = report[[id_col]],
+    intensity = report[[intensity_col]]
+  ) |>
+    group_by(Run, protein_id) |>
+    summarise(sum_intensity = sum(intensity, na.rm = TRUE), .groups = "drop")
+
+  theo <- build_theoretical_peptide_counts(
+    sequences,
+    protease_regex = protease_regex,
+    min_len = min_peptide_len,
+    max_len = max_peptide_len,
+    max_missed = max_missed_cleavages
+  )
+  unmatched <- setdiff(unique(intensity$protein_id), theo$protein_id)
+
+  ibaq <- intensity |>
+    inner_join(theo, by = "protein_id") |>
+    left_join(annot, by = "protein_id") |>
+    # Proteins without any observable peptide would divide by zero
+    filter(!is.na(n_theoretical_peptides), n_theoretical_peptides > 0) |>
+    mutate(iBAQ = sum_intensity / n_theoretical_peptides)
+  if (isTRUE(log2_transform)) {
+    ibaq$iBAQ <- log2(ibaq$iBAQ + 1)
+  }
+
+  id_cols <- c("protein_id", annot_cols, "n_theoretical_peptides")
+  out <- ibaq |>
+    select(all_of(c(id_cols, "Run", "iBAQ")))
+  out <- if (isTRUE(output_long)) {
+    out |> rename(sample = Run) |> arrange(protein_id, sample)
+  } else {
+    out |>
+      arrange(Run) |>
+      pivot_wider(
+        id_cols = all_of(id_cols),
+        names_from = Run,
+        values_from = iBAQ
+      ) |>
+      arrange(protein_id)
+  }
+  attr(out, "unmatched_proteins") <- unmatched
+  out
+}
