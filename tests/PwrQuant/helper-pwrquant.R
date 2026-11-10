@@ -82,11 +82,8 @@ fit_pwrquant <- function(
 ) {
   design_groups <- factor(group_labels)
   design <- stats::model.matrix(~ 0 + design_groups)
-  colnames(design) <- str_remove(colnames(design), "design_groups")
-  contrast_matrix <- limma::makeContrasts(
-    contrasts = contrasts,
-    levels = design
-  )
+  colnames(design) <- levels(design_groups)
+  contrast_matrix <- build_contrast_matrix(contrasts, colnames(design))
   fit <- limma::lmFit(as.matrix(log2_mat), design, method = method)
   cfit <- limma::contrasts.fit(fit, contrast_matrix)
   if (trend) {
