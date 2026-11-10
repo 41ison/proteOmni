@@ -161,8 +161,10 @@ tmm_normalize_log2 <- function(
   out
 }
 
-# Groupwise KNN core. Proteins entirely missing within a group are skipped and
-# stay NA. Errors propagate so the caller can fall back.
+# Groupwise KNN core: impute.knn on each group's proteins x samples block, so
+# neighbours are proteins and each gap is filled from its own sample column.
+# Proteins entirely missing within a group are skipped and stay NA. Errors
+# propagate so the caller can fall back.
 knn_impute_groupwise <- function(data, group_labels, k, verbose = FALSE) {
   imputed <- data
   for (group in unique(group_labels)) {
@@ -180,12 +182,15 @@ knn_impute_groupwise <- function(data, group_labels, k, verbose = FALSE) {
     # impute.knn writes cluster traces straight to stdout. Silence them unless
     # asked: the MDD simulation imputes hundreds of matrices and would
     # otherwise flood the console and the Shiny log.
+    # rowmax = 1 keeps every retained protein on the KNN path. At the default
+    # (0.5) a protein observed in under half of the group's samples, e.g. 1 of
+    # 3, is filled with the sample mean, far above where such proteins sit.
     knn_out <- NULL
     if (verbose) {
-      knn_out <- impute::impute.knn(g_mat, k = k_use)$data
+      knn_out <- impute::impute.knn(g_mat, k = k_use, rowmax = 1)$data
     } else {
       utils::capture.output(
-        knn_out <- impute::impute.knn(g_mat, k = k_use)$data
+        knn_out <- impute::impute.knn(g_mat, k = k_use, rowmax = 1)$data
       )
     }
     imputed[keep_rows, g_cols] <- knn_out
@@ -265,16 +270,28 @@ select_knn_k <- function(
   }
   k_grid[which.min(mse)]
 }
-# All methods are sample-wise: each sample (column) is a variable and the
-# proteins (rows) are its observations, so every filled value is derived from
-# the sample it belongs to, never from the protein's own replicate values.
+# All methods are sample-wise: samples (columns) are the variables and proteins
+# (rows) are the observations. Work is done per sample over thousands of
+# proteins rather than per protein over a few replicates, and every filled
+# value is on the scale of the sample it lands in. What a fill depends on
+# differs by method:
+#   minprob    - the sample's own distribution only; independent of the protein.
+#   knn        - the same sample's values in neighbouring proteins; the
+#                protein's observed replicates decide which proteins those are.
+#   missforest - one forest per sample, with the protein's values in the
+#                group's other samples as predictors.
+#   bpca       - the sample's loadings times the protein's scores, the scores
+#                being estimated from the protein's observed values.
+# So only minprob is independent of the protein's own replicate values.
 #
 # method: "minprob" (fastest, MNAR-aware), "knn" (fast, MAR),
 #         "missforest" (slower, MAR), "bpca" (global Bayesian PCA, not groupwise)
 #
-# The groupwise methods (minprob, knn, missforest) leave a protein's cells NA
-# in any group where that protein has no observed value at all; the caller
-# fills those from N(global min - 1, 0.3) and flags them as imputation-driven.
+# minprob, knn and missforest leave a protein's cells NA in any group where
+# that protein has no observed value at all; the caller fills those from
+# N(global min - 1, 0.3) and flags them as imputation-driven. knn and
+# missforest also restrict their model to the group's samples. bpca is global
+# and fills those cells itself from the other groups.
 #
 # knn_k: number of neighbouring proteins for KNN. NULL selects it by masked-value
 # cross-validation (select_knn_k()); the value used is returned as attr "knn_k".
@@ -371,6 +388,13 @@ groupwise_imputation <- function(
     # sample j. Running per group prevents cross-condition borrowing. k counts
     # neighbouring proteins, so it is unrelated to the number of samples; it is
     # chosen by masked-value cross-validation unless supplied.
+    # Every protein with at least one observed value in the group goes through
+    # KNN (rowmax = 1, see knn_impute_groupwise); one observed only once is
+    # matched on that single sample. Other impute.knn defaults stay in force:
+    # groups with more than 1500 proteins are split by two-means clustering
+    # before the neighbour search (maxp), and a sample missing more than 80% of
+    # its proteins (colmax) is an error, which triggers the MinProb fallback
+    # below.
     result <- tryCatch(
       {
         if (is.null(knn_k)) {
@@ -402,7 +426,8 @@ groupwise_imputation <- function(
   if (method == "minprob") {
     # ── MinProb: sample-wise Gaussian draw ───────────────────────────────────
     # Each sample's distribution sets its own detection limit, which is what
-    # MNAR (below-detection) dropout depends on. Proteins entirely missing in a
+    # MNAR (below-detection) dropout depends on. The draw uses no group
+    # information; groups matter only in that proteins entirely missing in a
     # group are left NA (see group_all_na).
     if (verbose) {
       message("Imputation: MinProb (sample-wise) ...")
@@ -827,7 +852,7 @@ simulate_pipeline_mdd <- function(
             )
             miss_rate <- mean(is.na(sim_data))
             if (!is.null(impute_method)) {
-              # Imputers warn per sparse row. Across hundreds of simulated
+              # Imputers warn about sparse rows on every call. Across hundreds of simulated
               # matrices that is thousands of identical notes about synthetic
               # data, so mute them here; the realised NA rate is reported in
               # `settings` instead. Warnings on the user's real matrix, raised
