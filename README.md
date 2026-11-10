@@ -200,6 +200,7 @@ Diagnostics for DIA-NN `report.parquet` files. Optionally accepts a FASTA file (
 | **Peptide Mapping** | Colour-coded protein sequence coverage view (per protein and sample), amino acid frequencies, proteotypic vs. shared peptide counts and proportions, and a peptide mapping summary table — requires a FASTA file |
 | **Protease Specificity** | Schechter–Berger P4–P4' sequence logos, for all runs combined and per run — requires a FASTA file |
 | **Modification Diagnostic** | RT-shift profile of modified vs. unmodified peptides (adjustable RT tolerance and number of peptides shown) with a diagnostic table |
+| **iBAQ** | Intensity-based absolute quantification (summed precursor intensity / number of theoretical tryptic peptides) from the same report and FASTA. Controls box on top: precursor intensity column, peptide length window, missed cleavages, proteotypic-only, log₂ export. Per-sample distribution, ranked abundance, most abundant proteins (relative iBAQ), and a protein × sample table with TSV download — requires a FASTA file |
 
 ---
 
