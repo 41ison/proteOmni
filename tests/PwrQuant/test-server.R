@@ -51,6 +51,54 @@ test_that("already_log2 = TRUE bypasses the transform", {
   }))
 })
 
+test_that("limma runs end to end with free-form condition and display names", {
+  local_server_packages()
+  conds <- c(m0 = "WT (ctrl)", m1 = "KO-1", m2 = "a.*b|c+")
+  suppressWarnings(shiny::testServer(PwrQuant_server, {
+    session$setInputs(matrix_file = fixture_upload, already_log2 = FALSE)
+    meta <- metadata_base()
+    meta$Condition <- unname(conds[sub("_r[0-9]+$", "", meta$Sample)])
+    meta$Display_Name <- paste0(meta$Condition, " [", seq_len(nrow(meta)), "]")
+    meta_all(meta)
+
+    contrasts <- c("KO-1 vs WT (ctrl)", "a.*b|c+ vs KO-1")
+    session$setInputs(
+      contrast_pairs = contrasts,
+      limma_method = "robust",
+      imputation_method = "minprob",
+      norm_method = "none",
+      trend_param = "TRUE",
+      min_valid_pct = 0,
+      sig_fdr = 0.05,
+      sig_lfc = 0,
+      run_limma = 1
+    )
+    res <- limma_results_ev()
+    lr <- res$limma_results
+
+    expect_equal(colnames(res$design), sort(unname(conds)))
+    expect_equal(colnames(res$contrast_matrix), contrasts)
+    expect_equal(unique(lr$comparison), contrasts)
+    per_contrast <- lr[match(contrasts, lr$comparison), ]
+    expect_equal(per_contrast$group_a, c("KO-1", "a.*b|c+"))
+    expect_equal(per_contrast$group_b, c("WT (ctrl)", "KO-1"))
+
+    # Imputation-driven = a group of the contrast is entirely missing.
+    log2_mat <- res$log2_mat
+    all_na <- function(cond) {
+      cols <- meta$Sample[meta$Condition == cond]
+      rowSums(!is.na(log2_mat[, cols, drop = FALSE])) == 0
+    }
+    first <- lr[lr$comparison == contrasts[1], ]
+    expected <- (all_na("KO-1") | all_na("WT (ctrl)"))[first$Protein]
+    expect_equal(first$imputation_driven, unname(expected))
+    expect_true(any(first$imputation_driven))
+    expect_false(anyNA(lr$imputation_driven))
+
+    expect_equal(unname(get_display_names()), meta$Display_Name)
+  }))
+})
+
 test_that("excluding samples drops columns and enforces two kept samples", {
   local_server_packages()
   suppressWarnings(shiny::testServer(PwrQuant_server, {
