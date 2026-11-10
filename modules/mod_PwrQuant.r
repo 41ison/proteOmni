@@ -1034,7 +1034,10 @@ simulate_mdd_by_replicates <- function(
   ...
 ) {
   groups <- colnames(design)
-  contrast_specs <- colnames(contrast_matrix)
+  # Contrast weights are defined over the groups, not the samples, so they
+  # carry over unchanged to any replicate count. Reusing them (rather than
+  # re-parsing the labels) keeps free-form condition names working.
+  contrast_n <- contrast_matrix[groups, , drop = FALSE]
 
   purrr::map_dfr(sort(unique(n_grid)), function(n) {
     labels_n <- rep(groups, each = n)
@@ -1042,10 +1045,6 @@ simulate_mdd_by_replicates <- function(
       ~ 0 + factor(labels_n, levels = groups)
     )
     colnames(design_n) <- groups
-    contrast_n <- limma::makeContrasts(
-      contrasts = contrast_specs,
-      levels = design_n
-    )
 
     sim <- simulate_pipeline_mdd(
       contrast_fit = contrast_fit,
@@ -1062,6 +1061,146 @@ simulate_mdd_by_replicates <- function(
         realised_missing = sim$settings$realised_missing
       )
   })
+}
+
+# ── Free-form condition names in contrasts ──────────────────────────────────
+#
+# Condition names are typed by the user and may contain anything: spaces,
+# operators, regex metacharacters. limma::makeContrasts() parses a contrast as
+# an R expression, so it only accepts syntactic level names. Instead of
+# restricting what can be typed, a contrast is resolved against syntactic
+# aliases (grp_1, grp_2, ...) and the resulting weight matrix is labelled with
+# the user's own names again. Nothing downstream ever sees an alias, and no
+# step recovers a group by pattern-matching a contrast label.
+
+#' All ordered condition pairs, with the label shown in the contrast selector
+contrast_pair_labels <- function(conditions) {
+  conditions <- unique(as.character(conditions))
+  pairs <- expand.grid(
+    group_a = conditions,
+    group_b = conditions,
+    stringsAsFactors = FALSE
+  )
+  pairs <- pairs[pairs$group_a != pairs$group_b, , drop = FALSE]
+  # " vs " rather than "-": condition names often contain a hyphen, which made
+  # labels such as "KO-1-WT" ambiguous to read and to resolve.
+  pairs$label <- paste0(pairs$group_a, " vs ", pairs$group_b)
+  rownames(pairs) <- NULL
+  pairs
+}
+
+#' Rewrite a typed contrast in terms of condition aliases
+#'
+#' Single left-to-right pass with literal (never regex) matching, longest
+#' condition first, so a name that contains another name, an operator or an
+#' alias-like string is still replaced as a whole and never re-scanned.
+alias_contrast_expression <- function(expr, aliases) {
+  conds <- names(aliases)[order(nchar(names(aliases)), decreasing = TRUE)]
+  out <- character(0)
+  while (nzchar(expr)) {
+    hit <- conds[startsWith(expr, conds)][1]
+    if (is.na(hit)) {
+      out <- c(out, substr(expr, 1, 1))
+      expr <- substring(expr, 2)
+    } else {
+      out <- c(out, aliases[[hit]])
+      expr <- substring(expr, nchar(hit) + 1)
+    }
+  }
+  paste(out, collapse = "")
+}
+
+#' Contrast matrix for arbitrary condition names
+#'
+#' Drop-in replacement for `limma::makeContrasts(contrasts =, levels =)`.
+#' A contrast that is exactly one of the `A vs B` pair labels is resolved by
+#' lookup; anything else (e.g. `(A+B)/2-C`, `A-B`) is treated as an
+#' arithmetic expression over the condition names. Only + - * / and
+#' parentheses are evaluated, so typed text cannot run arbitrary R code.
+#'
+#' @param contrasts Contrast labels as selected or typed by the user.
+#' @param conditions Condition names; become the row names (design columns).
+#' @return Numeric matrix, conditions x contrasts, named with the user's text.
+build_contrast_matrix <- function(contrasts, conditions) {
+  conditions <- unique(as.character(conditions))
+  contrasts <- unique(as.character(contrasts))
+  if (anyNA(conditions) || any(!nzchar(conditions))) {
+    stop("Condition names cannot be empty.", call. = FALSE)
+  }
+
+  n <- length(conditions)
+  alias_names <- sprintf("grp_%d", seq_len(n))
+  # Parenthesised so an alias can never fuse with neighbouring characters.
+  aliases <- setNames(sprintf("(%s)", alias_names), conditions)
+  units <- diag(n)
+  alias_env <- setNames(
+    lapply(seq_len(n), function(i) units[, i]),
+    alias_names
+  )
+  allowed <- c(alias_names, "+", "-", "*", "/", "(")
+  pairs <- contrast_pair_labels(conditions)
+
+  weights <- lapply(contrasts, function(label) {
+    hit <- match(label, pairs$label)
+    expr <- if (!is.na(hit)) {
+      paste0(aliases[[pairs$group_a[hit]]], "-", aliases[[pairs$group_b[hit]]])
+    } else {
+      alias_contrast_expression(label, aliases)
+    }
+    w <- tryCatch(
+      {
+        parsed <- parse(text = expr, keep.source = FALSE)
+        if (length(parsed) != 1L || !all(all.names(parsed) %in% allowed)) {
+          stop("not a contrast")
+        }
+        eval(parsed[[1]], alias_env, baseenv())
+      },
+      error = function(e) NULL
+    )
+    if (!is.numeric(w) || length(w) != n || !all(is.finite(w)) || all(w == 0)) {
+      stop(
+        sprintf(
+          "Could not interpret contrast '%s'. Write it as <condition> vs <condition>, with the condition names exactly as typed in the metadata table (%s).",
+          label,
+          paste(sprintf("'%s'", conditions), collapse = ", ")
+        ),
+        call. = FALSE
+      )
+    }
+    w
+  })
+
+  matrix(
+    unlist(weights),
+    nrow = n,
+    dimnames = list(Levels = conditions, Contrasts = contrasts)
+  )
+}
+
+#' The two groups of each pairwise contrast, read off the contrast weights
+#'
+#' `group_a` / `group_b` are NA for contrasts that are not a plain A - B.
+contrast_group_table <- function(contrast_matrix) {
+  side <- function(value) {
+    vapply(
+      seq_len(ncol(contrast_matrix)),
+      function(j) {
+        w <- contrast_matrix[, j]
+        hit <- which(w == value)
+        if (length(hit) == 1L && sum(w != 0) == 2L) {
+          rownames(contrast_matrix)[hit]
+        } else {
+          NA_character_
+        }
+      },
+      character(1)
+    )
+  }
+  tibble::tibble(
+    comparison = colnames(contrast_matrix),
+    group_a = side(1),
+    group_b = side(-1)
+  )
 }
 
 # compiled version of helper functions
@@ -3510,7 +3649,7 @@ PwrQuant_server <- function(id) {
           "Select Contrasts (e.g. Treat vs Control)",
           choices = NULL,
           multiple = TRUE,
-          options = list(create = TRUE, placeholder = "Treat-Control")
+          options = list(create = TRUE, placeholder = "Treat vs Control")
         )
       )
     })
@@ -3519,9 +3658,7 @@ PwrQuant_server <- function(id) {
       req(meta_edit_df())
       conds <- unique(meta_edit_df()$Condition)
       if (length(conds) >= 2) {
-        pairs <- expand.grid(conds, conds, stringsAsFactors = FALSE)
-        pairs <- pairs[pairs$Var1 != pairs$Var2, ]
-        suggs <- paste0(pairs$Var1, "-", pairs$Var2)
+        suggs <- contrast_pair_labels(conds)$label
         updateSelectizeInput(
           session,
           "contrast_pairs",
@@ -3574,7 +3711,7 @@ PwrQuant_server <- function(id) {
       cv <- compute_cv_mtx_fast(2^log2_matrix, group_labels) |>
         rownames_to_column("protein") |>
         pivot_longer(-protein, names_to = "condition", values_to = "CV") |>
-        dplyr::mutate(condition = str_remove(condition, "CV_"))
+        dplyr::mutate(condition = sub("^CV_", "", condition))
       cv
     })
 
@@ -3606,17 +3743,36 @@ PwrQuant_server <- function(id) {
     limma_results_ev <- eventReactive(input$run_limma, {
       req(raw_matrix(), meta_edit_df(), input$contrast_pairs)
 
+      # Resolve the contrasts up front. Condition names are free text, so the
+      # groups of a contrast are taken from its weights from here on, never
+      # recovered by matching names inside the contrast label.
+      contrast_matrix <- tryCatch(
+        build_contrast_matrix(
+          input$contrast_pairs,
+          levels(factor(meta_edit_df()$Condition[match(
+            colnames(raw_matrix()),
+            meta_edit_df()$Sample
+          )]))
+        ),
+        error = function(e) {
+          showNotification(
+            paste("Cannot run limma:", conditionMessage(e)),
+            type = "error",
+            duration = 15
+          )
+          NULL
+        }
+      )
+      req(contrast_matrix)
+
       # Refuse to fit a contrast whose groups have no replication left; the
       # residual df would be zero and every statistic downstream meaningless.
       thin <- thin_conditions()
       if (nrow(thin) > 0) {
-        thin_used <- thin$Condition[vapply(
+        thin_used <- intersect(
           thin$Condition,
-          function(cond) {
-            any(grepl(cond, input$contrast_pairs, fixed = TRUE))
-          },
-          logical(1)
-        )]
+          rownames(contrast_matrix)[rowSums(contrast_matrix != 0) > 0]
+        )
         if (length(thin_used) > 0) {
           showNotification(
             sprintf(
@@ -3671,15 +3827,21 @@ PwrQuant_server <- function(id) {
           if (is.null(rn)) {
             rn <- as.character(seq_len(nrow(log2_matrix)))
           }
-          group_na_mask <- data.frame(Protein = rn, stringsAsFactors = FALSE)
-          for (g in unique(group_labels)) {
-            g_cols <- which(group_labels == g)
-            group_na_mask[[g]] <- apply(
-              log2_matrix[, g_cols, drop = FALSE],
-              1,
-              function(x) all(is.na(x))
-            )
-          }
+          # Proteins x conditions. A matrix rather than a data frame, so a
+          # condition name can never collide with an identifier column.
+          group_na_mask <- vapply(
+            unique(group_labels),
+            function(g) {
+              g_cols <- which(group_labels == g)
+              rowSums(!is.na(log2_matrix[, g_cols, drop = FALSE])) == 0
+            },
+            logical(nrow(log2_matrix))
+          )
+          group_na_mask <- matrix(
+            group_na_mask,
+            nrow = nrow(log2_matrix),
+            dimnames = list(rn, unique(group_labels))
+          )
         }
 
         if (reg_method == "robust") {
@@ -3820,14 +3982,10 @@ PwrQuant_server <- function(id) {
         incProgress(0.65, detail = "Building Linear Models")
         design_groups <- factor(group_labels)
         design <- model.matrix(~ 0 + design_groups)
-        colnames(design) <- str_remove(colnames(design), "design_groups")
+        colnames(design) <- levels(design_groups)
 
-        valid_levels <- colnames(design)
-        clean_contrasts <- input$contrast_pairs
-        contrast_matrix <- limma::makeContrasts(
-          contrasts = clean_contrasts,
-          levels = design
-        )
+        contrast_matrix <- contrast_matrix[colnames(design), , drop = FALSE]
+        clean_contrasts <- colnames(contrast_matrix)
 
         # 6. limma Model & eBayes
         fit_model <- limma::lmFit(limma_mtx, design, method = reg_method)
@@ -3865,26 +4023,22 @@ PwrQuant_server <- function(id) {
 
         # 8. Results Mapping
         incProgress(0.9, detail = "Isolating significance mappings")
-        contrast_groups <- tibble(
-          comparison = clean_contrasts,
-          group_a = str_extract(clean_contrasts, "^.*(?=-)"),
-          group_b = str_extract(clean_contrasts, "(?<=-).*$")
-        )
-
         limma_results <- power_stats %>%
-          left_join(contrast_groups, by = "comparison")
+          left_join(contrast_group_table(contrast_matrix), by = "comparison")
 
         if (!is.null(group_na_mask)) {
-          limma_results <- limma_results %>%
-            rowwise() %>%
-            dplyr::mutate(
-              imputation_driven = group_na_mask[[group_a]][match(
-                Protein,
-                group_na_mask$Protein
-              )] |
-                group_na_mask[[group_b]][match(Protein, group_na_mask$Protein)]
-            ) %>%
-            ungroup()
+          # Proteins x contrasts: TRUE when any group entering the contrast
+          # (non-zero weight) was entirely missing for that protein.
+          driven <- (group_na_mask[,
+            rownames(contrast_matrix),
+            drop = FALSE
+          ] %*%
+            (contrast_matrix != 0)) >
+            0
+          limma_results$imputation_driven <- driven[cbind(
+            match(limma_results$Protein, rownames(driven)),
+            match(limma_results$comparison, colnames(driven))
+          )]
         } else {
           # No imputation was performed: nothing can be imputation-driven.
           limma_results$imputation_driven <- FALSE
@@ -4214,11 +4368,10 @@ PwrQuant_server <- function(id) {
             ]
             unique(extract_uniprot_lookup_id(prots))
           })
-          names(gene_clusters) <- paste(
-            grid$comparison,
-            grid$direction,
-            sep = "|||"
-          )
+          # Keyed by grid row rather than by an encoded "contrast|direction"
+          # string: contrast labels are free text and may contain any separator.
+          grid$key <- sprintf("cluster_%d", seq_len(nrow(grid)))
+          names(gene_clusters) <- grid$key
           gene_clusters <- gene_clusters[
             vapply(gene_clusters, length, integer(1)) > 0
           ]
@@ -4293,14 +4446,14 @@ PwrQuant_server <- function(id) {
             )
           }
 
-          # Split the encoded Group name back into Contrast + Direction.
-          parts <- do.call(
-            rbind,
-            strsplit(as.character(enrich_df$Group), "|||", fixed = TRUE)
+          # Map each cluster key back to its Contrast + Direction.
+          grid_row <- match(as.character(enrich_df$Group), grid$key)
+          enrich_df$Contrast <- factor(
+            grid$comparison[grid_row],
+            levels = contrasts
           )
-          enrich_df$Contrast <- factor(parts[, 1], levels = contrasts)
           enrich_df$Direction <- factor(
-            parts[, 2],
+            grid$direction[grid_row],
             levels = c("Increased", "Decreased")
           )
           enrich_df$Group <- NULL
