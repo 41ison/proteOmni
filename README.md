@@ -342,18 +342,18 @@ Assign each sample column a **Condition** and **Batch** label using the editable
 Proteins with fewer than `min_valid_pct`% of valid (non-missing) values per group are excluded before imputation and modelling. Set to 0 to disable filtering.
 
 ### Step 3 — Imputation (robust mode only)
-Imputation is performed when **Limma Regression Method** is set to `robust`. All four strategies are **sample-wise**: each sample (column) is a variable and the proteins are its observations, so every filled value is derived from the sample it belongs to, not from the protein's other replicates. MinProb, KNN and missForest are also **groupwise** (each condition is imputed from its own samples only); bPCA is fitted on the full matrix. Strategies are selectable in the sidebar:
+Imputation is performed when **Limma Regression Method** is set to `robust`. All four strategies are **sample-wise**: each sample (column) is a variable and the proteins are its observations, so the work is done once per sample across thousands of proteins rather than once per protein across a few replicates, and every filled value is on the scale of the sample it lands in. Only MinProb is independent of the protein itself; KNN, missForest and bPCA use the protein's observed values in other samples to choose neighbours or as predictors. KNN and missForest are also **groupwise** (each condition is imputed from its own samples only); bPCA is fitted on the full matrix. Strategies are selectable in the sidebar:
 
 | Method | Speed* | Missing-data model | Best for |
 |---|---|---|---|
 | **MinProb** (default) | < 0.1 s | MNAR — Gaussian draw at each sample's detection limit, N(mean − 1.8 SD, 0.3 SD) of that sample's observed values | Low dropout, when proteins are missing mostly because they fall below detection; conservative, but loses power quickly as dropout grows |
-| **KNN** | < 0.1 s | MAR / MCAR — a gap in sample *j* gets the mean of the values the k nearest proteins have in sample *j*; k is chosen per dataset by masked-value cross-validation over {3, 5, 8, 10, 15, 20}, and the same k is reused in the power simulation | Low to moderate dropout; conservative, with less power loss than MinProb |
-| **missForest** | ~5 s | MAR / MCAR — one random forest per sample, predicting it from the other samples in the same condition | Low dropout only; keeps power, but FDR inflates as dropout grows |
+| **KNN** | < 0.1 s | MAR / MCAR — a gap in sample *j* gets the mean of the values the k nearest proteins have in sample *j*, with nearness measured on the protein's observed values in the same condition (a single value is enough); k is chosen per dataset by masked-value cross-validation over {3, 5, 8, 10, 15, 20}, and the same k is reused in the power simulation | Low to moderate dropout; conservative, with less power loss than MinProb |
+| **missForest** | ~5 s | MAR / MCAR — one random forest per sample, predicting it from the protein's values in the other samples of the same condition | Low dropout only; keeps power, but FDR inflates as dropout grows |
 | **bPCA** | ~1–8 s | MAR / MCAR — Bayesian PCA with samples as variables, borrowing signal across all samples and conditions | Low dropout only; keeps power, but FDR inflates as dropout grows |
 
 \*Measured on the bundled 9-sample MaxLFQ training matrix (~4,000–5,800 proteins). missForest and bPCA cost grows with the number of samples.
 
-Proteins that are entirely missing within a condition are left empty by the groupwise methods and filled afterwards from N(global min − 1, 0.3); they are flagged as `imputation_driven` (see below).
+Proteins that are entirely missing within a condition are left empty by every method except bPCA and filled afterwards from N(global min − 1, 0.3); they are flagged as `imputation_driven` (see below).
 
 When `ls` (ordinary least squares) regression is selected, imputation is skipped entirely and the raw log2 matrix is passed directly to limma.
 
