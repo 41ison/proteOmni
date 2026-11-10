@@ -828,7 +828,7 @@ PSManalyst_ui <- function(id) {
                   ns("rt_tolerance"),
                   "ΔRT Artifact Threshold (min)",
                   min = 0.1,
-                  max = 5,
+                  max = 10,
                   value = 0.5,
                   step = 0.1
                 )
