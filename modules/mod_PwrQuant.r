@@ -1287,6 +1287,44 @@ format_limma_params_log <- function(p) {
   )
 }
 
+#' Format the sample metadata assignment of a limma run for the session log
+#'
+#' @param meta Metadata of the analysed samples (Sample, Display_Name,
+#'   Condition, Batch), one row per sample, in matrix column order.
+#' @param excluded Samples removed from the analysis by the user.
+#' @return Character vector of log lines: an aligned table plus the removed
+#'   samples.
+format_limma_metadata_log <- function(meta, excluded = character(0)) {
+  cols <- intersect(
+    c("Sample", "Display_Name", "Condition", "Batch"),
+    names(meta)
+  )
+  tbl <- vapply(
+    cols,
+    function(col) as.character(meta[[col]]),
+    character(nrow(meta))
+  )
+  tbl <- matrix(tbl, nrow = nrow(meta), dimnames = list(NULL, cols))
+  tbl[is.na(tbl)] <- "NA"
+  tbl <- rbind(cols, tbl)
+  widths <- apply(nchar(tbl), 2, max)
+  rows <- apply(tbl, 1, function(r) {
+    trimws(
+      paste(sprintf("%-*s", widths, r), collapse = "  "),
+      which = "right"
+    )
+  })
+  c(
+    "=== PwrQuant sample metadata assignment ===",
+    paste0("  ", rows),
+    paste0(
+      "  Removed samples : ",
+      if (length(excluded) > 0) paste(excluded, collapse = ", ") else "none"
+    ),
+    "==========================================="
+  )
+}
+
 # ── clusterProfiler GO enrichment (per-contrast enrichGO) helpers ───────────
 
 # Complete set of Bioconductor OrgDb (org.*) annotation packages that can be
@@ -3755,6 +3793,7 @@ PwrQuant_server <- function(id) {
           )]))
         ),
         error = function(e) {
+          message("PwrQuant limma not run: ", conditionMessage(e))
           showNotification(
             paste("Cannot run limma:", conditionMessage(e)),
             type = "error",
@@ -3774,18 +3813,20 @@ PwrQuant_server <- function(id) {
           rownames(contrast_matrix)[rowSums(contrast_matrix != 0) > 0]
         )
         if (length(thin_used) > 0) {
+          thin_msg <- sprintf(
+            "condition(s) %s have fewer than 2 replicates after sample removal.",
+            paste(
+              sprintf(
+                "%s (n = %d)",
+                thin_used,
+                thin$n[match(thin_used, thin$Condition)]
+              ),
+              collapse = ", "
+            )
+          )
+          message("PwrQuant limma not run: ", thin_msg)
           showNotification(
-            sprintf(
-              "Cannot run limma: condition(s) %s have fewer than 2 replicates after sample removal.",
-              paste(
-                sprintf(
-                  "%s (n = %d)",
-                  thin_used,
-                  thin$n[match(thin_used, thin$Condition)]
-                ),
-                collapse = ", "
-              )
-            ),
+            paste("Cannot run limma:", thin_msg),
             type = "error",
             duration = 15
           )
@@ -4066,56 +4107,70 @@ PwrQuant_server <- function(id) {
 
         incProgress(1.0, detail = "Complete.")
 
-        # Record the run's parameters in the session log (captured by the
-        # app-level message handler and included in "Download Log History").
+        # Record the run's parameters and sample metadata assignment in the
+        # session log (captured by the app-level message handler and included
+        # in "Download Log History").
         grp_n <- table(group_labels)
         message(paste(
-          format_limma_params_log(list(
-            input_file = input$matrix_file$name,
-            already_log2 = already_log2(),
-            n_samples = ncol(log2_matrix),
-            samples_per_group = paste0(names(grp_n), " = ", as.integer(grp_n)),
-            n_proteins_input = n_proteins_input,
-            min_valid_pct = input$min_valid_pct %||% 0,
-            n_proteins_filtered = nrow(log2_matrix),
-            regression_method = reg_method,
-            imputation = if (reg_method == "robust") {
-              paste0(imp_labels[[imp_method]], " (groupwise)")
-            } else {
-              "none (NAs handled by lmFit)"
-            },
-            knn_k = if (reg_method == "robust") attr(imputed_matrix, "knn_k"),
-            downshift = if (reg_method == "robust") {
-              sprintf(
-                "rnorm(mean = global min - 1 = %.3f, sd = 0.3), seed 123",
-                global_min - 1
-              )
-            },
-            batch_correction = if (n_batches <= 1) {
-              "none (single batch)"
-            } else if (combat_failed) {
-              sprintf("ComBat failed and was bypassed (%d batches)", n_batches)
-            } else {
-              sprintf(
-                "sva::ComBat, parametric prior, mod = NULL (%d batches)",
-                n_batches
-              )
-            },
-            normalization = norm_meth,
-            design = paste0(
-              "~ 0 + condition [",
-              paste(colnames(design), collapse = ", "),
-              "]"
-            ),
-            contrasts = clean_contrasts,
-            ebayes_trend = use_trend,
-            n_trend_excluded = n_trend_excluded,
-            p_adjust = "BH",
-            sig_fdr = sig_fdr,
-            sig_lfc = sig_lfc,
-            mdd_target_power = 0.80,
-            limma_version = as.character(utils::packageVersion("limma"))
-          )),
+          c(
+            format_limma_params_log(list(
+              input_file = input$matrix_file$name,
+              already_log2 = already_log2(),
+              n_samples = ncol(log2_matrix),
+              samples_per_group = paste0(
+                names(grp_n),
+                " = ",
+                as.integer(grp_n)
+              ),
+              n_proteins_input = n_proteins_input,
+              min_valid_pct = input$min_valid_pct %||% 0,
+              n_proteins_filtered = nrow(log2_matrix),
+              regression_method = reg_method,
+              imputation = if (reg_method == "robust") {
+                paste0(imp_labels[[imp_method]], " (groupwise)")
+              } else {
+                "none (NAs handled by lmFit)"
+              },
+              knn_k = if (reg_method == "robust") attr(imputed_matrix, "knn_k"),
+              downshift = if (reg_method == "robust") {
+                sprintf(
+                  "rnorm(mean = global min - 1 = %.3f, sd = 0.3), seed 123",
+                  global_min - 1
+                )
+              },
+              batch_correction = if (n_batches <= 1) {
+                "none (single batch)"
+              } else if (combat_failed) {
+                sprintf(
+                  "ComBat failed and was bypassed (%d batches)",
+                  n_batches
+                )
+              } else {
+                sprintf(
+                  "sva::ComBat, parametric prior, mod = NULL (%d batches)",
+                  n_batches
+                )
+              },
+              normalization = norm_meth,
+              design = paste0(
+                "~ 0 + condition [",
+                paste(colnames(design), collapse = ", "),
+                "]"
+              ),
+              contrasts = clean_contrasts,
+              ebayes_trend = use_trend,
+              n_trend_excluded = n_trend_excluded,
+              p_adjust = "BH",
+              sig_fdr = sig_fdr,
+              sig_lfc = sig_lfc,
+              mdd_target_power = 0.80,
+              limma_version = as.character(utils::packageVersion("limma"))
+            )),
+            format_limma_metadata_log(
+              meta[match(colnames(raw), meta$Sample), , drop = FALSE],
+              intersect(excluded_samples(), colnames(raw_matrix_full()))
+            )
+          ),
           collapse = "\n"
         ))
 
@@ -4148,6 +4203,34 @@ PwrQuant_server <- function(id) {
           }
         )
       })
+    })
+
+    # `limma_results_ev()` is lazy: on its own it only runs once a visible
+    # output asks for it, so a press made while no result tab is showing would
+    # go unlogged (and be merged with the next press). Evaluating it here makes
+    # every "Start limma" press run - and log - exactly once. Errors are caught
+    # because an unhandled error in an observer tears down the session; the
+    # reactive caches them, so the outputs still display the same failure.
+    observeEvent(input$run_limma, {
+      tryCatch(
+        limma_results_ev(),
+        error = function(e) {
+          why <- conditionMessage(e)
+          if (inherits(e, "shiny.silent.error") && !nzchar(why)) {
+            # req() failure; a specific reason was logged where it was raised,
+            # unless an input (matrix, metadata, contrasts) is simply missing.
+            if (
+              is.null(input$matrix_file) || length(input$contrast_pairs) == 0
+            ) {
+              message(
+                "PwrQuant limma not run: matrix, metadata or contrasts missing."
+              )
+            }
+          } else {
+            message("PwrQuant limma not run: ", why)
+          }
+        }
+      )
     })
 
     # ── Prospective MDD simulation ─────────────────────────────────────────
