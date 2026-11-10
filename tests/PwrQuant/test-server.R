@@ -99,6 +99,52 @@ test_that("limma runs end to end with free-form condition and display names", {
   }))
 })
 
+test_that("every Start limma press logs parameters and metadata assignment", {
+  local_server_packages()
+  logged <- character(0)
+  withCallingHandlers(
+    suppressWarnings(shiny::testServer(PwrQuant_server, {
+      session$setInputs(matrix_file = fixture_upload, already_log2 = FALSE)
+      session$setInputs(exclude_samples = "m2_r3")
+      meta <- metadata_base()
+      meta$Condition <- sub("_r[0-9]+$", "", meta$Sample)
+      meta$Batch <- ifelse(meta$Condition == "m0", "A", "B")
+      meta_all(meta)
+
+      # Nothing reads limma_results_ev() here: the press alone must log.
+      session$setInputs(
+        contrast_pairs = "m1 vs m0",
+        limma_method = "ls",
+        norm_method = "none",
+        trend_param = "TRUE",
+        min_valid_pct = 0,
+        sig_fdr = 0.05,
+        sig_lfc = 0,
+        run_limma = 1
+      )
+      session$setInputs(norm_method = "quantile", run_limma = 2)
+
+      # A press that cannot run is recorded too.
+      session$setInputs(contrast_pairs = "nope vs m0", run_limma = 3)
+    })),
+    message = function(m) {
+      logged <<- c(logged, conditionMessage(m))
+      invokeRestart("muffleMessage")
+    }
+  )
+
+  runs <- grep("PwrQuant limma parameters", logged, value = TRUE)
+  expect_length(runs, 2)
+  expect_match(runs[1], "Normalization\\s+: none")
+  expect_match(runs[2], "Normalization\\s+: quantile")
+  expect_match(runs[2], "PwrQuant sample metadata assignment", fixed = TRUE)
+  expect_match(runs[2], "m0_r1\\s+m0_r1\\s+m0\\s+A")
+  expect_match(runs[2], "m1_r2\\s+m1_r2\\s+m1\\s+B")
+  expect_match(runs[2], "Removed samples : m2_r3", fixed = TRUE)
+  expect_no_match(runs[2], "m2_r3\\s+m2_r3")
+  expect_length(grep("PwrQuant limma not run", logged), 1)
+})
+
 test_that("excluding samples drops columns and enforces two kept samples", {
   local_server_packages()
   suppressWarnings(shiny::testServer(PwrQuant_server, {
