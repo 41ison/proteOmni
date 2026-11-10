@@ -151,6 +151,22 @@ proteOmni/
 │   ├── mod_MaxQuantMSMS.r       # MaxQuant module
 │   ├── utils_fasta.r            # Shared FASTA parsing / digestion + Global FASTA sidebar
 │   └── mod_TEMPLATE.r           # Template for adding new modules
+├── tests/
+│   ├── README.md                # How to run the tests and what they cover
+│   ├── PwrQuant/                # testthat unit tests for the PwrQuant module
+│   │   ├── run_tests.R          # Test runner (Rscript tests/PwrQuant/run_tests.R)
+│   │   ├── helper-pwrquant.R    # Loads the module and builds shared fixtures
+│   │   └── test-*.R             # cv, id-helpers, imputation, ingestion, limma-pipeline,
+│   │                            #   missingness, plot-helpers, power-helpers, server,
+│   │                            #   simulation, tmm
+│   ├── imputation_strategies_sim.R  # Simulation behind the imputation FDR / power table
+│   ├── test_mdd.R               # Smoke test of the MDD machinery on a real matrix
+│   └── pwr_diag.R               # Temporary diagnostic of the Shiny reactive graph
+├── training/                    # Example data for trying out the modules
+│   ├── mtx_maxLFQ.tsv           # Protein abundance matrix (PwrQuant; also used by the tests)
+│   └── fragpipe/                # FragPipe output (PSManalyst)
+│       ├── combined_protein.tsv
+│       └── yeast{1,2,3}/psm.tsv
 ├── www/
 │   └── favicon.svg              # App favicon
 ├── images/                      # Screenshots and GIFs for README
