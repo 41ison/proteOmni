@@ -104,6 +104,40 @@ test_that("KNN imputation fills gaps and keeps observed values", {
   expect_equal(dimnames(out), dimnames(imp_input))
 })
 
+test_that("KNN fills proteins observed once in a group from neighbours, not the sample mean", {
+  skip_if_not_installed("impute")
+  cols <- which(pq_groups == "m0")
+  n_obs <- rowSums(!is.na(pq_log2[, cols]))
+  once <- n_obs == 1
+  expect_gt(sum(once), 50)
+
+  # impute.knn's default rowmax would warn and mean-impute these rows.
+  expect_no_warning(
+    out <- groupwise_imputation(
+      pq_log2,
+      pq_groups,
+      method = "knn",
+      verbose = FALSE,
+      knn_k = 10
+    )
+  )
+  expect_false(anyNA(out[n_obs > 0, cols]))
+
+  own_value <- rowMeans(pq_log2[once, cols], na.rm = TRUE)
+  for (j in cols) {
+    gap <- once & is.na(pq_log2[, j])
+    fills <- out[gap, j]
+    sample_mean <- mean(pq_log2[, j], na.rm = TRUE)
+    # Mean imputation would give every such protein the same value.
+    expect_gt(length(unique(round(fills, 6))), length(fills) / 2)
+    # These proteins are low-abundance; their fills should sit near their own
+    # level, well below the sample mean.
+    expect_lt(mean(fills), sample_mean - 1)
+    expect_lt(abs(mean(fills) - mean(own_value)), 0.5)
+    expect_gt(cor(fills, own_value[rownames(pq_log2)[gap]]), 0.5)
+  }
+})
+
 test_that("KNN k is chosen by cross-validation, reproducibly, without touching the RNG", {
   skip_if_not_installed("impute")
   set.seed(2207)
