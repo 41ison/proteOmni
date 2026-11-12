@@ -70,15 +70,17 @@
 
 proteOmni auto-installs all required packages on first launch via the `bootstrap.R` script. No virtual environment or extra tooling is involved: packages go into your normal R library.
 
-**Pinned versions.** Every package version (including indirect dependencies) is fixed in `proteOmni.lock`. Packages are downloaded from a dated [Posit Package Manager](https://packagemanager.posit.co) snapshot (CRAN + Bioconductor, as pre-built binaries on Windows and macOS), and `diann` from a fixed GitHub commit. On each launch, `bootstrap.R` checks your library against the lock and reinstalls any package whose version differs. This can downgrade or upgrade packages you also use outside proteOmni. If you update such a package for other work, proteOmni will restore its pinned version the next time it starts. The snapshot date is recorded in `Session_Info_log.txt`.
+**Pinned versions.** Every package version (including indirect dependencies) is fixed in `proteOmni.lock`. Packages are downloaded from a dated [Posit Package Manager](https://packagemanager.posit.co) snapshot (CRAN + Bioconductor, as pre-built binaries on Windows and macOS). On each launch, `bootstrap.R` checks your library against the lock and reinstalls any package whose version differs. This can downgrade or upgrade packages you also use outside proteOmni. If you update such a package for other work, proteOmni will restore its pinned version the next time it starts. The snapshot date is recorded in `Session_Info_log.txt`.
+
+**What happens when installation fails.** Packages that fail in the first pass are retried one at a time. If a required package is still missing afterwards, proteOmni stops before the app loads and lists each missing package with the reason reported by R; fix the cause and launch again (only the packages still missing are installed). proteOmni also stops if your R minor version differs from the one the lock was built for (currently R 4.6.x), because the pinned Bioconductor release has no pre-built packages for other R versions. Do not work around either stop with a plain `install.packages()`: that installs the current CRAN version, which the next launch replaces with the pinned one. See [Troubleshooting](#troubleshooting).
 
 > **Maintainers:** to move to newer package versions, run `Rscript tools/update_lockfile.R <YYYY-MM-DD>` from the `app/` folder. Then run `source("bootstrap.R")` in a fresh R session, test the app, and commit the new `proteOmni.lock`. To add or remove a dependency, edit the lists at the top of `tools/update_lockfile.R`; never edit the lockfile by hand.
 
-The key dependencies are:
+The direct dependencies are listed below; `proteOmni.lock` also pins everything they depend on.
 
-**CRAN packages:** `shiny`, `shinydashboard`, `shinyjs`, `fresh`, `devtools`, `tidyverse`, `tidytext`, `janitor`, `ggpointdensity`, `ggtext`, `ggrepel`, `ggseqlogo`, `ggsci`, `lsa`, `vegan`, `plotly`, `viridis`, `RColorBrewer`, `ggfortify`, `seqinr`, `zip`, `DT`, `colourpicker`, `R6`, `gridExtra`, `scales`, `lavaan`, `naniar`, `patchwork`, `missForest`, `data.table`, `GGally`, `arrow`, `httr`, `jsonlite`, `BiocManager`
+**CRAN packages:** `shiny`, `shinydashboard`, `shinyjs`, `fresh`, `tidyverse`, `tidytext`, `janitor`, `ggpointdensity`, `ggtext`, `ggrepel`, `ggseqlogo`, `ggsci`, `plotly`, `viridis`, `RColorBrewer`, `ggfortify`, `seqinr`, `zip`, `DT`, `colourpicker`, `R6`, `gridExtra`, `scales`, `lavaan`, `naniar`, `patchwork`, `missForest`, `data.table`, `GGally`, `arrow`, `httr`, `jsonlite`, `BiocManager`
 
-**Bioconductor packages:** `limma`, `edgeR`, `Biostrings`, `sva`, `impute`, `pcaMethods`, `ComplexHeatmap`, `clusterProfiler`, `GO.db`, `enrichplot`, `AnnotationDbi`, `STRINGdb`
+**Bioconductor packages:** `limma`, `edgeR`, `Biostrings`, `sva`, `impute`, `pcaMethods`, `ComplexHeatmap`, `clusterProfiler`, `enrichplot`, `AnnotationDbi`, `STRINGdb`, `mixOmics`, `org.Hs.eg.db`
 
 > The power analysis is implemented directly against limma's empirical Bayes objects and the non-central *t* distribution in base R, so the `pwr` package is **not** a dependency anymore. See [Step 7](#step-7--power-analysis--minimum-detectable-difference-mdd) for why a textbook power calculation does not apply here.
 
@@ -503,7 +505,7 @@ GO over-representation analysis is performed with `clusterProfiler::enrichGO()`.
 - a **dotplot** — top terms per contrast (count on the x-axis, size = gene count, colour = adjusted p-value), and
 - a **Manhattan plot** — every enriched term per contrast, height = −log10 adjusted p-value.
 
-Annotations come from a Bioconductor OrgDb (`org.*`) package rather than a live web lookup, so no per-run network fetch is required once the package is installed. The **Organism (OrgDb)** dropdown selects the package and its NCBI taxon ID; the matching package is auto-installed via `BiocManager` on first use. 20 organisms are supported, including:
+Annotations come from a Bioconductor OrgDb (`org.*`) package rather than a live web lookup, so no per-run network fetch is required once the package is installed. The **Organism (OrgDb)** dropdown selects the package and its NCBI taxon ID; the matching package is auto-installed from the pinned snapshot on first use. 20 organisms are supported, including:
 
 | Organism | OrgDb package | Taxon |
 |---|---|---|
@@ -643,24 +645,47 @@ This happens because Windows doesn't know where the R executable (`Rscript.exe`)
 
 <details>
 
+<summary><b>proteOmni cannot start: required package(s) could not be installed</b></summary>
+
+`bootstrap.R` stops with this message when a package pinned in `proteOmni.lock` is still missing after the automatic retries. The message lists each package with the reason R reported. The usual causes are:
+
+1. **No or unstable internet connection**, or a proxy/firewall blocking `packagemanager.posit.co`. Reconnect (or ask your IT department to allow that host) and launch proteOmni again.
+2. **A missing compiler or system library.** On Linux every package is built from source, so the system libraries named in the error must be installed first. On Windows and macOS the pinned packages are pre-built for R 4.6.x and normally need no compiler.
+3. **The package is in use (Windows).** Close every other R, RStudio or Positron session and launch again.
+
+Launching again is safe and quick: only the packages that are still missing are installed. To run just the installation step, without starting the app:
+
+```bash
+cd /path/to/proteOmni/app
+Rscript -e 'source("bootstrap.R")'
+```
+
+Avoid installing the missing package yourself with `install.packages("name")`. That gives you the current CRAN version instead of the pinned one, and proteOmni replaces it at the next launch.
+
+</details>
+
+<details>
+
+<summary><b>proteOmni.lock was built for R 4.6.x but you are running R ...</b></summary>
+
+The pinned package set belongs to one R minor version (see `R:` at the top of `proteOmni.lock`). The matching Bioconductor release has no pre-built packages for other R versions, so proteOmni stops instead of attempting an installation that is likely to fail. Install the R version named in the message from [CRAN](https://cran.r-project.org) and launch again.
+
+If you cannot change your R version, you can try anyway by setting the environment variable `PROTEOMNI_ALLOW_R_MISMATCH=1` before launching. This is unsupported: Bioconductor packages then have to compile from source (Rtools on Windows, Xcode command line tools on macOS) and some may not install at all.
+
+</details>
+
+<details>
+
 <summary><b>Error in loadNamespace (Windows / macOS)</b></summary>
 
-When launching proteOmni via the `.bat` or `.command` file, you may see an error like:
+You may see an error like:
 
 > `Error in loadNamespace(j <- i[[1L]], c(lib.loc, .libPaths()), versionCheck = vI[[j]]) :`
 > `namespace 'promises' 1.3.3 is already loaded, but >= 1.5.0 is required`
 
-This means one or more R packages in your library are outdated. To fix this, update the affected package(s) from within R or RStudio:
+An older copy of the package was already loaded in the R session before proteOmni could switch to the pinned version. This happens when you start proteOmni from an R session that has been used for other work. Restart R (or use the `.bat` / `.command` launcher, which always starts a fresh session) and launch through `run.R`.
 
-```r
-install.packages("promises")
-```
-
-Replace `"promises"` with whatever package name appears in your error. After installation, re-launch proteOmni. You can check the currently installed version with:
-
-```r
-packageVersion("promises")
-```
+If the error persists, look for a "installed at a version other than the one in proteOmni.lock" warning earlier in the console output: it names the packages `bootstrap.R` could not replace. Close any other open R sessions and launch again. Do not update the package with `install.packages()`; proteOmni restores the pinned version at the next launch.
 
 </details>
 
@@ -668,12 +693,13 @@ packageVersion("promises")
 
 <summary><b>App takes a long time to start (first launch)</b></summary>
 
-On the first launch, `proteOmni.R` checks for and installs all missing dependencies (CRAN + Bioconductor + GitHub). This is expected and may take 5–15 minutes depending on your internet speed and machine. Subsequent launches are fast.
+On the first launch, `bootstrap.R` installs every package pinned in `proteOmni.lock` (CRAN + Bioconductor) before the app starts. This is expected and may take 5–15 minutes depending on your internet speed and machine. Subsequent launches only compare versions and are fast.
 
-To pre-install all dependencies manually before the first launch, run from R:
+To install all dependencies before the first launch without starting the app, run from a terminal:
 
-```r
-source("/path/to/proteOmni/app/proteOmni.R")
+```bash
+cd /path/to/proteOmni/app
+Rscript -e 'source("bootstrap.R")'
 ```
 
 </details>
@@ -724,7 +750,7 @@ This can happen for a few reasons:
 
 3. **Too few significant proteins.** If a contrast × direction gene set has only a handful of proteins, the over-representation test is underpowered and may return nothing. Try relaxing the minimum valid-value threshold, loosening the GO term FDR cutoff, or checking whether the experiment is adequately powered.
 
-4. **OrgDb package couldn't be installed.** The first use of a new organism triggers a `BiocManager::install()` of its `org.*` package — check your internet connection and the session log if enrichment fails to start.
+4. **OrgDb package couldn't be installed.** The first use of a new organism installs its `org.*` package from the snapshot pinned in `proteOmni.lock` — check your internet connection and the session log if enrichment fails to start.
 
 </details>
 
