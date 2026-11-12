@@ -9,8 +9,9 @@
 ##
 ## Versions are resolved from a dated Posit Public Package Manager (P3M)
 ## snapshot, so every locked version is guaranteed to be downloadable — on
-## Windows and macOS as pre-built binaries. The GitHub-only `diann` package is
-## pinned to the commit currently installed in your library.
+## Windows and macOS as pre-built binaries. GitHub-only packages (none at
+## present, see `github_direct`) are pinned to the commit currently installed
+## in your library.
 ##
 ## After writing the lock, the script compares it with your own library. Before
 ## committing a new lock, run `source("bootstrap.R")` in a fresh R session (it
@@ -37,8 +38,6 @@ cran_bioc_direct <- c(
   "shinyjs",
   "fresh",
   "BiocManager",
-  "pak",
-  "devtools",
   "tidyverse",
   "tidytext",
   "janitor",
@@ -82,9 +81,9 @@ cran_bioc_direct <- c(
   "mixOmics",
   "org.Hs.eg.db"
 )
-github_direct <- list(
-  diann = c(user = "vdemichev", repo = "diann-rpackage")
-)
+# GitHub-only packages, as `pkg = c(user = "owner", repo = "repository")`.
+# None at present.
+github_direct <- list()
 
 # OrgDb packages installed on demand by the PwrQuant enrichment module. They
 # are locked (so on-demand installs are pinned too) but marked Optional, so
@@ -147,12 +146,11 @@ for (pkg in names(github_direct)) {
   if (is.na(sha)) {
     stop(
       pkg,
-      " is not installed from GitHub; install it first, e.g. ",
-      "pak::pak('",
+      " is not installed from GitHub; install it first from ",
+      "https://github.com/",
       gh[["user"]],
       "/",
-      gh[["repo"]],
-      "')"
+      gh[["repo"]]
     )
   }
   desc <- read.dcf(url(sprintf(
