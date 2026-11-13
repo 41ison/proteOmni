@@ -366,6 +366,134 @@ plot_sage_missingness <- function(pm, color = "#1b9e77") {
   patchwork::wrap_plots(p1, p2, ncol = 1, heights = c(1.2, 1))
 }
 
+# ── iBAQ from the Sage LFQ table ──────────────────────────────────────────────
+#   iBAQ = summed peptide intensity of a protein in a file /
+#          number of theoretically observable peptides of that protein
+# Same definition as in mod_QC4DIANN / mod_PSManalyst; the in-silico digest
+# helpers live in modules/utils_fasta.r.
+
+#' Digest settings of the search, from the results.json Sage writes next to
+#' results.sage.parquet.
+#'
+#' @param results_path Path to results.sage.parquet / .tsv.
+#' @return NULL when results.json is absent or unreadable, otherwise a list
+#'   with \code{cut}, \code{nocut}, \code{sense} ("C"/"N"),
+#'   \code{missed_cleavages}, \code{min_len}, \code{max_len} and \code{fasta}
+#'   (the FASTA path used in the search); fields are NA when missing.
+read_sage_digest_params <- function(results_path) {
+  f <- file.path(dirname(results_path), "results.json")
+  if (!file.exists(f)) {
+    return(NULL)
+  }
+  cfg <- tryCatch(
+    jsonlite::fromJSON(f, simplifyVector = FALSE),
+    error = function(e) NULL
+  )
+  db <- cfg$database
+  if (is.null(db)) {
+    return(NULL)
+  }
+  enz <- db$enzyme
+  chr <- function(x) if (is.null(x)) NA_character_ else as.character(x)[1]
+  int <- function(x) if (is.null(x)) NA_integer_ else as.integer(x)[1]
+  list(
+    file = f,
+    cut = chr(enz$cleave_at),
+    nocut = chr(enz$restrict),
+    # Sage cleaves C-terminally unless c_terminal is explicitly false
+    sense = if (isFALSE(enz$c_terminal)) "N" else "C",
+    missed_cleavages = int(enz$missed_cleavages),
+    min_len = int(enz$min_len),
+    max_len = int(enz$max_len),
+    fasta = chr(db$fasta)
+  )
+}
+
+#' Protein identifiers treated as contaminants (common FASTA prefixes).
+SAGE_CONTAMINANT_REGEX <- "^(contam|cont|con)_"
+
+#' iBAQ per protein and raw file, long format (untransformed).
+#'
+#' Sage does no protein inference, so only peptides mapping to a single
+#' protein can be attributed: \code{d} must come from
+#' \code{filter_sage_lfq(remove_shared = TRUE)}.
+#'
+#' @param d         Output of \code{filter_sage_lfq()}.
+#' @param sequences Named sequences from \code{fasta_sequences_by_header_id()}.
+#' @param genes     Optional gene names parallel to \code{sequences}.
+#' @return tibble with protein_id, entry_name, gene, n_theoretical_peptides,
+#'   sample, iBAQ. Proteins absent from the FASTA are dropped and listed in
+#'   the "unmatched_proteins" attribute; excluded contaminants in
+#'   "contaminant_proteins".
+compute_ibaq_sage <- function(
+  d,
+  sequences,
+  genes = NULL,
+  exclude_contaminants = FALSE,
+  contaminant_regex = SAGE_CONTAMINANT_REGEX,
+  protease_regex = "(?<=[KR])(?!P)",
+  min_peptide_len = 6,
+  max_peptide_len = 30,
+  max_missed_cleavages = 0
+) {
+  contaminants <- character()
+  if (isTRUE(exclude_contaminants)) {
+    is_contam <- grepl(contaminant_regex, d$proteins, ignore.case = TRUE)
+    contaminants <- unique(d$proteins[is_contam])
+    d <- d[!is_contam, , drop = FALSE]
+  }
+  if (nrow(d) == 0) {
+    stop("No quantified peptides left to compute iBAQ.")
+  }
+
+  intensity <- d |>
+    dplyr::group_by(sample = filename, protein = proteins) |>
+    dplyr::summarise(sum_intensity = sum(intensity), .groups = "drop")
+
+  protein <- unique(intensity$protein)
+  proteins <- data.frame(
+    protein = protein,
+    protein_id = fasta_accessions(protein),
+    entry_name = ifelse(
+      grepl("^[^|]+\\|[^|]+\\|.+", protein),
+      sub("^[^|]+\\|[^|]+\\|", "", protein),
+      NA_character_
+    )
+  )
+  idx <- match_fasta_sequences(protein, proteins$protein_id, sequences)
+  found <- !is.na(idx)
+  proteins$gene <- if (is.null(genes)) NA_character_ else genes[idx]
+  proteins$n_theoretical_peptides <- NA_integer_
+  proteins$n_theoretical_peptides[found] <- unname(count_theoretical_peptides(
+    sequences[idx[found]],
+    protease_regex = protease_regex,
+    min_len = min_peptide_len,
+    max_len = max_peptide_len,
+    max_missed = max_missed_cleavages
+  ))
+
+  out <- intensity |>
+    dplyr::inner_join(proteins[found, , drop = FALSE], by = "protein") |>
+    # Proteins without any observable peptide would divide by zero
+    dplyr::filter(
+      !is.na(n_theoretical_peptides),
+      n_theoretical_peptides > 0
+    ) |>
+    dplyr::mutate(iBAQ = sum_intensity / n_theoretical_peptides) |>
+    dplyr::select(
+      protein_id,
+      entry_name,
+      gene,
+      n_theoretical_peptides,
+      sample,
+      iBAQ
+    ) |>
+    dplyr::arrange(protein_id, sample)
+  attr(out, "unmatched_proteins") <- protein[!found]
+  attr(out, "contaminant_proteins") <- contaminants
+  out
+}
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # MODULE — SIDEBAR UI
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -697,6 +825,173 @@ Sage_body_ui <- function(id) {
             DT::dataTableOutput(ns("pm_table"))
           )
         )
+      ),
+
+      # ── iBAQ (from the LFQ table) ───────────────────────────────────────
+      tabPanel(
+        "iBAQ",
+        fluidRow(uiOutput(ns("ibaq_banner"))),
+        fluidRow(box(
+          title = "iBAQ Controls",
+          status = "primary",
+          solidHeader = TRUE,
+          width = 12,
+          collapsible = TRUE,
+          fluidRow(
+            column(
+              4,
+              fileInput(
+                ns("ibaq_fasta"),
+                "Protein FASTA (search database)",
+                accept = c(".fasta", ".fa", ".fas")
+              )
+            ),
+            column(
+              2,
+              numericInput(
+                ns("ibaq_top_n"),
+                "Top N proteins (bar chart)",
+                value = 20,
+                min = 1,
+                max = 100,
+                step = 1
+              )
+            ),
+            column(
+              2,
+              numericInput(
+                ns("ibaq_rank_labels"),
+                "Labels per facet (ranked)",
+                value = 5,
+                min = 0,
+                max = 50,
+                step = 1
+              )
+            ),
+            column(
+              2,
+              style = "margin-top:25px;",
+              checkboxInput(
+                ns("ibaq_no_contam"),
+                "Exclude contaminants",
+                value = FALSE
+              )
+            ),
+            column(
+              2,
+              style = "margin-top:25px;",
+              checkboxInput(
+                ns("ibaq_log2"),
+                "log₂(iBAQ + 1) in table / export",
+                value = TRUE
+              )
+            )
+          ),
+          fluidRow(
+            column(
+              2,
+              numericInput(
+                ns("ibaq_min_len"),
+                "Min peptide length",
+                value = 6,
+                min = 1,
+                max = 100,
+                step = 1
+              )
+            ),
+            column(
+              2,
+              numericInput(
+                ns("ibaq_max_len"),
+                "Max peptide length",
+                value = 30,
+                min = 1,
+                max = 100,
+                step = 1
+              )
+            ),
+            column(
+              2,
+              numericInput(
+                ns("ibaq_missed_cleavages"),
+                "Missed cleavages",
+                value = 0,
+                min = 0,
+                max = 5,
+                step = 1
+              )
+            ),
+            column(
+              2,
+              textInput(ns("ibaq_cut"), "Cleaved residues", value = "KR")
+            ),
+            column(
+              2,
+              textInput(ns("ibaq_nocut"), "Blocked by residue", value = "P")
+            ),
+            column(
+              2,
+              selectInput(
+                ns("ibaq_sense"),
+                "Cleavage side",
+                choices = c("C-terminal" = "C", "N-terminal" = "N")
+              )
+            )
+          ),
+          uiOutput(ns("ibaq_digest_source")),
+          actionButton(
+            ns("run_ibaq"),
+            "Compute iBAQ",
+            icon = icon("calculator"),
+            class = "btn-primary",
+            style = "margin-right:8px;margin-bottom:8px;"
+          ),
+          downloadButton(
+            ns("download_ibaq_table"),
+            tagList(icon("download"), " iBAQ Matrix (.tsv)"),
+            class = "dl-btn",
+            style = "margin-right:8px;margin-bottom:8px;"
+          ),
+          downloadButton(
+            ns("download_all_ibaq_plots"),
+            tagList(icon("file-zipper"), " Download All Plots (.zip)"),
+            class = "dl-btn",
+            style = "margin-bottom:8px;"
+          ),
+          uiOutput(ns("ibaq_summary"))
+        )),
+        fluidRow(box(
+          title = "iBAQ Distribution per Sample",
+          status = "primary",
+          solidHeader = TRUE,
+          width = 12,
+          collapsible = TRUE,
+          plotOutput(ns("ibaq_dist_plot"), height = "500px")
+        )),
+        fluidRow(box(
+          title = "Dynamic Range — Ranked Protein Abundance",
+          status = "primary",
+          solidHeader = TRUE,
+          width = 12,
+          collapsible = TRUE,
+          uiOutput(ns("ibaq_rank_plot_ui"))
+        )),
+        fluidRow(box(
+          title = "Most Abundant Proteins — Relative iBAQ",
+          status = "primary",
+          solidHeader = TRUE,
+          width = 12,
+          collapsible = TRUE,
+          uiOutput(ns("ibaq_top_plot_ui"))
+        )),
+        fluidRow(box(
+          title = "iBAQ Table",
+          status = "primary",
+          solidHeader = TRUE,
+          width = 12,
+          collapsible = TRUE,
+          DT::dataTableOutput(ns("ibaq_table"))
+        ))
       )
     )
   )
@@ -1571,6 +1866,391 @@ Sage_server <- function(id, fasta_digest) {
           notify = FALSE
         )
       }
+    )
+
+    # ════════════════════════════════════════════════════════════════════════
+    # iBAQ  (from lfq.parquet; compute_ibaq_sage is defined above)
+    # ════════════════════════════════════════════════════════════════════════
+    # Digest settings of the search (results.json) become the defaults of the
+    # iBAQ controls whenever a folder is loaded; the user can still edit them.
+    sage_digest <- reactive({
+      files <- sage_files_rv()
+      if (is.null(files) || is.na(files$results)) {
+        return(NULL)
+      }
+      read_sage_digest_params(files$results)
+    })
+
+    observeEvent(sage_digest(), {
+      p <- sage_digest()
+      if (!is.na(p$min_len)) {
+        updateNumericInput(session, "ibaq_min_len", value = p$min_len)
+      }
+      if (!is.na(p$max_len)) {
+        updateNumericInput(session, "ibaq_max_len", value = p$max_len)
+      }
+      if (!is.na(p$missed_cleavages)) {
+        updateNumericInput(
+          session,
+          "ibaq_missed_cleavages",
+          value = p$missed_cleavages
+        )
+      }
+      # Leave the enzyme controls alone when the rule has no cut residue
+      # (non-enzymatic or no-digestion search): there is no digest to mirror.
+      if (!is.null(protease_regex_from_rule(p$cut))) {
+        updateTextInput(session, "ibaq_cut", value = p$cut)
+        updateTextInput(
+          session,
+          "ibaq_nocut",
+          value = if (is.na(p$nocut)) "" else p$nocut
+        )
+        updateSelectInput(session, "ibaq_sense", selected = p$sense)
+      }
+    })
+
+    output$ibaq_digest_source <- renderUI({
+      req(sage_files_rv())
+      p <- sage_digest()
+      msg <- if (is.null(p)) {
+        "No results.json found next to the Sage results: digest settings are the app defaults."
+      } else {
+        paste0(
+          "Digest defaults read from results.json. Edit the fields above to override them.",
+          if (is.null(protease_regex_from_rule(p$cut))) {
+            " The search has no cleavage rule (non-enzymatic), so the enzyme fields were left unchanged."
+          }
+        )
+      }
+      helpText(msg)
+    })
+
+    # FASTA for the in-silico digest: the upload in the iBAQ controls, otherwise
+    # the search database recorded in results.json when it is still on disk.
+    ibaq_fasta_source <- reactive({
+      if (!is.null(input$ibaq_fasta)) {
+        return(list(path = input$ibaq_fasta$datapath, source = "upload"))
+      }
+      p <- sage_digest()
+      if (!is.null(p) && !is.na(p$fasta) && file.exists(p$fasta)) {
+        return(list(path = p$fasta, source = "results.json"))
+      }
+      NULL
+    })
+
+    ibaq_sequences <- reactive({
+      src <- ibaq_fasta_source()
+      req(src)
+      fa <- Biostrings::readAAStringSet(src$path)
+      keep <- !duplicated(fasta_header_ids(names(fa)))
+      list(
+        seqs = fasta_sequences_by_header_id(fa),
+        genes = fasta_header_genes(names(fa))[keep]
+      )
+    })
+
+    output$ibaq_banner <- renderUI({
+      src <- ibaq_fasta_source()
+      msg <- if (is.null(lfq_data_rv())) {
+        "Load a Sage output folder containing lfq.parquet to enable iBAQ calculation."
+      } else if (is.null(src)) {
+        p <- sage_digest()
+        paste0(
+          "Upload the protein FASTA used in the search (iBAQ Controls) to enable iBAQ calculation.",
+          if (!is.null(p) && !is.na(p$fasta)) {
+            paste0(" Sage searched: ", p$fasta)
+          }
+        )
+      } else if (src$source == "results.json") {
+        paste0(
+          "Using the search database recorded in results.json: ",
+          src$path,
+          ". Upload a FASTA to use a different one."
+        )
+      }
+      if (!is.null(msg)) {
+        div(
+          class = "plot-placeholder",
+          icon("circle-info", style = "margin-right:10px;"),
+          msg
+        )
+      }
+    })
+
+    # Untransformed iBAQ in long format. Uses the sidebar's LFQ peptide
+    # q-value; decoys, unquantified and shared peptides are always removed
+    # (Sage does no protein inference, so shared peptides cannot be assigned).
+    ibaq_long <- eventReactive(input$run_ibaq, {
+      if (is.null(lfq_data_rv()) || is.null(ibaq_fasta_source())) {
+        showNotification(
+          "Load a Sage folder with lfq.parquet and provide a protein FASTA to compute iBAQ.",
+          type = "warning"
+        )
+        req(FALSE)
+      }
+      num <- function(x, default) if (isTruthy(x)) as.integer(x) else default
+      min_len <- max(1L, num(input$ibaq_min_len, 6L))
+      max_len <- max(min_len, num(input$ibaq_max_len, 30L))
+      tryCatch(
+        withProgress(message = "Computing iBAQ…", value = 0.3, {
+          protease_regex <- protease_regex_from_rule(
+            input$ibaq_cut,
+            input$ibaq_nocut,
+            input$ibaq_sense
+          )
+          if (is.null(protease_regex)) {
+            stop("enter at least one cleaved residue (e.g. KR for trypsin).")
+          }
+          fa <- ibaq_sequences()
+          d <- filter_sage_lfq(
+            lfq_data(),
+            q_max = or_default(input$pm_qval, 0.01),
+            remove_shared = TRUE
+          )
+          compute_ibaq_sage(
+            d,
+            fa$seqs,
+            genes = fa$genes,
+            exclude_contaminants = isTRUE(input$ibaq_no_contam),
+            protease_regex = protease_regex,
+            min_peptide_len = min_len,
+            max_peptide_len = max_len,
+            max_missed_cleavages = min(
+              5L,
+              max(0L, num(input$ibaq_missed_cleavages, 0L))
+            )
+          )
+        }),
+        error = function(e) {
+          showNotification(
+            paste("iBAQ error:", conditionMessage(e)),
+            type = "error",
+            duration = 10
+          )
+          NULL
+        }
+      )
+    })
+
+    ibaq_top_n <- reactive({
+      n <- suppressWarnings(as.integer(input$ibaq_top_n))
+      if (length(n) == 0 || is.na(n)) 20L else max(1L, min(100L, n))
+    })
+
+    # Labels per facet in the ranked-abundance plot; 0 turns labels off
+    ibaq_rank_labels <- reactive({
+      n <- suppressWarnings(as.integer(input$ibaq_rank_labels))
+      if (length(n) == 0 || is.na(n)) 5L else max(0L, min(50L, n))
+    })
+
+    # Per-sample rank and relative iBAQ (riBAQ = share of the sample's total
+    # iBAQ), labelled by gene, falling back to entry name, then protein ID.
+    ibaq_per_sample <- reactive({
+      d <- ibaq_long()
+      req(d, nrow(d) > 0)
+      labels <- d[!duplicated(d$protein_id), ]
+      lab <- dplyr::coalesce(
+        dplyr::na_if(labels$gene, ""),
+        dplyr::na_if(labels$entry_name, ""),
+        labels$protein_id
+      )
+      d$label <- make.unique(lab)[match(d$protein_id, labels$protein_id)]
+      d |>
+        dplyr::group_by(sample) |>
+        dplyr::mutate(
+          riBAQ = iBAQ / sum(iBAQ) * 100,
+          rank = dplyr::row_number(dplyr::desc(iBAQ))
+        ) |>
+        dplyr::ungroup()
+    })
+
+    # Facet layout and pixel heights for the per-sample plots
+    IBAQ_NCOL <- 3L
+    ibaq_rank_h <- reactive({
+      n <- dplyr::n_distinct(ibaq_per_sample()$sample)
+      max(500L, ceiling(n / IBAQ_NCOL) * 300L)
+    })
+    ibaq_top_h <- reactive({
+      n <- dplyr::n_distinct(ibaq_per_sample()$sample)
+      max(500L, ceiling(n / IBAQ_NCOL) * (ibaq_top_n() * 14L + 70L))
+    })
+
+    output$ibaq_rank_plot_ui <- renderUI({
+      plotOutput(ns("ibaq_rank_plot"), height = paste0(ibaq_rank_h(), "px"))
+    })
+    output$ibaq_top_plot_ui <- renderUI({
+      plotOutput(ns("ibaq_top_plot"), height = paste0(ibaq_top_h(), "px"))
+    })
+
+    ibaq_wide <- reactive({
+      d <- ibaq_long()
+      req(d, nrow(d) > 0)
+      if (isTRUE(input$ibaq_log2)) {
+        d$iBAQ <- log2(d$iBAQ + 1)
+      }
+      d |>
+        dplyr::arrange(sample) |>
+        tidyr::pivot_wider(names_from = sample, values_from = iBAQ) |>
+        dplyr::arrange(protein_id)
+    })
+
+    output$ibaq_summary <- renderUI({
+      d <- ibaq_long()
+      req(d)
+      n_unmatched <- length(attr(d, "unmatched_proteins"))
+      n_contam <- length(attr(d, "contaminant_proteins"))
+      tags$p(
+        style = "margin:6px 0 0 0;",
+        icon("circle-info"),
+        sprintf(
+          " iBAQ computed for %s proteins across %s samples, from peptides unique to one protein.",
+          scales::comma(dplyr::n_distinct(d$protein_id)),
+          dplyr::n_distinct(d$sample)
+        ),
+        if (n_contam > 0) {
+          sprintf(
+            " %s contaminant protein(s) were excluded.",
+            scales::comma(n_contam)
+          )
+        },
+        if (n_unmatched > 0) {
+          sprintf(
+            " %s protein(s) were excluded because they are not in the FASTA (a FASTA that differs from the search database).",
+            scales::comma(n_unmatched)
+          )
+        }
+      )
+    })
+
+    ibaq_color <- reactive(or_default(input$color_target, "#1b9e77"))
+
+    ibaq_dist_obj <- reactive({
+      d <- ibaq_long()
+      req(d, nrow(d) > 0)
+      ggplot(d, aes(x = sample, y = log2(iBAQ + 1))) +
+        geom_boxplot(fill = ibaq_color(), alpha = 0.75) +
+        labs(x = NULL, y = "log₂(iBAQ + 1)") +
+        theme_sage()
+    })
+
+    ibaq_rank_obj <- reactive({
+      s <- ibaq_per_sample()
+      ggplot(s, aes(x = rank, y = log2(iBAQ + 1))) +
+        geom_point(color = ibaq_color(), alpha = 0.6, size = 0.8) +
+        ggrepel::geom_text_repel(
+          data = dplyr::filter(s, rank <= ibaq_rank_labels()),
+          aes(label = label),
+          size = 3,
+          max.overlaps = Inf,
+          min.segment.length = 0
+        ) +
+        labs(x = "Protein rank", y = "log₂(iBAQ + 1)") +
+        facet_wrap(~sample, ncol = IBAQ_NCOL) +
+        theme_sage() +
+        theme(axis.text.x = element_text(angle = 0, hjust = 0.5))
+    })
+
+    ibaq_top_obj <- reactive({
+      top <- ibaq_per_sample() |>
+        dplyr::filter(rank <= ibaq_top_n())
+      ggplot(
+        top,
+        aes(y = tidytext::reorder_within(label, riBAQ, sample), x = riBAQ)
+      ) +
+        geom_col(fill = ibaq_color(), color = "black", alpha = 0.85) +
+        tidytext::scale_y_reordered() +
+        labs(y = NULL, x = "Relative iBAQ (% of sample total)") +
+        facet_wrap(~sample, ncol = IBAQ_NCOL, scales = "free_y") +
+        theme_sage() +
+        theme(axis.text.x = element_text(angle = 0, hjust = 0.5))
+    })
+
+    output$ibaq_dist_plot <- renderPlot({
+      ibaq_dist_obj()
+    })
+    output$ibaq_rank_plot <- renderPlot({
+      ibaq_rank_obj()
+    })
+    output$ibaq_top_plot <- renderPlot({
+      ibaq_top_obj()
+    })
+
+    output$ibaq_table <- DT::renderDataTable({
+      tbl <- ibaq_wide()
+      DT::datatable(
+        tbl,
+        rownames = FALSE,
+        filter = "top",
+        options = list(pageLength = 20, scrollX = TRUE)
+      ) |>
+        DT::formatRound(columns = unique(ibaq_long()$sample), digits = 2)
+    })
+
+    output$download_ibaq_table <- downloadHandler(
+      filename = function() {
+        paste0(
+          "Sage_",
+          if (isTRUE(input$ibaq_log2)) "log2_" else "",
+          "iBAQ_matrix_",
+          Sys.Date(),
+          ".tsv"
+        )
+      },
+      content = function(file) {
+        data.table::fwrite(ibaq_wide(), file = file, sep = "\t", na = "NA")
+      }
+    )
+
+    output$download_all_ibaq_plots <- downloadHandler(
+      filename = function() {
+        paste0("Sage_iBAQ_plots_", Sys.Date(), ".zip")
+      },
+      content = function(file) {
+        td <- tempdir()
+        fps <- character()
+        save_p <- function(nm, fn, w = 10, h = 8) {
+          fp <- file.path(td, nm)
+          tryCatch(
+            {
+              ggsave(
+                fp,
+                fn(),
+                width = w,
+                height = h,
+                dpi = 300,
+                bg = "white",
+                limitsize = FALSE
+              )
+              fps <<- c(fps, fp)
+            },
+            error = function(e) message("Skip ", nm, ": ", conditionMessage(e))
+          )
+        }
+
+        withProgress(message = "Saving plots...", value = 0, {
+          save_p("iBAQ_distribution.png", function() ibaq_dist_obj(), w = 12)
+          incProgress(1 / 3)
+          # Same proportions as on screen (px / 80), capped for ggsave
+          save_p(
+            "iBAQ_ranked_abundance.png",
+            function() ibaq_rank_obj(),
+            w = 16,
+            h = min(45, ibaq_rank_h() / 80)
+          )
+          incProgress(1 / 3)
+          save_p(
+            "iBAQ_top_proteins.png",
+            function() ibaq_top_obj(),
+            w = 16,
+            h = min(45, ibaq_top_h() / 80)
+          )
+          incProgress(1 / 3)
+        })
+
+        req(length(fps) > 0)
+        utils::zip(file, files = fps, flags = "-j")
+      },
+      contentType = "application/zip"
     )
 
     # ════════════════════════════════════════════════════════════════════════
