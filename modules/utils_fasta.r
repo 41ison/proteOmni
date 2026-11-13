@@ -689,6 +689,73 @@ build_theoretical_peptide_counts <- function(sequences, ...) {
   )
 }
 
+# ── iBAQ helpers shared by the search-engine modules (FragPipe, Sage) ─────────
+
+# First word of each FASTA header: the protein identifier that FragPipe and
+# Sage report (e.g. "sp|P04075|ALDOA_HUMAN", "contam_sp|P02769|ALBU_BOVIN").
+fasta_header_ids <- function(headers) {
+  sub("\\s.*$", "", trimws(sub("^>", "", headers)))
+}
+
+# Gene name from the "GN=" field of UniProt-style headers; NA when absent.
+fasta_header_genes <- function(headers) {
+  gene <- rep(NA_character_, length(headers))
+  has <- grepl("\\bGN=\\S+", headers)
+  gene[has] <- sub("^.*\\bGN=(\\S+).*$", "\\1", headers[has])
+  gene
+}
+
+# Named sequences (header's first word -> sequence) from an AAStringSet.
+fasta_sequences_by_header_id <- function(fasta) {
+  seqs <- toupper(gsub("[[:space:]]", "", as.character(fasta)))
+  names(seqs) <- fasta_header_ids(names(fasta))
+  seqs[!duplicated(names(seqs))]
+}
+
+# Index into `sequences` for each protein: match on the header's first word,
+# then fall back to the accession for a FASTA whose headers differ from the
+# search database. NA when the protein is not in the FASTA.
+match_fasta_sequences <- function(protein, accession, sequences) {
+  idx <- match(protein, names(sequences))
+  miss <- is.na(idx)
+  if (any(miss)) {
+    idx[miss] <- match(accession[miss], fasta_accessions(names(sequences)))
+  }
+  idx
+}
+
+# Cleavage-site regex for count_theoretical_peptides() from an enzyme rule:
+# residues that are cut, residues that block the cut, and the side of the cut
+# residue that is cleaved ("C" = after it, "N" = before it).
+# NULL when no cut residue is given (e.g. a nonspecific search).
+protease_regex_from_rule <- function(cut, nocut = "", sense = "C") {
+  residues <- function(x) {
+    if (is.null(x) || length(x) == 0 || is.na(x)) {
+      return("")
+    }
+    gsub("[^A-Z]", "", toupper(x))
+  }
+  cut <- residues(cut)
+  nocut <- residues(nocut)
+  if (!nzchar(cut)) {
+    return(NULL)
+  }
+  if (identical(toupper(sense), "N")) {
+    # (?<=.) keeps strsplit() from splitting at every character on a pure
+    # lookahead, and from emitting an empty first fragment.
+    paste0(
+      "(?<=.)",
+      if (nzchar(nocut)) sprintf("(?<![%s])", nocut),
+      sprintf("(?=[%s])", cut)
+    )
+  } else {
+    paste0(
+      sprintf("(?<=[%s])", cut),
+      if (nzchar(nocut)) sprintf("(?![%s])", nocut)
+    )
+  }
+}
+
 # Quality filters for a DIA-NN report. A NULL cutoff (or a column absent from
 # the report) skips that filter.
 filter_diann_report <- function(
