@@ -2345,6 +2345,12 @@ PwrQuant_body_ui <- function(id) {
               id = ns("sp_meta"),
               icon("spinner", class = "fa-spin")
             ),
+            # Bootstrap makes inputs inherit the cell's text colour, so the
+            # in-cell editor needs its own explicit colours to stay readable.
+            tags$style(HTML(sprintf(
+              "#%s td input { color:#1a1a1a !important; background-color:#fff !important; }",
+              ns("metadata_table")
+            ))),
             DT::dataTableOutput(ns("metadata_table"))
           )
         ),
@@ -3608,6 +3614,9 @@ PwrQuant_server <- function(id) {
               disable = list(columns = c(0)) # Disable editing of the Sample (original ID) column
             ),
             rownames = FALSE,
+            # Row selection is unused here, and its white-on-blue styling
+            # blanks out the row and the cell editor on double-click.
+            selection = "none",
             options = list(
               dom = "t",
               paging = FALSE,
