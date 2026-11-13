@@ -287,6 +287,10 @@ read_single_psm <- function(path) {
       dplyr::mutate(sample_name = stringr::str_extract(spectrum, "^[^.]+"))
   }
 
+  # Experiment folder: links PSM sample names (spectrum-file prefixes) to the
+  # per-folder tables (peptide.tsv), whose samples are named after the folder.
+  df$experiment <- basename(dirname(path))
+
   df
 }
 
@@ -298,6 +302,239 @@ read_all_psm_files <- function(root_path) {
   }
   purrr::map_dfr(paths, read_single_psm) %>%
     readr::type_convert(na = c("", "NA"))
+}
+
+
+# ── iBAQ from FragPipe peptide.tsv ──────────────────────────────────────
+#   iBAQ = summed peptide intensity of a protein in an experiment /
+#          number of theoretically observable peptides of that protein
+# Same definition as the DIA-NN iBAQ in mod_QC4DIANN; the in-silico digest
+# (count_theoretical_peptides, fasta_accessions) lives in modules/utils_fasta.r.
+
+# Read every peptide.tsv under root_path (they sit next to the psm.tsv files).
+# One row per peptide and experiment; `experiment` is the parent folder name.
+read_all_peptide_files <- function(root_path) {
+  paths <- list.files(
+    path = root_path,
+    pattern = "^peptide\\.tsv$",
+    recursive = TRUE,
+    full.names = TRUE
+  )
+  if (length(paths) == 0L) {
+    stop("No peptide.tsv files found under: ", root_path)
+  }
+  required <- c("peptide", "intensity", "protein", "protein_id")
+  optional <- c("entry_name", "gene", "mapped_proteins")
+
+  purrr::map_dfr(paths, function(f) {
+    df <- data.table::fread(
+      f,
+      sep = "\t",
+      header = TRUE,
+      quote = "",
+      colClasses = "character",
+      data.table = FALSE
+    ) %>%
+      janitor::clean_names()
+    missing_cols <- setdiff(required, names(df))
+    if (length(missing_cols) > 0) {
+      stop(
+        "Missing required columns in ",
+        f,
+        ": ",
+        paste(missing_cols, collapse = ", ")
+      )
+    }
+    for (col in setdiff(optional, names(df))) {
+      df[[col]] <- rep(NA_character_, nrow(df))
+    }
+    df <- df[, c(required, optional), drop = FALSE]
+    df$intensity <- suppressWarnings(as.numeric(df$intensity))
+    df$experiment <- rep(basename(dirname(f)), nrow(df))
+    df
+  })
+}
+
+# Named sequences (first word of the FASTA header -> sequence) from an
+# AAStringSet. FragPipe's `Protein` column holds that same first word
+# (e.g. "sp|P04075|ALDOA_HUMAN", "contam_sp|P02769|ALBU_BOVIN").
+fragpipe_fasta_sequences <- function(fasta) {
+  seqs <- toupper(gsub("[[:space:]]", "", as.character(fasta)))
+  names(seqs) <- sub("\\s.*$", "", trimws(names(fasta)))
+  seqs[!duplicated(names(seqs))]
+}
+
+# Digestion settings of the search, from the fragger.params FragPipe writes
+# into the results folder. NULL when the file is absent; individual fields are
+# NA when a key is missing. Only the first enzyme defines the cleavage rule;
+# `enzyme2` is its name when a second enzyme was used (otherwise NA).
+read_fragger_digest_params <- function(root_path) {
+  f <- file.path(root_path, "fragger.params")
+  if (!file.exists(f)) {
+    found <- list.files(
+      root_path,
+      pattern = "^fragger\\.params$",
+      recursive = TRUE,
+      full.names = TRUE
+    )
+    if (length(found) == 0L) {
+      return(NULL)
+    }
+    f <- found[1]
+  }
+  lines <- sub("#.*$", "", readLines(f, warn = FALSE))
+  kv <- regmatches(
+    lines,
+    regexec("^\\s*([A-Za-z0-9_]+)\\s*=\\s*(.*?)\\s*$", lines, perl = TRUE)
+  )
+  kv <- kv[lengths(kv) == 3L]
+  vals <- stats::setNames(
+    vapply(kv, `[`, character(1), 3L),
+    vapply(kv, `[`, character(1), 2L)
+  )
+  chr <- function(k) if (k %in% names(vals)) vals[[k]] else NA_character_
+  int <- function(k) suppressWarnings(as.integer(chr(k)))
+  enzyme2 <- chr("search_enzyme_name_2")
+  if (is.na(enzyme2) || enzyme2 %in% c("", "null")) {
+    enzyme2 <- NA_character_
+  }
+  list(
+    file = f,
+    enzyme = chr("search_enzyme_name_1"),
+    cut = chr("search_enzyme_cut_1"),
+    nocut = chr("search_enzyme_nocut_1"),
+    sense = chr("search_enzyme_sense_1"),
+    missed_cleavages = int("allowed_missed_cleavage_1"),
+    min_len = int("digest_min_length"),
+    max_len = int("digest_max_length"),
+    enzyme2 = enzyme2
+  )
+}
+
+# Cleavage-site regex for count_theoretical_peptides() from an MSFragger-style
+# enzyme rule: residues that are cut, residues that block the cut, and the side
+# of the cut residue that is cleaved ("C" = after it, "N" = before it).
+# NULL when no cut residue is given (e.g. a nonspecific search).
+protease_regex_from_rule <- function(cut, nocut = "", sense = "C") {
+  residues <- function(x) {
+    if (is.null(x) || length(x) == 0 || is.na(x)) {
+      return("")
+    }
+    gsub("[^A-Z]", "", toupper(x))
+  }
+  cut <- residues(cut)
+  nocut <- residues(nocut)
+  if (!nzchar(cut)) {
+    return(NULL)
+  }
+  if (identical(toupper(sense), "N")) {
+    # (?<=.) keeps strsplit() from splitting at every character on a pure
+    # lookahead, and from emitting an empty first fragment.
+    paste0(
+      "(?<=.)",
+      if (nzchar(nocut)) sprintf("(?<![%s])", nocut),
+      sprintf("(?=[%s])", cut)
+    )
+  } else {
+    paste0(
+      sprintf("(?<=[%s])", cut),
+      if (nzchar(nocut)) sprintf("(?![%s])", nocut)
+    )
+  }
+}
+
+# iBAQ per protein and experiment, long format (untransformed).
+#   peptides  : output of read_all_peptide_files().
+#   sequences : output of fragpipe_fasta_sequences().
+# Each peptide counts towards the protein FragPipe assigned it to (razor
+# assignment); unique_only keeps peptides that map to no other protein.
+# Proteins with no quantified peptide in an experiment are absent from it.
+# Proteins not found in the FASTA are dropped and listed in the
+# "unmatched_proteins" attribute. exclude_contaminants drops proteins whose
+# FASTA entry name matches contaminant_regex (FragPipe's "contam_" tag); they
+# are listed in the "contaminant_proteins" attribute.
+compute_ibaq_fragpipe <- function(
+  peptides,
+  sequences,
+  unique_only = FALSE,
+  exclude_contaminants = FALSE,
+  contaminant_regex = "^contam_",
+  protease_regex = "(?<=[KR])(?!P)",
+  min_peptide_len = 6,
+  max_peptide_len = 30,
+  max_missed_cleavages = 0
+) {
+  contaminants <- character()
+  if (isTRUE(exclude_contaminants)) {
+    is_contam <- grepl(contaminant_regex, peptides$protein)
+    contaminants <- unique(peptides$protein[is_contam])
+    peptides <- peptides[!is_contam, , drop = FALSE]
+  }
+  if (isTRUE(unique_only)) {
+    peptides <- peptides[
+      is.na(peptides$mapped_proteins) | peptides$mapped_proteins == "",
+      ,
+      drop = FALSE
+    ]
+  }
+
+  intensity <- peptides %>%
+    dplyr::group_by(sample = experiment, protein) %>%
+    dplyr::summarise(
+      sum_intensity = sum(intensity, na.rm = TRUE),
+      .groups = "drop"
+    ) %>%
+    dplyr::filter(sum_intensity > 0)
+  if (nrow(intensity) == 0) {
+    stop("No peptide with a non-zero intensity; nothing to quantify.")
+  }
+
+  quantified <- unique(intensity$protein)
+  proteins <- peptides %>%
+    dplyr::filter(protein %in% quantified) %>%
+    dplyr::distinct(protein, .keep_all = TRUE) %>%
+    dplyr::select(protein, protein_id, entry_name, gene)
+
+  # Match on the header's first word, then fall back to the accession for a
+  # FASTA whose headers differ from the search database.
+  idx <- match(proteins$protein, names(sequences))
+  miss <- is.na(idx)
+  if (any(miss)) {
+    idx[miss] <- match(
+      proteins$protein_id[miss],
+      fasta_accessions(names(sequences))
+    )
+  }
+  proteins$n_theoretical_peptides <- NA_integer_
+  found <- !is.na(idx)
+  proteins$n_theoretical_peptides[found] <- unname(count_theoretical_peptides(
+    sequences[idx[found]],
+    protease_regex = protease_regex,
+    min_len = min_peptide_len,
+    max_len = max_peptide_len,
+    max_missed = max_missed_cleavages
+  ))
+
+  out <- intensity %>%
+    dplyr::inner_join(proteins[found, , drop = FALSE], by = "protein") %>%
+    # Proteins without any observable peptide would divide by zero
+    dplyr::filter(
+      !is.na(n_theoretical_peptides),
+      n_theoretical_peptides > 0
+    ) %>%
+    dplyr::mutate(iBAQ = sum_intensity / n_theoretical_peptides) %>%
+    dplyr::select(
+      protein_id,
+      entry_name,
+      gene,
+      n_theoretical_peptides,
+      sample,
+      iBAQ
+    ) %>%
+    dplyr::arrange(protein_id, sample)
+  attr(out, "unmatched_proteins") <- proteins$protein[!found]
+  attr(out, "contaminant_proteins") <- contaminants
+  out
 }
 
 
@@ -906,6 +1143,174 @@ PSManalyst_ui <- function(id) {
             uiOutput(ns("jaccard_similarity_ui"))
           )
         )
+      ),
+
+      # ── TAB 6: iBAQ (from peptide.tsv) ──
+      tabPanel(
+        "iBAQ",
+        fluidRow(uiOutput(ns("ibaq_banner"))),
+        fluidRow(box(
+          title = "iBAQ Controls",
+          status = "primary",
+          solidHeader = TRUE,
+          width = 12,
+          collapsible = TRUE,
+          fluidRow(
+            column(
+              2,
+              numericInput(
+                ns("ibaq_min_len"),
+                "Min peptide length",
+                value = 6,
+                min = 1,
+                max = 100,
+                step = 1
+              )
+            ),
+            column(
+              2,
+              numericInput(
+                ns("ibaq_max_len"),
+                "Max peptide length",
+                value = 30,
+                min = 1,
+                max = 100,
+                step = 1
+              )
+            ),
+            column(
+              2,
+              numericInput(
+                ns("ibaq_missed_cleavages"),
+                "Missed cleavages",
+                value = 0,
+                min = 0,
+                max = 5,
+                step = 1
+              )
+            ),
+            column(
+              2,
+              textInput(ns("ibaq_cut"), "Cleaved residues", value = "KR")
+            ),
+            column(
+              2,
+              textInput(ns("ibaq_nocut"), "Blocked by residue", value = "P")
+            ),
+            column(
+              2,
+              selectInput(
+                ns("ibaq_sense"),
+                "Cleavage side",
+                choices = c("C-terminal" = "C", "N-terminal" = "N")
+              )
+            )
+          ),
+          uiOutput(ns("ibaq_digest_source")),
+          fluidRow(
+            column(
+              3,
+              numericInput(
+                ns("ibaq_top_n"),
+                "Top N proteins (bar chart)",
+                value = 20,
+                min = 1,
+                max = 100,
+                step = 1
+              )
+            ),
+            column(
+              3,
+              numericInput(
+                ns("ibaq_rank_labels"),
+                "Labels per facet (ranked abundance)",
+                value = 5,
+                min = 0,
+                max = 50,
+                step = 1
+              )
+            ),
+            column(
+              2,
+              style = "margin-top:25px;",
+              checkboxInput(
+                ns("ibaq_unique"),
+                "Unique peptides only",
+                value = FALSE
+              )
+            ),
+            column(
+              2,
+              style = "margin-top:25px;",
+              checkboxInput(
+                ns("ibaq_no_contam"),
+                "Exclude contaminants",
+                value = FALSE
+              )
+            ),
+            column(
+              2,
+              style = "margin-top:25px;",
+              checkboxInput(
+                ns("ibaq_log2"),
+                "log₂(iBAQ + 1) in table / export",
+                value = TRUE
+              )
+            )
+          ),
+          actionButton(
+            ns("run_ibaq"),
+            "Compute iBAQ",
+            icon = icon("calculator"),
+            class = "btn-primary",
+            style = "margin-right:8px;margin-bottom:8px;"
+          ),
+          downloadButton(
+            ns("download_ibaq_table"),
+            tagList(icon("download"), " iBAQ Matrix (.tsv)"),
+            class = "dl-btn",
+            style = "margin-right:8px;margin-bottom:8px;"
+          ),
+          downloadButton(
+            ns("download_all_ibaq_plots"),
+            tagList(icon("file-zipper"), " Download All Plots (.zip)"),
+            class = "dl-btn",
+            style = "margin-bottom:8px;"
+          ),
+          uiOutput(ns("ibaq_summary"))
+        )),
+        fluidRow(box(
+          title = "iBAQ Distribution per Sample",
+          status = "primary",
+          solidHeader = TRUE,
+          width = 12,
+          collapsible = TRUE,
+          plotOutput(ns("ibaq_dist_plot"), height = "500px")
+        )),
+        fluidRow(box(
+          title = "Dynamic Range — Ranked Protein Abundance",
+          status = "primary",
+          solidHeader = TRUE,
+          width = 12,
+          collapsible = TRUE,
+          uiOutput(ns("ibaq_rank_plot_ui"))
+        )),
+        fluidRow(box(
+          title = "Most Abundant Proteins — Relative iBAQ",
+          status = "primary",
+          solidHeader = TRUE,
+          width = 12,
+          collapsible = TRUE,
+          uiOutput(ns("ibaq_top_plot_ui"))
+        )),
+        fluidRow(box(
+          title = "iBAQ Table",
+          status = "primary",
+          solidHeader = TRUE,
+          width = 12,
+          collapsible = TRUE,
+          DT::dataTableOutput(ns("ibaq_table"))
+        ))
       )
     )
   )
@@ -1032,6 +1437,30 @@ PSManalyst_server <- function(id) {
         return(d)
       }
       dplyr::filter(d, sample_name %in% sel)
+    }
+
+    # The per-folder tables (protein.tsv, peptide.tsv) name their samples after
+    # the experiment folder, while the sidebar selector lists PSM sample names
+    # (spectrum-file prefixes): translate the selection. NULL = all.
+    selected_experiments <- reactive({
+      sel <- selected_samples()
+      if (is.null(sel)) {
+        return(NULL)
+      }
+      psm <- raw_psm_data()
+      linked <- if ("experiment" %in% names(psm)) {
+        psm$experiment[psm$sample_name %in% sel]
+      }
+      unique(as.character(c(sel, linked)))
+    })
+
+    # Same as filter_samples(), for tables whose sample_name is the folder.
+    filter_experiments <- function(d) {
+      sel <- selected_experiments()
+      if (is.null(sel) || !"sample_name" %in% names(d)) {
+        return(d)
+      }
+      dplyr::filter(d, as.character(sample_name) %in% sel)
     }
 
     data <- reactive({
@@ -1948,12 +2377,20 @@ PSManalyst_server <- function(id) {
       # Read every protein.tsv and tag each with a sample_name derived from its
       # parent folder so that plots can be faceted / filtered by sample.
       purrr::map_dfr(prot_files, function(f) {
-        data.table::fread(f, sep = "\t", header = TRUE, colClasses = "character") %>%
+        data.table::fread(
+          f,
+          sep = "\t",
+          header = TRUE,
+          colClasses = "character"
+        ) %>%
           janitor::clean_names() %>%
           dplyr::mutate(sample_name = basename(dirname(f)))
       }) %>%
-      dplyr::mutate(dplyr::across(dplyr::everything(), ~ utils::type.convert(.x, as.is = TRUE))) %>%
-        filter_samples()
+        dplyr::mutate(dplyr::across(
+          dplyr::everything(),
+          ~ utils::type.convert(.x, as.is = TRUE)
+        )) %>%
+        filter_experiments()
     })
 
     combined_protein_data <- reactive({
@@ -2661,6 +3098,398 @@ PSManalyst_server <- function(id) {
     })
 
     # ════════════════════════════════════════════════════════════════════════
+    # F3. iBAQ  (from the peptide.tsv next to each psm.tsv)
+    # ════════════════════════════════════════════════════════════════════════
+    peptide_data <- reactive({
+      folder <- loaded_psm_folder()
+      req(folder)
+      read_all_peptide_files(folder)
+    })
+
+    # Digest settings of the search become the defaults of the iBAQ controls
+    # whenever a folder is loaded; the user can still change them.
+    fragger_digest <- reactive({
+      folder <- loaded_psm_folder()
+      req(folder)
+      tryCatch(read_fragger_digest_params(folder), error = function(e) NULL)
+    })
+
+    observeEvent(fragger_digest(), {
+      p <- fragger_digest()
+      if (!is.na(p$min_len)) {
+        updateNumericInput(session, "ibaq_min_len", value = p$min_len)
+      }
+      if (!is.na(p$max_len)) {
+        updateNumericInput(session, "ibaq_max_len", value = p$max_len)
+      }
+      if (!is.na(p$missed_cleavages)) {
+        updateNumericInput(
+          session,
+          "ibaq_missed_cleavages",
+          value = p$missed_cleavages
+        )
+      }
+      # Leave the enzyme controls alone when the rule has no cut residue
+      # (nonspecific search): there is no digest to mirror.
+      if (!is.null(protease_regex_from_rule(p$cut))) {
+        updateTextInput(session, "ibaq_cut", value = p$cut)
+        updateTextInput(
+          session,
+          "ibaq_nocut",
+          value = if (is.na(p$nocut)) "" else p$nocut
+        )
+        if (p$sense %in% c("C", "N")) {
+          updateSelectInput(session, "ibaq_sense", selected = p$sense)
+        }
+      }
+    })
+
+    output$ibaq_digest_source <- renderUI({
+      req(loaded_psm_folder())
+      p <- fragger_digest()
+      msg <- if (is.null(p)) {
+        "No fragger.params found in the loaded folder: digest settings are the app defaults."
+      } else {
+        paste0(
+          "Digest defaults read from fragger.params",
+          if (!is.na(p$enzyme)) paste0(" (enzyme: ", p$enzyme, ")"),
+          ". Edit the fields above to override them.",
+          if (is.null(protease_regex_from_rule(p$cut))) {
+            " The search enzyme has no cleavage rule (nonspecific), so the enzyme fields were left unchanged."
+          },
+          if (!is.na(p$enzyme2)) {
+            paste0(
+              " A second enzyme (",
+              p$enzyme2,
+              ") was used in the search and is not included in the digest."
+            )
+          }
+        )
+      }
+      helpText(msg)
+    })
+
+    # Sequences for the in-silico digest: the sidebar FASTA when uploaded,
+    # otherwise the protein.fas files FragPipe writes into each experiment
+    # folder (sequences of the identified proteins).
+    ibaq_sequences <- reactive({
+      if (!is.null(input$fasta_file)) {
+        fa <- fasta_data()
+        req(fa)
+        return(list(seqs = fragpipe_fasta_sequences(fa), source = "upload"))
+      }
+      folder <- loaded_psm_folder()
+      req(folder)
+      fas <- list.files(
+        folder,
+        pattern = "^protein\\.fas$",
+        full.names = TRUE,
+        recursive = TRUE
+      )
+      if (length(fas) == 0) {
+        return(NULL)
+      }
+      seqs <- unlist(lapply(fas, function(f) {
+        fragpipe_fasta_sequences(Biostrings::readAAStringSet(f))
+      }))
+      list(seqs = seqs[!duplicated(names(seqs))], source = "protein.fas")
+    })
+
+    output$ibaq_banner <- renderUI({
+      msg <- if (is.null(loaded_psm_folder())) {
+        "Load a FragPipe folder in the sidebar to enable iBAQ calculation (peptide.tsv is read from the same subfolders as psm.tsv)."
+      } else if (is.null(input$fasta_file)) {
+        "No FASTA uploaded: theoretical peptides are counted from the protein.fas files in the FragPipe folder. Upload a FASTA in the sidebar to use it instead."
+      }
+      if (!is.null(msg)) {
+        div(
+          class = "plot-placeholder",
+          icon("circle-info", style = "margin-right:10px;"),
+          msg
+        )
+      }
+    })
+
+    # Untransformed iBAQ in long format. peptide.tsv is already FDR-filtered by
+    # FragPipe, so the sidebar Hyperscore / probability / specificity filters
+    # (PSM-level) do not apply here; the sample selector does.
+    ibaq_long <- eventReactive(input$run_ibaq, {
+      if (is.null(loaded_psm_folder())) {
+        showNotification(
+          "Load a FragPipe folder to compute iBAQ.",
+          type = "warning"
+        )
+        req(FALSE)
+      }
+      num <- function(x, default) if (isTruthy(x)) as.integer(x) else default
+      min_len <- max(1L, num(input$ibaq_min_len, 6L))
+      max_len <- max(min_len, num(input$ibaq_max_len, 30L))
+      tryCatch(
+        withProgress(message = "Computing iBAQ…", value = 0.3, {
+          pep <- peptide_data()
+          sel <- selected_experiments()
+          if (!is.null(sel)) {
+            pep <- pep[pep$experiment %in% sel, , drop = FALSE]
+          }
+          fa <- ibaq_sequences()
+          if (is.null(fa)) {
+            stop(
+              "no protein.fas found in the FragPipe folder; ",
+              "upload a FASTA file in the sidebar."
+            )
+          }
+          protease_regex <- protease_regex_from_rule(
+            input$ibaq_cut,
+            input$ibaq_nocut,
+            input$ibaq_sense
+          )
+          if (is.null(protease_regex)) {
+            stop("enter at least one cleaved residue (e.g. KR for trypsin).")
+          }
+          compute_ibaq_fragpipe(
+            pep,
+            fa$seqs,
+            unique_only = isTRUE(input$ibaq_unique),
+            exclude_contaminants = isTRUE(input$ibaq_no_contam),
+            protease_regex = protease_regex,
+            min_peptide_len = min_len,
+            max_peptide_len = max_len,
+            max_missed_cleavages = min(
+              5L,
+              max(0L, num(input$ibaq_missed_cleavages, 0L))
+            )
+          )
+        }),
+        error = function(e) {
+          showNotification(
+            paste("iBAQ error:", conditionMessage(e)),
+            type = "error",
+            duration = 10
+          )
+          NULL
+        }
+      )
+    })
+
+    ibaq_top_n <- reactive({
+      n <- suppressWarnings(as.integer(input$ibaq_top_n))
+      if (length(n) == 0 || is.na(n)) 20L else max(1L, min(100L, n))
+    })
+
+    # Labels per facet in the ranked-abundance plot; 0 turns labels off
+    ibaq_rank_labels <- reactive({
+      n <- suppressWarnings(as.integer(input$ibaq_rank_labels))
+      if (length(n) == 0 || is.na(n)) 5L else max(0L, min(50L, n))
+    })
+
+    # Per-sample rank and relative iBAQ (riBAQ = share of the sample's total
+    # iBAQ), with a gene label that falls back to the protein ID.
+    ibaq_per_sample <- reactive({
+      d <- ibaq_long()
+      req(d, nrow(d) > 0)
+      labels <- d[!duplicated(d$protein_id), ]
+      lab <- labels$protein_id
+      has_gene <- !is.na(labels$gene) & labels$gene != ""
+      lab[has_gene] <- labels$gene[has_gene]
+      d$label <- make.unique(lab)[match(d$protein_id, labels$protein_id)]
+      d %>%
+        dplyr::group_by(sample) %>%
+        dplyr::mutate(
+          riBAQ = iBAQ / sum(iBAQ) * 100,
+          rank = dplyr::row_number(dplyr::desc(iBAQ))
+        ) %>%
+        dplyr::ungroup()
+    })
+
+    # Facet layout and pixel heights for the per-sample plots
+    IBAQ_NCOL <- 3L
+    ibaq_rank_h <- reactive({
+      n <- dplyr::n_distinct(ibaq_per_sample()$sample)
+      max(500L, ceiling(n / IBAQ_NCOL) * 300L)
+    })
+    ibaq_top_h <- reactive({
+      n <- dplyr::n_distinct(ibaq_per_sample()$sample)
+      max(500L, ceiling(n / IBAQ_NCOL) * (ibaq_top_n() * 14L + 70L))
+    })
+
+    output$ibaq_rank_plot_ui <- renderUI({
+      plotOutput(ns("ibaq_rank_plot"), height = paste0(ibaq_rank_h(), "px"))
+    })
+    output$ibaq_top_plot_ui <- renderUI({
+      plotOutput(ns("ibaq_top_plot"), height = paste0(ibaq_top_h(), "px"))
+    })
+
+    ibaq_wide <- reactive({
+      d <- ibaq_long()
+      req(d, nrow(d) > 0)
+      if (isTRUE(input$ibaq_log2)) {
+        d$iBAQ <- log2(d$iBAQ + 1)
+      }
+      d %>%
+        dplyr::arrange(sample) %>%
+        tidyr::pivot_wider(names_from = sample, values_from = iBAQ) %>%
+        dplyr::arrange(protein_id)
+    })
+
+    output$ibaq_summary <- renderUI({
+      d <- ibaq_long()
+      req(d)
+      n_unmatched <- length(attr(d, "unmatched_proteins"))
+      n_contam <- length(attr(d, "contaminant_proteins"))
+      tags$p(
+        style = "margin:6px 0 0 0;",
+        icon("circle-info"),
+        sprintf(
+          " iBAQ computed for %s proteins across %s samples.",
+          scales::comma(dplyr::n_distinct(d$protein_id)),
+          dplyr::n_distinct(d$sample)
+        ),
+        if (n_contam > 0) {
+          sprintf(
+            " %s contaminant protein(s) were excluded.",
+            scales::comma(n_contam)
+          )
+        },
+        if (n_unmatched > 0) {
+          sprintf(
+            " %s protein(s) were excluded because they are not in the FASTA (e.g. contaminants, or a FASTA that differs from the search database).",
+            scales::comma(n_unmatched)
+          )
+        }
+      )
+    })
+
+    ibaq_dist_obj <- reactive({
+      d <- ibaq_long()
+      req(d, nrow(d) > 0)
+      ggplot(d, aes(x = sample, y = log2(iBAQ + 1))) +
+        geom_boxplot(fill = input$plot_color, alpha = 0.75) +
+        labs(x = NULL, y = "log₂(iBAQ + 1)") +
+        theme(axis.text.x = element_text(angle = 45, hjust = 1))
+    })
+
+    ibaq_rank_obj <- reactive({
+      s <- ibaq_per_sample()
+      ggplot(s, aes(x = rank, y = log2(iBAQ + 1))) +
+        geom_point(color = input$plot_color, alpha = 0.6, size = 0.8) +
+        ggrepel::geom_text_repel(
+          data = dplyr::filter(s, rank <= ibaq_rank_labels()),
+          aes(label = label),
+          size = 3,
+          max.overlaps = Inf,
+          min.segment.length = 0
+        ) +
+        labs(x = "Protein rank", y = "log₂(iBAQ + 1)") +
+        facet_wrap(~sample, ncol = IBAQ_NCOL)
+    })
+
+    ibaq_top_obj <- reactive({
+      top <- ibaq_per_sample() %>%
+        dplyr::filter(rank <= ibaq_top_n())
+      ggplot(
+        top,
+        aes(y = tidytext::reorder_within(label, riBAQ, sample), x = riBAQ)
+      ) +
+        geom_col(fill = input$plot_color, color = "black", alpha = 0.85) +
+        tidytext::scale_y_reordered() +
+        labs(y = NULL, x = "Relative iBAQ (% of sample total)") +
+        facet_wrap(~sample, ncol = IBAQ_NCOL, scales = "free_y")
+    })
+
+    output$ibaq_dist_plot <- renderPlot({
+      ibaq_dist_obj()
+    })
+    output$ibaq_rank_plot <- renderPlot({
+      ibaq_rank_obj()
+    })
+    output$ibaq_top_plot <- renderPlot({
+      ibaq_top_obj()
+    })
+
+    output$ibaq_table <- DT::renderDataTable(
+      {
+        tbl <- ibaq_wide()
+        DT::datatable(
+          tbl,
+          rownames = FALSE,
+          filter = "top",
+          options = list(pageLength = 20, scrollX = TRUE)
+        ) %>%
+          DT::formatRound(
+            columns = unique(ibaq_long()$sample),
+            digits = 2
+          )
+      },
+      server = TRUE
+    )
+
+    output$download_ibaq_table <- downloadHandler(
+      filename = function() {
+        paste0(
+          if (isTRUE(input$ibaq_log2)) "log2_" else "",
+          "iBAQ_matrix_",
+          Sys.Date(),
+          ".tsv"
+        )
+      },
+      content = function(file) {
+        data.table::fwrite(ibaq_wide(), file = file, sep = "\t", na = "NA")
+      }
+    )
+
+    output$download_all_ibaq_plots <- downloadHandler(
+      filename = function() {
+        paste0("PSManalyst_iBAQ_plots_", Sys.Date(), ".zip")
+      },
+      content = function(file) {
+        td <- tempdir()
+        fps <- character()
+        save_p <- function(nm, fn, w = 10, h = 8) {
+          fp <- file.path(td, nm)
+          tryCatch(
+            {
+              ggsave(
+                fp,
+                fn(),
+                width = w,
+                height = h,
+                dpi = 300,
+                bg = "white",
+                limitsize = FALSE
+              )
+              fps <<- c(fps, fp)
+            },
+            error = function(e) message("Skip ", nm, ": ", conditionMessage(e))
+          )
+        }
+
+        withProgress(message = "Saving plots...", value = 0, {
+          save_p("iBAQ_distribution.png", function() ibaq_dist_obj(), w = 12)
+          incProgress(1 / 3)
+          # Same proportions as on screen (px / 80), capped for ggsave
+          save_p(
+            "iBAQ_ranked_abundance.png",
+            function() ibaq_rank_obj(),
+            w = 16,
+            h = min(45, ibaq_rank_h() / 80)
+          )
+          incProgress(1 / 3)
+          save_p(
+            "iBAQ_top_proteins.png",
+            function() ibaq_top_obj(),
+            w = 16,
+            h = min(45, ibaq_top_h() / 80)
+          )
+          incProgress(1 / 3)
+        })
+
+        req(length(fps) > 0)
+        utils::zip(file, files = fps, flags = "-j")
+      },
+      contentType = "application/zip"
+    )
+
+    # ════════════════════════════════════════════════════════════════════════
     # G. DISPATCHERS
     # ════════════════════════════════════════════════════════════════════════
     current_psm_plot <- eventReactive(
@@ -2914,7 +3743,7 @@ PSManalyst_server <- function(id) {
         req(input$combined_protein)
         metric <- input$export_abundance_metric %||% "max_lfq_intensity"
         id_col <- input$export_protein_id %||% "protein_id"
-        
+
         raw <- data.table::fread(
           input$combined_protein$datapath,
           sep = "\t",
