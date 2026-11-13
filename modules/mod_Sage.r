@@ -573,44 +573,6 @@ Sage_sidebar_ui <- function(id) {
       value = "#d95f02"
     ),
     tags$hr(style = "border-color:#2d3741;margin:6px 0;"),
-    selectInput(
-      ns("plot_select"),
-      "Select Graphic",
-      choices = c(
-        "Number of PSMs" = "plot_psm_counts",
-        "Proteins & Peptides by File" = "plot_id_counts",
-        "Sage Discriminant Score (LDA)" = "plot_lda",
-        "Charge State Density" = "plot_charge",
-        "Peptide Length Density" = "plot_length",
-        "Missed Cleavages" = "plot_missed",
-        "GRAVY Index Distribution" = "plot_gravy",
-        "pI Distribution" = "plot_pi",
-        "RT vs Mass Error (Da)" = "plot_rt_error",
-        "Fragment Error (ppm)" = "plot_frag_error",
-        "RT vs Precursor Error (ppm)" = "plot_rt_precursor",
-        "Precursor Mass Error Density (ppm)" = "plot_precursor_error",
-        "Peptide vs Protein q-value" = "plot_pep_prot_qval",
-        "Peptide vs Spectrum q-value" = "plot_qvals",
-        "Peptide Yield vs. FDR" = "plot_fdr_curve"
-      )
-    ),
-    actionButton(
-      ns("run_plot"),
-      "Plot Selected Graphic",
-      icon = icon("chart-bar"),
-      class = "btn-primary",
-      style = "width:80%;margin-bottom:8px;"
-    ),
-    div(
-      style = "padding:0 8px;",
-      downloadButton(
-        ns("download_plot"),
-        "⬇ Download Plot (.png)",
-        class = "dl-btn",
-        style = "width:100%;text-align:left;"
-      )
-    ),
-    tags$hr(style = "border-color:#2d3741;margin:6px 0;"),
     tags$div(
       style = "padding:12px 16px 4px;color:#ffffff;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:1px;",
       "Protein Abundance Matrix (LFQ)"
@@ -685,6 +647,56 @@ Sage_body_ui <- function(id) {
             solidHeader = TRUE,
             width = 12,
             collapsible = TRUE,
+            fluidRow(
+              column(
+                4,
+                selectInput(
+                  ns("plot_select"),
+                  "Select Graphic",
+                  choices = c(
+                    "Number of PSMs" = "plot_psm_counts",
+                    "Proteins & Peptides by File" = "plot_id_counts",
+                    "Sage Discriminant Score (LDA)" = "plot_lda",
+                    "Charge State Density" = "plot_charge",
+                    "Peptide Length Density" = "plot_length",
+                    "Missed Cleavages" = "plot_missed",
+                    "GRAVY Index Distribution" = "plot_gravy",
+                    "pI Distribution" = "plot_pi",
+                    "RT vs Mass Error (Da)" = "plot_rt_error",
+                    "Fragment Error (ppm)" = "plot_frag_error",
+                    "RT vs Precursor Error (ppm)" = "plot_rt_precursor",
+                    "Precursor Mass Error Density (ppm)" = "plot_precursor_error",
+                    "Peptide vs Protein q-value" = "plot_pep_prot_qval",
+                    "Peptide vs Spectrum q-value" = "plot_qvals",
+                    "Peptide Yield vs. FDR" = "plot_fdr_curve"
+                  )
+                )
+              ),
+              column(
+                4,
+                tags$div(
+                  style = "margin-top:25px;",
+                  actionButton(
+                    ns("run_plot"),
+                    "Plot Selected Graphic",
+                    icon = icon("chart-bar"),
+                    class = "btn-primary",
+                    style = "width:100%;"
+                  )
+                )
+              ),
+              column(
+                4,
+                tags$div(
+                  style = "margin-top:25px;",
+                  downloadButton(
+                    ns("download_plot"),
+                    "Download Plot (.png)",
+                    style = "width:100%;"
+                  )
+                )
+              )
+            ),
             sp_wrap_sage(ns("spi_main"), uiOutput(ns("dynamic_plot_ui")))
           )
         )
