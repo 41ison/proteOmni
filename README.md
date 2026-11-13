@@ -200,6 +200,7 @@ Visual QC for FragPipe DDA results. Point the module at the folder containing th
 | **Protein Viewer** | Protein-level plots from `combined_protein.tsv` (coverage, organisms, protein existence, protein/top-peptide probability, total peptides, razor spectral count and intensity, MaxLFQ distribution, top-20 by MaxLFQ or spectral count) and a colour-coded **Sequence Coverage View** mapping peptides onto FASTA sequences |
 | **Modification Diagnostic** | RT-shift profile of modified vs. unmodified peptide pairs (adjustable RT tolerance) with a paired-peptide table |
 | **Similarity & Distance** | Pairwise sample scatterplot matrix (`GGally::ggpairs`), cosine similarity, Euclidean distance, and Jaccard similarity heatmaps |
+| **iBAQ** | Intensity-based absolute quantification (summed peptide intensity / number of theoretical tryptic peptides) from the `peptide.tsv` found next to each `psm.tsv`. Controls box on top: peptide length window, missed cleavages and enzyme rule (defaults read from `fragger.params` in the loaded folder, editable), unique-peptides-only, exclude contaminants, log₂ export. Per-sample distribution, ranked abundance, most abundant proteins (relative iBAQ), and a protein × sample table with TSV download. Uses the sidebar FASTA when uploaded, otherwise the `protein.fas` files in the FragPipe folder |
 
 ---
 
