@@ -309,7 +309,8 @@ read_all_psm_files <- function(root_path) {
 #   iBAQ = summed peptide intensity of a protein in an experiment /
 #          number of theoretically observable peptides of that protein
 # Same definition as the DIA-NN iBAQ in mod_QC4DIANN; the in-silico digest
-# (count_theoretical_peptides, fasta_accessions) lives in modules/utils_fasta.r.
+# (count_theoretical_peptides, protease_regex_from_rule, FASTA matching) lives
+# in modules/utils_fasta.r.
 
 # Read every peptide.tsv under root_path (they sit next to the psm.tsv files).
 # One row per peptide and experiment; `experiment` is the parent folder name.
@@ -353,15 +354,6 @@ read_all_peptide_files <- function(root_path) {
     df$experiment <- rep(basename(dirname(f)), nrow(df))
     df
   })
-}
-
-# Named sequences (first word of the FASTA header -> sequence) from an
-# AAStringSet. FragPipe's `Protein` column holds that same first word
-# (e.g. "sp|P04075|ALDOA_HUMAN", "contam_sp|P02769|ALBU_BOVIN").
-fragpipe_fasta_sequences <- function(fasta) {
-  seqs <- toupper(gsub("[[:space:]]", "", as.character(fasta)))
-  names(seqs) <- sub("\\s.*$", "", trimws(names(fasta)))
-  seqs[!duplicated(names(seqs))]
 }
 
 # Digestion settings of the search, from the fragger.params FragPipe writes
@@ -411,41 +403,10 @@ read_fragger_digest_params <- function(root_path) {
   )
 }
 
-# Cleavage-site regex for count_theoretical_peptides() from an MSFragger-style
-# enzyme rule: residues that are cut, residues that block the cut, and the side
-# of the cut residue that is cleaved ("C" = after it, "N" = before it).
-# NULL when no cut residue is given (e.g. a nonspecific search).
-protease_regex_from_rule <- function(cut, nocut = "", sense = "C") {
-  residues <- function(x) {
-    if (is.null(x) || length(x) == 0 || is.na(x)) {
-      return("")
-    }
-    gsub("[^A-Z]", "", toupper(x))
-  }
-  cut <- residues(cut)
-  nocut <- residues(nocut)
-  if (!nzchar(cut)) {
-    return(NULL)
-  }
-  if (identical(toupper(sense), "N")) {
-    # (?<=.) keeps strsplit() from splitting at every character on a pure
-    # lookahead, and from emitting an empty first fragment.
-    paste0(
-      "(?<=.)",
-      if (nzchar(nocut)) sprintf("(?<![%s])", nocut),
-      sprintf("(?=[%s])", cut)
-    )
-  } else {
-    paste0(
-      sprintf("(?<=[%s])", cut),
-      if (nzchar(nocut)) sprintf("(?![%s])", nocut)
-    )
-  }
-}
-
 # iBAQ per protein and experiment, long format (untransformed).
 #   peptides  : output of read_all_peptide_files().
-#   sequences : output of fragpipe_fasta_sequences().
+#   sequences : output of fasta_sequences_by_header_id() (utils_fasta.r); the
+#               FragPipe `Protein` column holds that same header first word.
 # Each peptide counts towards the protein FragPipe assigned it to (razor
 # assignment); unique_only keeps peptides that map to no other protein.
 # Proteins with no quantified peptide in an experiment are absent from it.
@@ -495,16 +456,7 @@ compute_ibaq_fragpipe <- function(
     dplyr::distinct(protein, .keep_all = TRUE) %>%
     dplyr::select(protein, protein_id, entry_name, gene)
 
-  # Match on the header's first word, then fall back to the accession for a
-  # FASTA whose headers differ from the search database.
-  idx <- match(proteins$protein, names(sequences))
-  miss <- is.na(idx)
-  if (any(miss)) {
-    idx[miss] <- match(
-      proteins$protein_id[miss],
-      fasta_accessions(names(sequences))
-    )
-  }
+  idx <- match_fasta_sequences(proteins$protein, proteins$protein_id, sequences)
   proteins$n_theoretical_peptides <- NA_integer_
   found <- !is.na(idx)
   proteins$n_theoretical_peptides[found] <- unname(count_theoretical_peptides(
@@ -3176,7 +3128,7 @@ PSManalyst_server <- function(id) {
       if (!is.null(input$fasta_file)) {
         fa <- fasta_data()
         req(fa)
-        return(list(seqs = fragpipe_fasta_sequences(fa), source = "upload"))
+        return(list(seqs = fasta_sequences_by_header_id(fa), source = "upload"))
       }
       folder <- loaded_psm_folder()
       req(folder)
@@ -3190,7 +3142,7 @@ PSManalyst_server <- function(id) {
         return(NULL)
       }
       seqs <- unlist(lapply(fas, function(f) {
-        fragpipe_fasta_sequences(Biostrings::readAAStringSet(f))
+        fasta_sequences_by_header_id(Biostrings::readAAStringSet(f))
       }))
       list(seqs = seqs[!duplicated(names(seqs))], source = "protein.fas")
     })
