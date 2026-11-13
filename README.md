@@ -300,6 +300,7 @@ QC dashboard for [Sage](https://github.com/lazear/sage) search engine results. A
 |---|---|
 | **Interactive Plot Viewer** | Single-plot builder with 15 graphics: number of PSMs, proteins & peptides by file, Sage discriminant score (LDA), charge state density, peptide length density, missed cleavages, GRAVY index, pI distribution, RT vs. mass error (Da), fragment error (ppm), RT vs. precursor error (ppm), precursor mass error density, peptide vs. protein q-value, peptide vs. spectrum q-value, peptide yield vs. FDR |
 | **Modification Diagnostic** | RT-shift profile of modified vs. unmodified peptides (per sample, adjustable top-N) with a diagnostic table |
+| **iBAQ** | Intensity-based absolute quantification (summed intensity of peptides unique to a protein / number of theoretical peptides) from `lfq.parquet`. Controls box on top: protein FASTA upload, peptide length window, missed cleavages and enzyme rule (defaults read from `results.json` next to the results, editable), exclude contaminants, log₂ export. Per-sample distribution, ranked abundance, most abundant proteins (relative iBAQ), and a protein × sample table with TSV download — requires the search FASTA |
 
 ---
 
