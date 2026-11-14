@@ -248,10 +248,11 @@ true log2FC, each cell being `realised FDR / power (%)`. With the full
 settings the numbers should agree with the documented table to within
 simulation noise; with `PQ_SIM_NSIM=3` they are noticeably noisier.
 
-**`test_mdd.R`** needs `matrix_human.tsv` in the working directory. It prints
-its intermediate results and stops with an error if a check fails; a clean run
-ends with `Monotonicity in n: OK` and `Seeded reproducibility: OK`.
+**`test_mdd.R`** reads `app/training/mtx_maxLFQ.tsv` (contrasts `m1 − m0` and
+`m2 − m0`). It prints its intermediate results and stops with an error if a
+check fails; a clean run ends with `Monotonicity in n: OK` and
+`Seeded reproducibility: OK`.
 
-**`pwr_diag.R`** needs `mtx_prot_abundance.tsv` in the working directory and
-the `reactlog` package. It prints timings and reactive execution counts for an
-upload and makes no assertions, so there is no pass or fail.
+**`pwr_diag.R`** reads `app/training/mtx_maxLFQ.tsv` and needs the `reactlog`
+package. It prints timings and reactive execution counts for an upload and
+makes no assertions, so there is no pass or fail.
