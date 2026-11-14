@@ -308,7 +308,7 @@ QC dashboard for [Sage](https://github.com/lazear/sage) search engine results. A
 
 QC module for MaxQuant results. Requires the path to the MaxQuant `combined` output directory; the module locates `msmsScans.txt`, `evidence.txt`, `peptides.txt`, `summary.txt`, and `proteinGroups.txt` in the `txt/` subfolder. To understand the files and meaning of each column variable from MaxQuant outputs, see [here](https://cox-labs.github.io/coxdocs/output_tables.html).
 
-The sidebar offers one plot selector per input table (Evidence, Peptides, MS/MS Scans), each with plot (PDF) and data (TSV) downloads, and a protein abundance matrix export from `proteinGroups.txt` (Intensity / LFQ intensity / iBAQ, optional zero→NA and log2).
+Each QC tab (Evidence, Peptides, MS/MS Scans) has its own plot selector, plot button, and plot (PDF) and data (TSV) downloads at the top of the box. The sidebar offers a protein abundance matrix export from `proteinGroups.txt` (Intensity / LFQ intensity / iBAQ, optional zero→NA and log2).
 
 **Tabs:**
 
