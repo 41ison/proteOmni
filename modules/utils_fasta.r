@@ -15,12 +15,19 @@ read_fasta_custom <- function(file) {
   }
 
   headers <- sub("^>", "", lines[header_idx])
-  prot_ids <- sapply(strsplit(headers, "\\s+|\\|"), function(x) {
-    if (length(x) >= 2 && grepl("sp|tr", x[1])) {
-      return(x[2])
-    }
-    return(x[1])
-  })
+  # Entry ID: the accession of UniProt-style headers ("sp|P02769|ALBU_BOVIN",
+  # also with a prefix such as "contam_sp|..."), otherwise the first word up
+  # to any '|'. The database tag has to be the whole first field: testing for
+  # "sp"/"tr" anywhere in it reads ">trypsin_pig Porcine trypsin" as
+  # UniProt-style and names the entry "Porcine".
+  first_word <- sub("\\s.*$", "", trimws(headers))
+  prot_ids <- vapply(
+    strsplit(first_word, "|", fixed = TRUE),
+    function(x) {
+      if (length(x) >= 2 && grepl("(^|_)(sp|tr)$", x[1])) x[2] else x[1]
+    },
+    character(1)
+  )
 
   seqs <- character(length(header_idx))
   starts <- header_idx + 1
@@ -835,7 +842,12 @@ compute_ibaq <- function(
     stop("No rows passed the quality filters; relax the filter thresholds.")
   }
 
-  annot_cols <- intersect(c("Protein.Names", "Genes"), names(report))
+  # id_col may itself be an annotation column (e.g. id_col = "Genes"); it is
+  # already reported as protein_id, so it must not be selected twice.
+  annot_cols <- setdiff(
+    intersect(c("Protein.Names", "Genes"), names(report)),
+    id_col
+  )
   annot <- report[!duplicated(report[[id_col]]), c(id_col, annot_cols)]
   names(annot)[1] <- "protein_id"
 
