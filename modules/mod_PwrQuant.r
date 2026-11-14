@@ -2129,157 +2129,6 @@ PwrQuant_sidebar_ui <- function(id) {
       ),
       tags$hr(style = "border-color:#2d3741;margin:4px 0;"),
       tags$div(
-        style = "padding:12px 16px 4px;color:#adb5bd;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:1px;",
-        "GO Enrichment (clusterProfiler)"
-      ),
-      selectInput(
-        ns("uniprot_taxon"),
-        "Organism (OrgDb)",
-        choices = pwrquant_orgdb_choices,
-        selected = "9606"
-      ),
-      tags$p(
-        style = "padding:0 16px;color:#adb5bd;font-size:11px;",
-        "Selects the Bioconductor OrgDb (org.*) package for enrichGO and the ",
-        "STRING organism below. The package is installed automatically on the ",
-        "first run if it is not already available."
-      ),
-      selectizeInput(
-        ns("ora_contrasts"),
-        "Contrasts to compare",
-        choices = NULL,
-        multiple = TRUE,
-        options = list(placeholder = "Run limma first")
-      ),
-      tags$p(
-        style = "padding:0 16px;color:#adb5bd;font-size:11px;",
-        "enrichGO runs once per selected contrast. Choosing fewer contrasts ",
-        "(and a single GO category below) speeds up the run."
-      ),
-      selectInput(
-        ns("ora_ontology"),
-        "GO Category (ontology)",
-        choices = c(
-          "All (BP + CC + MF)" = "ALL",
-          "Biological Process" = "BP",
-          "Cellular Component" = "CC",
-          "Molecular Function" = "MF"
-        ),
-        selected = "ALL"
-      ),
-      numericInput(
-        ns("ora_fdr_cutoff"),
-        "GO term FDR (adj. p-value) cutoff",
-        value = 0.2,
-        min = 0.001,
-        max = 1,
-        step = 0.01
-      ),
-      numericInput(
-        ns("ora_show_category"),
-        "Terms shown per contrast",
-        value = 5,
-        min = 1,
-        max = 30,
-        step = 1
-      ),
-      tags$div(
-        style = "padding:0 8px;text-align:center;",
-        actionButton(
-          ns("run_ora"),
-          "Start ORA",
-          class = "btn-primary",
-          style = "width:80%;font-weight:bold;margin-top:10px;margin-bottom:10px;"
-        )
-      ),
-      tags$hr(style = "border-color:#2d3741;margin:4px 0;"),
-      tags$div(
-        style = "padding:12px 16px 4px;color:#adb5bd;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:1px;",
-        "Interaction Network (STRING)"
-      ),
-      selectInput(
-        ns("string_contrast"),
-        "Contrast",
-        choices = NULL
-      ),
-      radioButtons(
-        ns("string_scope"),
-        "Protein Set",
-        choices = c(
-          "Combined (all significant)" = "combined",
-          "Increased only" = "Increased",
-          "Decreased only" = "Decreased"
-        ),
-        selected = "combined"
-      ),
-      numericInput(
-        ns("string_score_threshold"),
-        "Min. combined score (0-1000)",
-        value = 400,
-        min = 0,
-        max = 1000,
-        step = 50
-      ),
-      tags$p(
-        style = "padding:0 8px;color:#adb5bd;font-size:12px;",
-        "Uses the organism selected above for Overrepresentation Analysis."
-      ),
-      tags$div(
-        style = "padding:0 8px;text-align:center;",
-        actionButton(
-          ns("run_string"),
-          "Build Network",
-          class = "btn-primary",
-          style = "width:80%;font-weight:bold;margin-top:10px;margin-bottom:10px;"
-        )
-      ),
-      tags$hr(style = "border-color:#2d3741;margin:4px 0;"),
-      tags$div(
-        style = "padding:12px 16px 4px;color:#adb5bd;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:1px;",
-        "Selected Proteins"
-      ),
-      selectizeInput(
-        ns("sel_proteins"),
-        "Proteins to plot",
-        choices = NULL,
-        multiple = TRUE,
-        options = list(placeholder = "Type or select proteins...")
-      ),
-      numericInput(
-        ns("sel_proteins_ncol"),
-        "Facet columns",
-        value = 3,
-        min = 1,
-        max = 10,
-        step = 1
-      ),
-      tags$hr(style = "border-color:#2d3741;margin:4px 0;"),
-      tags$div(
-        style = "padding:12px 16px 4px;color:#adb5bd;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:1px;",
-        "Z-Score Heatmap"
-      ),
-      radioButtons(
-        ns("heatmap_filter"),
-        "Filtering Strategy",
-        choices = c(
-          "Significant & Reliable" = "sig_reliable",
-          "Top N Proteins" = "top_n"
-        ),
-        selected = "sig_reliable"
-      ),
-      conditionalPanel(
-        condition = sprintf("input['%s'] == 'top_n'", ns("heatmap_filter")),
-        numericInput(
-          ns("heatmap_top_n"),
-          "Number of proteins (N)",
-          value = 50,
-          min = 5,
-          max = 500,
-          step = 5
-        )
-      ),
-      tags$hr(style = "border-color:#2d3741;margin:4px 0;"),
-      tags$div(
         style = "padding:0 8px;",
         div(
           style = "margin-bottom:8px;",
@@ -2766,8 +2615,84 @@ PwrQuant_body_ui <- function(id) {
           status = "primary",
           solidHeader = TRUE,
           width = 12,
+          fluidRow(
+            column(
+              3,
+              selectInput(
+                ns("uniprot_taxon"),
+                "Organism (OrgDb)",
+                choices = pwrquant_orgdb_choices,
+                selected = "9606",
+                width = "100%"
+              )
+            ),
+            column(
+              3,
+              selectizeInput(
+                ns("ora_contrasts"),
+                "Contrasts to compare",
+                choices = NULL,
+                multiple = TRUE,
+                options = list(placeholder = "Run limma first"),
+                width = "100%"
+              )
+            ),
+            column(
+              2,
+              selectInput(
+                ns("ora_ontology"),
+                "GO Category (ontology)",
+                choices = c(
+                  "All (BP + CC + MF)" = "ALL",
+                  "Biological Process" = "BP",
+                  "Cellular Component" = "CC",
+                  "Molecular Function" = "MF"
+                ),
+                selected = "ALL",
+                width = "100%"
+              )
+            ),
+            column(
+              2,
+              numericInput(
+                ns("ora_fdr_cutoff"),
+                "GO term FDR cutoff",
+                value = 0.2,
+                min = 0.001,
+                max = 1,
+                step = 0.01,
+                width = "100%"
+              )
+            ),
+            column(
+              2,
+              numericInput(
+                ns("ora_show_category"),
+                "Terms per contrast",
+                value = 5,
+                min = 1,
+                max = 30,
+                step = 1,
+                width = "100%"
+              )
+            )
+          ),
+          tags$p(
+            style = "color:#adb5bd;font-size:12px;",
+            "The organism selects the Bioconductor OrgDb (org.*) package for enrichGO ",
+            "and the STRING organism in the Interaction Network tab; the package is ",
+            "installed automatically on the first run if needed. enrichGO runs once ",
+            "per selected contrast, so fewer contrasts (and a single GO category) ",
+            "speed up the run."
+          ),
           tags$div(
             style = "margin-bottom:10px;",
+            actionButton(
+              ns("run_ora"),
+              "Start ORA",
+              class = "btn-primary",
+              style = "font-weight:bold;margin-right:8px;"
+            ),
             downloadButton(
               ns("download_ora_plots"),
               "⬇ Download ORA Plots",
@@ -2799,7 +2724,7 @@ PwrQuant_body_ui <- function(id) {
             tags$code("sp|P12345|TP53_HUMAN"),
             ") or gene symbols (e.g. ",
             tags$code("TP53"),
-            "). Use the sidebar to pick the contrasts, the GO category, the ",
+            "). Use the controls above to pick the contrasts, the GO category, the ",
             "adj. p-value cutoff, and how many terms are shown per contrast."
           ),
           div(
@@ -2822,6 +2747,55 @@ PwrQuant_body_ui <- function(id) {
           status = "primary",
           solidHeader = TRUE,
           width = 12,
+          fluidRow(
+            column(
+              4,
+              selectInput(
+                ns("string_contrast"),
+                "Contrast",
+                choices = NULL,
+                width = "100%"
+              )
+            ),
+            column(
+              4,
+              radioButtons(
+                ns("string_scope"),
+                "Protein Set",
+                choices = c(
+                  "Combined (all significant)" = "combined",
+                  "Increased only" = "Increased",
+                  "Decreased only" = "Decreased"
+                ),
+                selected = "combined",
+                inline = TRUE
+              )
+            ),
+            column(
+              2,
+              numericInput(
+                ns("string_score_threshold"),
+                "Min. combined score (0-1000)",
+                value = 400,
+                min = 0,
+                max = 1000,
+                step = 50,
+                width = "100%"
+              )
+            ),
+            column(
+              2,
+              tags$div(
+                style = "margin-top:25px;",
+                actionButton(
+                  ns("run_string"),
+                  "Build Network",
+                  class = "btn-primary",
+                  style = "width:100%;font-weight:bold;"
+                )
+              )
+            )
+          ),
           tags$div(
             style = "padding:10px 14px;margin-bottom:8px;background:#2a3f54;border-radius:6px;color:#ddd;font-size:13px;",
             icon("info-circle", style = "color:#5bc0de;"),
@@ -2842,10 +2816,10 @@ PwrQuant_body_ui <- function(id) {
             " for increased and ",
             tags$b(style = "color:#1f77b4;", "blue"),
             " for decreased proteins. The organism taxon reuses the ",
-            tags$b("Organism Taxonomy ID"),
-            " field from the Overrepresentation Analysis section above; the ",
+            tags$b("Organism (OrgDb)"),
+            " dropdown in the Enrichment tab; the ",
             tags$b("Min. combined score"),
-            " slider filters STRING edges by confidence (0-1000, STRING default is 400)."
+            " field filters STRING edges by confidence (0-1000, STRING default is 400)."
           ),
           div(
             class = "plot-wrap",
@@ -2880,8 +2854,33 @@ PwrQuant_body_ui <- function(id) {
           status = "primary",
           solidHeader = TRUE,
           width = 12,
+          fluidRow(
+            column(
+              9,
+              selectizeInput(
+                ns("sel_proteins"),
+                "Proteins to plot",
+                choices = NULL,
+                multiple = TRUE,
+                options = list(placeholder = "Type or select proteins..."),
+                width = "100%"
+              )
+            ),
+            column(
+              3,
+              numericInput(
+                ns("sel_proteins_ncol"),
+                "Facet columns",
+                value = 3,
+                min = 1,
+                max = 10,
+                step = 1,
+                width = "100%"
+              )
+            )
+          ),
           p(
-            "Select proteins in the sidebar to visualise their log\u2082(abundance) distributions per condition."
+            "Select proteins above to visualise their log\u2082(abundance) distributions per condition."
           ),
           div(
             class = "plot-wrap",
@@ -2995,10 +2994,42 @@ PwrQuant_body_ui <- function(id) {
           status = "primary",
           solidHeader = TRUE,
           width = 12,
+          fluidRow(
+            column(
+              8,
+              radioButtons(
+                ns("heatmap_filter"),
+                "Filtering Strategy",
+                choices = c(
+                  "Significant & Reliable" = "sig_reliable",
+                  "Top N Proteins" = "top_n"
+                ),
+                selected = "sig_reliable",
+                inline = TRUE
+              )
+            ),
+            column(
+              4,
+              conditionalPanel(
+                condition = sprintf(
+                  "input['%s'] == 'top_n'",
+                  ns("heatmap_filter")
+                ),
+                numericInput(
+                  ns("heatmap_top_n"),
+                  "Number of proteins (N)",
+                  value = 50,
+                  min = 5,
+                  max = 500,
+                  step = 5
+                )
+              )
+            )
+          ),
           p(
             "Heatmap of Z-score transformed protein abundances with hierarchical clustering on proteins. ",
             "Samples are grouped by condition. Grey cells indicate missing values. ",
-            "Use the sidebar controls to select a filtering strategy."
+            "Use the controls above to select a filtering strategy."
           ),
           fluidRow(
             column(
@@ -3103,7 +3134,7 @@ PwrQuant_body_ui <- function(id) {
           p(
             "Runs enrichGO on the proteins of the chosen clusters, one gene set per ",
             "cluster, against all quantified proteins as the background universe. ",
-            "The organism (OrgDb) is the one selected in the sidebar."
+            "The organism (OrgDb) is the one selected in the Enrichment tab."
           ),
           fluidRow(
             column(
@@ -3252,7 +3283,7 @@ PwrQuant_server <- function(id) {
       if (is.null(sel) || length(sel) == 0) {
         return(tags$p(
           style = "color:#adb5bd;text-align:center;padding:30px;",
-          "Select one or more proteins in the sidebar to display their abundance distributions."
+          "Select one or more proteins above to display their abundance distributions."
         ))
       }
       ncol_val <- max(1L, as.integer(input$sel_proteins_ncol %||% 3))
@@ -4671,7 +4702,7 @@ PwrQuant_server <- function(id) {
               n_total,
               " protein identifier(s) in the selected set could be mapped to ",
               "STRING. This usually means the identifiers aren't recognized as ",
-              "UniProt accessions/gene symbols, or the Organism Taxonomy ID doesn't ",
+              "UniProt accessions/gene symbols, or the selected Organism (OrgDb) doesn't ",
               "match your samples.",
               call. = FALSE
             )
