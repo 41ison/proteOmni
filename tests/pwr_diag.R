@@ -33,7 +33,8 @@ suppressWarnings(suppressPackageStartupMessages({
 options(shiny.reactlog = TRUE)
 source("app/modules/mod_PwrQuant.r")
 
-f <- "mtx_prot_abundance.tsv"
+# MaxLFQ matrix, 3 conditions (m0, m1, m2) x 3 replicates.
+f <- "app/training/mtx_maxLFQ.tsv"
 fi <- data.frame(
   name = basename(f),
   size = file.size(f),
@@ -55,7 +56,7 @@ testServer(PwrQuant_server, {
 
   samples <- colnames(raw_matrix_full())
   m <- meta_all()
-  m$Condition <- sub("_r[0-9]+_b[0-9]+$", "", m$Sample)
+  m$Condition <- sub("_r[0-9]+$", "", m$Sample)
   meta_all(m)
   cat("\nconditions:\n")
   print(condition_replicates())
@@ -63,7 +64,8 @@ testServer(PwrQuant_server, {
   session$setInputs(exclude_samples = character(0))
   cat("no-op selection -> n excluded:", length(excluded_samples()), "\n")
 
-  drop <- samples[grepl("^NaCl", samples)][-1]
+  # Leave a single m2 replicate so the thin-condition path is exercised.
+  drop <- samples[grepl("^m2_", samples)][-1]
   session$setInputs(exclude_samples = drop)
   cat(
     "removed",
@@ -77,19 +79,38 @@ testServer(PwrQuant_server, {
   cat("emptied:", paste(emptied_conditions(), collapse = ", "), "\n")
   cat("downstream metadata rows:", nrow(meta_edit_df()), "\n")
 
-  entries <- reactlog::reactlog()
-  actions <- vapply(
-    entries,
-    function(e) if (is.null(e$action)) NA_character_ else e$action,
-    character(1)
+  # The raw log comes from shiny; the reactlog package only renders it.
+  entries <- shiny::reactlog()
+  field <- function(name) {
+    vapply(
+      entries,
+      function(e) if (is.null(e[[name]])) NA_character_ else e[[name]][1],
+      character(1)
+    )
+  }
+  actions <- field("action")
+  react_ids <- field("reactId")
+  labels <- field("label")
+
+  # "enter" events carry only a reactId; the label lives on the "define" (or a
+  # later "updateNodeLabel") entry, so keep the last label seen for each id.
+  has_label <- actions %in% c("define", "updateNodeLabel") & !is.na(labels)
+  id_labels <- tapply(labels[has_label], react_ids[has_label], function(x) {
+    x[length(x)]
+  })
+  # Unnamed reactives are labelled with their deparsed code, so flatten and
+  # truncate it; the reactId keeps reactives with the same opening apart.
+  id_labels[] <- sprintf(
+    "%s [%s]",
+    strtrim(gsub("\\s+", " ", id_labels), 60),
+    names(id_labels)
   )
-  labels <- vapply(
-    entries,
-    function(e) if (is.null(e$label)) NA_character_ else e$label,
-    character(1)
-  )
+
+  entered <- react_ids[actions == "enter"]
+  entered_labels <- unname(id_labels[entered])
+  entered_labels[is.na(entered_labels)] <- entered[is.na(entered_labels)]
   cat("\n--- top reactive executions (enter events) ---\n")
-  print(head(sort(table(labels[actions == "enter"]), decreasing = TRUE), 25))
+  print(head(sort(table(entered_labels), decreasing = TRUE), 25))
 })
 cat(
   "total seconds:",

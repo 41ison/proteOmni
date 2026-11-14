@@ -28,15 +28,25 @@ missing_fns <- needed[!vapply(needed, exists, logical(1), envir = helper_env)]
 stopifnot(length(missing_fns) == 0)
 list2env(as.list(helper_env), envir = globalenv())
 
-# ── Data (comma-separated despite the .tsv extension) ───────────────────────
-raw <- read.csv("matrix_human.tsv", check.names = FALSE)
-mat <- as.matrix(raw[, -1])
-rownames(mat) <- raw[[1]]
-group_labels <- sub("_[^_]+$", "", colnames(mat))
+# ── Data: same ingestion as the PwrQuant test fixture ───────────────────────
+# MaxLFQ matrix, 3 conditions (m0, m1, m2) x 3 replicates.
+raw <- data.table::fread(
+  "app/training/mtx_maxLFQ.tsv",
+  header = TRUE,
+  quote = ""
+)
+raw <- raw[!is.na(raw[[1]]), ]
+mat <- as.matrix(as.data.frame(raw)[, -1, drop = FALSE])
+mode(mat) <- "numeric"
+rownames(mat) <- make.unique(gsub('^"|"$', "", as.character(raw[[1]])))
+group_labels <- sub("_r[0-9]+$", "", colnames(mat))
 
-log2_mat_raw <- log2(mat)
+# At least 2 of 3 replicates per group. Requiring all 3 would leave a complete
+# matrix and nothing for the missingness model in section 4 to fit.
+min_valid <- 2L
+log2_mat_raw <- log2(mat + 1)
 keep <- apply(log2_mat_raw, 1, function(x) {
-  all(tapply(!is.na(x), group_labels, sum) >= 3)
+  all(tapply(!is.na(x), group_labels, sum) >= min_valid)
 })
 log2_mat_raw <- log2_mat_raw[keep, ]
 
@@ -67,7 +77,7 @@ log2_mat <- normalizeBetweenArrays(as.matrix(log2_mat), method = "cyclicloess")
 design <- model.matrix(~ 0 + factor(group_labels))
 colnames(design) <- levels(factor(group_labels))
 contrast_matrix <- makeContrasts(
-  contrasts = c("SW620-SW480", "NOS2-V0"),
+  contrasts = c("m1-m0", "m2-m0"),
   levels = design
 )
 fit <- eBayes(
@@ -146,8 +156,9 @@ cat(sprintf(
 ))
 
 # ── 4. Replicate sweep, complete data vs simulated missingness ──────────────
-cm1 <- contrast_matrix[, "SW620-SW480", drop = FALSE]
+cm1 <- contrast_matrix[, "m1-m0", drop = FALSE]
 miss_model <- estimate_missingness_model(log2_mat_raw)
+stopifnot(!is.null(miss_model))
 cat(sprintf(
   "\n[4] Missingness model: overall NA rate %.3f\n",
   mean(is.na(log2_mat_raw))
@@ -185,7 +196,7 @@ sweep_missing <- do.call(
     list(
       miss_model = miss_model,
       impute_method = "minprob",
-      min_valid_per_group = 3L
+      min_valid_per_group = min_valid
     )
   )
 )
