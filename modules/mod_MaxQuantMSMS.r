@@ -1398,119 +1398,11 @@ MaxQuantMSMS_sidebar_ui <- function(id) {
 
       tags$hr(style = "border-color:#2d3741;margin:4px 0;"),
 
-      # ── Evidence QC Parameters ────────────────────────────────────────────
-      tags$div(class = "sidebar-section-label", "Evidence QC Parameters"),
-
-      selectInput(
-        ns("ev_plot_select"),
-        "Select QC Plot",
-        choices = c(
-          "m/z vs Retention Time" = "mz_rt",
-          "Data Points Distribution" = "ndp_dist",
-          "Data Points vs m/z" = "ndp_mz",
-          "Peptide Length" = "length",
-          "Modifications" = "modifications",
-          "Missed Cleavages" = "missed_cleavages",
-          "Identification Type" = "id_type",
-          "Charge State Distribution" = "charge_bar",
-          "m/z Distribution" = "mz_dist",
-          "Mass Distribution" = "mass_dist",
-          "Mass Error (ppm)" = "mass_err_ppm",
-          "Mass Error (Da)" = "mass_err_da",
-          "PEP Distribution" = "pep",
-          "Taxonomy Names" = "taxonomy"
-        ),
-        selected = "mz_rt"
-      ),
-
-      tags$hr(style = "border-color:#2d3741;margin:4px 0;"),
-
-      # ── Peptides QC Parameters ────────────────────────────────────────────
-      tags$div(class = "sidebar-section-label", "Peptides QC Parameters"),
-
-      selectInput(
-        ns("pep_plot_select"),
-        "Select Peptides Plot",
-        choices = plot_registry_choices(PEP_PLOTS),
-        selected = "msms_count"
-      ),
-
-      tags$hr(style = "border-color:#2d3741;margin:4px 0;"),
-
-      # ── MS/MS Scans QC Parameters ─────────────────────────────────────────
-      tags$div(class = "sidebar-section-label", "MS/MS Scans QC Parameters"),
-
-      selectInput(
-        ns("scan_plot_select"),
-        "Select Scans Plot",
-        choices = plot_registry_choices(SCAN_PLOTS),
-        selected = "id_rate"
-      ),
-
-      tags$hr(style = "border-color:#2d3741;margin:4px 0;"),
-
-      # ── Actions ───────────────────────────────────────────────────────────
-      tags$div(
-        style = "padding:0 8px;text-align:center;",
-        actionButton(
-          ns("run_evidence"),
-          "Plot Evidence QC",
-          class = "btn-primary",
-          style = "width:80%;font-weight:bold;margin-top:2px;margin-bottom:6px;"
-        ),
-        actionButton(
-          ns("run_peptides"),
-          "Plot Peptides QC",
-          class = "btn-primary",
-          style = "width:80%;font-weight:bold;margin-top:2px;margin-bottom:6px;"
-        ),
-        actionButton(
-          ns("run_scans"),
-          "Plot MS/MS Scans QC",
-          class = "btn-primary",
-          style = "width:80%;font-weight:bold;margin-top:2px;margin-bottom:10px;"
-        )
-      ),
-
+      # ── Protein abundance matrix export ───────────────────────────────────
+      # Plot selectors, "Plot ..." buttons and the per-table plot/data
+      # downloads live in their own body tabs.
       tags$div(
         style = "padding:0 8px;",
-        downloadButton(
-          ns("download_ev_plot"),
-          "\u2B07 Evidence Plot (.pdf)",
-          class = "dl-btn",
-          style = "width:100%;text-align:left;margin-bottom:6px;"
-        ),
-        downloadButton(
-          ns("download_ev_data"),
-          "\u2B07 Evidence Data (.tsv)",
-          class = "dl-btn",
-          style = "width:100%;text-align:left;margin-bottom:6px;"
-        ),
-        downloadButton(
-          ns("download_pep_plot"),
-          "\u2B07 Peptides Plot (.pdf)",
-          class = "dl-btn",
-          style = "width:100%;text-align:left;margin-bottom:6px;"
-        ),
-        downloadButton(
-          ns("download_pep_data"),
-          "\u2B07 Peptides Data (.tsv)",
-          class = "dl-btn",
-          style = "width:100%;text-align:left;margin-bottom:6px;"
-        ),
-        downloadButton(
-          ns("download_scan_plot"),
-          "\u2B07 MS/MS Scans Plot (.pdf)",
-          class = "dl-btn",
-          style = "width:100%;text-align:left;margin-bottom:6px;"
-        ),
-        downloadButton(
-          ns("download_scan_data"),
-          "\u2B07 MS/MS Scans Data (.tsv)",
-          class = "dl-btn",
-          style = "width:100%;text-align:left;margin-bottom:6px;"
-        ),
-        tags$hr(style = "border-color:#2d3741;margin:8px 0 4px 0;"),
         selectInput(
           ns("pg_quant"),
           "Protein abundance values",
@@ -1605,6 +1497,69 @@ MaxQuantMSMS_body_ui <- function(id) {
           status = "primary",
           solidHeader = TRUE,
           width = 12,
+          fluidRow(
+            column(
+              6,
+              selectInput(
+                ns("ev_plot_select"),
+                "Select QC Plot",
+                choices = c(
+                  "m/z vs Retention Time" = "mz_rt",
+                  "Data Points Distribution" = "ndp_dist",
+                  "Data Points vs m/z" = "ndp_mz",
+                  "Peptide Length" = "length",
+                  "Modifications" = "modifications",
+                  "Missed Cleavages" = "missed_cleavages",
+                  "Identification Type" = "id_type",
+                  "Charge State Distribution" = "charge_bar",
+                  "m/z Distribution" = "mz_dist",
+                  "Mass Distribution" = "mass_dist",
+                  "Mass Error (ppm)" = "mass_err_ppm",
+                  "Mass Error (Da)" = "mass_err_da",
+                  "PEP Distribution" = "pep",
+                  "Taxonomy Names" = "taxonomy"
+                ),
+                selected = "mz_rt",
+                width = "100%"
+              )
+            ),
+            column(
+              2,
+              tags$div(
+                style = "margin-top:25px;",
+                actionButton(
+                  ns("run_evidence"),
+                  "Plot Evidence QC",
+                  class = "btn-primary",
+                  style = "width:100%;font-weight:bold;"
+                )
+              )
+            ),
+            column(
+              2,
+              tags$div(
+                style = "margin-top:25px;",
+                downloadButton(
+                  ns("download_ev_plot"),
+                  "\u2B07 Plot (.pdf)",
+                  class = "dl-btn",
+                  style = "width:100%;"
+                )
+              )
+            ),
+            column(
+              2,
+              tags$div(
+                style = "margin-top:25px;",
+                downloadButton(
+                  ns("download_ev_data"),
+                  "\u2B07 Data (.tsv)",
+                  class = "dl-btn",
+                  style = "width:100%;"
+                )
+              )
+            )
+          ),
           div(
             class = "plot-wrap",
             tags$div(
@@ -1627,6 +1582,54 @@ MaxQuantMSMS_body_ui <- function(id) {
           status = "primary",
           solidHeader = TRUE,
           width = 12,
+          fluidRow(
+            column(
+              6,
+              selectInput(
+                ns("pep_plot_select"),
+                "Select Peptides Plot",
+                choices = plot_registry_choices(PEP_PLOTS),
+                selected = "msms_count",
+                width = "100%"
+              )
+            ),
+            column(
+              2,
+              tags$div(
+                style = "margin-top:25px;",
+                actionButton(
+                  ns("run_peptides"),
+                  "Plot Peptides QC",
+                  class = "btn-primary",
+                  style = "width:100%;font-weight:bold;"
+                )
+              )
+            ),
+            column(
+              2,
+              tags$div(
+                style = "margin-top:25px;",
+                downloadButton(
+                  ns("download_pep_plot"),
+                  "\u2B07 Plot (.pdf)",
+                  class = "dl-btn",
+                  style = "width:100%;"
+                )
+              )
+            ),
+            column(
+              2,
+              tags$div(
+                style = "margin-top:25px;",
+                downloadButton(
+                  ns("download_pep_data"),
+                  "\u2B07 Data (.tsv)",
+                  class = "dl-btn",
+                  style = "width:100%;"
+                )
+              )
+            )
+          ),
           div(
             class = "plot-wrap",
             tags$div(
@@ -1649,6 +1652,54 @@ MaxQuantMSMS_body_ui <- function(id) {
           status = "primary",
           solidHeader = TRUE,
           width = 12,
+          fluidRow(
+            column(
+              6,
+              selectInput(
+                ns("scan_plot_select"),
+                "Select Scans Plot",
+                choices = plot_registry_choices(SCAN_PLOTS),
+                selected = "id_rate",
+                width = "100%"
+              )
+            ),
+            column(
+              2,
+              tags$div(
+                style = "margin-top:25px;",
+                actionButton(
+                  ns("run_scans"),
+                  "Plot MS/MS Scans QC",
+                  class = "btn-primary",
+                  style = "width:100%;font-weight:bold;"
+                )
+              )
+            ),
+            column(
+              2,
+              tags$div(
+                style = "margin-top:25px;",
+                downloadButton(
+                  ns("download_scan_plot"),
+                  "\u2B07 Plot (.pdf)",
+                  class = "dl-btn",
+                  style = "width:100%;"
+                )
+              )
+            ),
+            column(
+              2,
+              tags$div(
+                style = "margin-top:25px;",
+                downloadButton(
+                  ns("download_scan_data"),
+                  "\u2B07 Data (.tsv)",
+                  class = "dl-btn",
+                  style = "width:100%;"
+                )
+              )
+            )
+          ),
           div(
             class = "plot-wrap",
             tags$div(
