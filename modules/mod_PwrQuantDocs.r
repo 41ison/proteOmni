@@ -1637,7 +1637,7 @@ PwrQuantDocs_body_ui <- function(id) {
               " on each, reusing the organism (OrgDb), identifier detection ",
               "and annotation cache described under ",
               tags$b("Enrichment & networks"),
-              ". The organism is the one chosen in the sidebar."
+              ". The organism is the one chosen in the Enrichment tab."
             ),
             pq_table(
               c("Control", "Default", "Guidance"),
