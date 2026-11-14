@@ -522,7 +522,7 @@ Annotations come from a Bioconductor OrgDb (`org.*`) package rather than a live 
 
 *(showing 8 of 20; the remaining organisms include cow, pig, dog, chicken, rhesus, chimpanzee, frog, mosquito, worm, and others.)*
 
-Sidebar controls let you choose the contrasts to test, the **GO Category** (ALL / BP / CC / MF), the **GO term FDR cutoff**, and how many terms are shown per contrast. Protein identifiers are auto-detected as either UniProt accessions or gene symbols (setting the `enrichGO` keyType to `UNIPROT` or `SYMBOL`); a coverage notification reports how many significant IDs are annotated in the chosen OrgDb.
+Controls at the top of the Enrichment tab let you choose the organism, the contrasts to test, the **GO Category** (ALL / BP / CC / MF), the **GO term FDR cutoff**, and how many terms are shown per contrast. Protein identifiers are auto-detected as either UniProt accessions or gene symbols (setting the `enrichGO` keyType to `UNIPROT` or `SYMBOL`); a coverage notification reports how many significant IDs are annotated in the chosen OrgDb.
 
 Protein identifiers are auto-parsed from three common formats:
 1. UniProt accession, plain or pipe-separated (e.g. `P04637` or `sp|P04637|TP53_HUMAN`)
