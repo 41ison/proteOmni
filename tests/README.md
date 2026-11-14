@@ -12,8 +12,8 @@ hand.
 | `utils_fasta/` | `testthat` unit tests for `utils_fasta.r` | ~1 s |
 | `Sage/` | `testthat` unit tests for `compute_ibaq_sage()` in `mod_Sage.r` | ~1 s |
 | `imputation_strategies_sim.R` | Simulation behind the FDR / power table in the module's *Imputation* documentation | 15-25 min |
-| `test_mdd.R` | Smoke test of the minimum-detectable-difference machinery on a real matrix | minutes |
-| `pwr_diag.R` | Temporary diagnostic of the Shiny reactive graph; not a test | seconds |
+| `test_mdd.R` | Smoke test of the minimum-detectable-difference machinery on the training matrix | ~20 s |
+| `pwr_diag.R` | Temporary diagnostic of the Shiny reactive graph; not a test | ~10 s |
 
 ## Unit tests (`PwrQuant/`)
 
@@ -231,11 +231,17 @@ Not covered: the rest of `mod_Sage.r` (file discovery, the protein roll-up,
 
 ## Standalone scripts
 
-These are not picked up by `testthat` and take much longer. Run them from the
-folder that contains `app/`, because they use paths relative to it.
+These are not picked up by `testthat`. Run them from the folder that contains
+`app/`, because they use paths relative to it. All three read the training
+matrix `app/training/mtx_maxLFQ.tsv` (3 conditions `m0`, `m1`, `m2` x 3
+replicates) in place and source `app/modules/mod_PwrQuant.r`; no other data
+file is needed.
 
-**`imputation_strategies_sim.R`** reproduces the realised FDR / power table
-shown in the module documentation and in `app/README.md`.
+### `imputation_strategies_sim.R`
+
+Reproduces the realised FDR / power table shown in the module documentation
+and in `app/README.md`. The full run takes 15-25 min (about 9 min without
+missForest).
 
 ```sh
 Rscript app/tests/imputation_strategies_sim.R
@@ -248,11 +254,57 @@ true log2FC, each cell being `realised FDR / power (%)`. With the full
 settings the numbers should agree with the documented table to within
 simulation noise; with `PQ_SIM_NSIM=3` they are noticeably noisier.
 
-**`test_mdd.R`** reads `app/training/mtx_maxLFQ.tsv` (contrasts `m1 − m0` and
-`m2 − m0`). It prints its intermediate results and stops with an error if a
-check fails; a clean run ends with `Monotonicity in n: OK` and
-`Seeded reproducibility: OK`.
+It needs `limma`, `dplyr`, `tidyr` and `data.table`, plus the package behind
+each imputation arm (`impute` for KNN, `pcaMethods` for BPCA, `missForest`).
 
-**`pwr_diag.R`** reads `app/training/mtx_maxLFQ.tsv` and needs the `reactlog`
-package. It prints timings and reactive execution counts for an upload and
-makes no assertions, so there is no pass or fail.
+### `test_mdd.R`
+
+```sh
+Rscript app/tests/test_mdd.R
+```
+
+Loads only the statistical helpers of the module, not the Shiny server. It
+keeps proteins with at least 2 of 3 valid values in every condition (4055 of
+6746, 1.6% missing), imputes with MinProb, applies cyclic loess normalization
+and fits the contrasts `m1 − m0` and `m2 − m0`. It then prints, in order:
+
+1. the conditional MDD per contrast;
+2. the prospective MDD from a grid search on complete data;
+3. the same from bisection, with the largest difference from the grid;
+4. a replicate sweep (3 to 15 per group) for `m1 − m0`, on complete data and
+   with simulated missingness followed by MinProb imputation, the penalty
+   from missingness, and a comparison with 1/sqrt(n) scaling.
+
+The script stops with an error if a helper is missing from the module, if the
+missingness model cannot be fitted, if the MDD increases with the number of
+replicates, or if a seeded rerun of the sweep gives different values. A clean
+run ends with `Monotonicity in n: OK` and `Seeded reproducibility: OK`.
+The agreement between grid and bisection is printed but not asserted.
+
+It needs `limma`, `dplyr`, `purrr`, `tibble`, `ggplot2`, `stringr`, `tidyr`
+and `data.table`.
+
+### `pwr_diag.R`
+
+```sh
+Rscript app/tests/pwr_diag.R
+```
+
+Sources the whole module, so it needs the packages the module attaches
+(`shiny`, `shinydashboard`, `shinyjs`, `tidyverse`, `DT`, `ComplexHeatmap`,
+...; the full list is at the top of the script). The `reactlog` package is not
+needed: the log is read with `shiny::reactlog()`.
+
+It uploads the training matrix into `PwrQuant_server()` through
+`shiny::testServer()`, assigns the conditions, applies an empty sample
+exclusion, then excludes two `m2` replicates so that `m2` becomes a
+single-replicate condition. It prints the upload time, the matrix dimensions,
+the replicate counts, the thin and emptied conditions, and the 25 reactives
+that ran most often. Each of those is shown with its label and `reactId`;
+unnamed reactives are labelled with the start of their code, and Shiny's
+internal output observers (`observe({ prom <- NULL ...`) cannot be traced back
+to an output from the log.
+
+There are no assertions, so there is no pass or fail; the `geom_line()` and
+`Too few points to calculate an ellipse` messages are expected with three
+replicates per condition.
