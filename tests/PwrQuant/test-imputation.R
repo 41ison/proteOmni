@@ -192,6 +192,24 @@ test_that("missForest imputation fills gaps and keeps observed values", {
   expect_equal(out[!is.na(sub)], sub[!is.na(sub)])
 })
 
+test_that("missForest is reproducible without a caller seed and leaves the RNG untouched", {
+  skip_if_not_installed("missForest")
+  sub <- imp_input[1:60, ]
+
+  # Different caller seeds: identical output must come from the internal seed.
+  set.seed(4471)
+  before <- .Random.seed
+  a <- groupwise_imputation(sub, pq_groups, "missforest", verbose = FALSE)
+  expect_identical(.Random.seed, before)
+
+  set.seed(9056)
+  before <- .Random.seed
+  b <- groupwise_imputation(sub, pq_groups, "missforest", verbose = FALSE)
+  expect_identical(.Random.seed, before)
+
+  expect_identical(a, b)
+})
+
 test_that("unknown method is rejected", {
   expect_error(
     groupwise_imputation(
