@@ -447,6 +447,24 @@ groupwise_imputation <- function(
     if (verbose) {
       message("Imputation: missForest (sample-wise, groupwise) ...")
     }
+    # Fixed seed so the forests (and any MinProb fallback) are reproducible.
+    # The caller's RNG state is restored on exit, so callers that draw in a
+    # loop (e.g. the power simulation) are not reset to the same stream.
+    has_seed <- exists(".Random.seed", envir = globalenv(), inherits = FALSE)
+    if (has_seed) {
+      old_seed <- get(".Random.seed", envir = globalenv())
+    }
+    on.exit(
+      if (has_seed) {
+        assign(".Random.seed", old_seed, envir = globalenv())
+      } else if (
+        exists(".Random.seed", envir = globalenv(), inherits = FALSE)
+      ) {
+        rm(".Random.seed", envir = globalenv())
+      },
+      add = TRUE
+    )
+    set.seed(4817L)
     imputed_data <- data
     for (group in unique(group_labels)) {
       g_cols <- which(group_labels == group)
