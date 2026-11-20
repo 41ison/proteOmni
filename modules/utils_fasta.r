@@ -896,3 +896,1311 @@ compute_ibaq <- function(
   attr(out, "unmatched_proteins") <- unmatched
   out
 }
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SEQUENCE PROFILING  (backend of modules/mod_SeqProfile.r)
+# ═══════════════════════════════════════════════════════════════════════════════
+# Sliding-window profiles of a single protein / peptide sequence.
+#
+# SCALE PROVENANCE: every score in this section is computed by a function of
+# the CRAN package Peptides (called as Peptides::fn(), never attached, because
+# it exports names such as charge(), pI() and mw()). No amino-acid scale value,
+# pKa constant or weighting factor is defined here. The only numbers below are
+# user-editable parameter defaults (window size, pH, rotation angle, threshold).
+#
+# Not implemented, because Peptides does not provide them and their tables
+# would have to be entered by hand: Karplus-Schulz flexibility, von Heijne
+# transmembrane, Emini surface probability, Chou-Fasman, Jameson-Wolf
+# antigenicity, Sette MHC-II. Add one entry to seqprofile_registry() per
+# algorithm when a verified source is available.
+
+SEQPROFILE_AA <- strsplit("ACDEFGHIKLMNPQRSTVWY", "")[[1]]
+
+# Signals an error the Shiny module can show to the user as a validation
+# message instead of a stack trace.
+seqprofile_abort <- function(message, class = NULL) {
+  stop(structure(
+    class = c(class, "seqprofile_error", "error", "condition"),
+    list(message = message, call = NULL)
+  ))
+}
+
+#' Clean pasted sequence text (raw residues or FASTA).
+#'
+#' Header lines (">...") are dropped, whitespace and digits removed, and the
+#' residues upper-cased. When several FASTA entries are pasted only the first
+#' is kept; `n_entries` reports how many were found.
+#'
+#' @param raw_text Character vector, as typed or pasted by the user.
+#' @return list(header, sequence, length, invalid_chars, is_valid, n_entries,
+#'   illegal_chars). `invalid_chars` are all characters outside the 20
+#'   canonical residues (B, Z, X, U, O, * ...); `illegal_chars` is the subset
+#'   that is not even a letter or "*", which makes `is_valid` FALSE.
+clean_protein_sequence <- function(raw_text) {
+  if (is.null(raw_text) || length(raw_text) == 0) {
+    raw_text <- ""
+  }
+  raw_text <- paste(as.character(raw_text), collapse = "\n")
+  lines <- trimws(strsplit(raw_text, "\r\n|\r|\n")[[1]])
+  lines <- lines[nzchar(lines)]
+  is_header <- startsWith(lines, ">")
+  # Entry 0 is any text placed before the first header
+  entry <- cumsum(is_header)
+  n_entries <- length(unique(entry))
+
+  header <- NA_character_
+  body <- character(0)
+  if (length(lines) > 0) {
+    first <- entry == entry[1]
+    if (any(is_header & first)) {
+      header <- sub("^>\\s*", "", lines[is_header & first][1])
+    }
+    body <- lines[!is_header & first]
+  }
+
+  sequence <- toupper(gsub(
+    "[[:space:][:digit:]]",
+    "",
+    paste(body, collapse = "")
+  ))
+  chars <- unique(strsplit(sequence, "")[[1]])
+  invalid_chars <- sort(setdiff(chars, SEQPROFILE_AA))
+  illegal_chars <- invalid_chars[!grepl("^[A-Z*]$", invalid_chars)]
+
+  list(
+    header = header,
+    sequence = sequence,
+    length = nchar(sequence),
+    invalid_chars = invalid_chars,
+    is_valid = nchar(sequence) > 0 && length(illegal_chars) == 0,
+    n_entries = n_entries,
+    illegal_chars = illegal_chars
+  )
+}
+
+#' Sliding windows along a sequence.
+#'
+#' The reported position is the window centre, `start + (window - 1) %/% 2`.
+#' For an even window this is the residue just left of the midpoint (window 6
+#' starting at residue 1 is reported at position 3).
+#'
+#' @return data.frame(position, residue, window_seq), one row per window.
+seqprofile_windows <- function(sequence, window) {
+  n <- nchar(sequence)
+  if (n < window) {
+    seqprofile_abort(
+      sprintf(
+        "The sequence has %d residue(s), shorter than the window of %d. Use a longer sequence or a smaller window.",
+        n,
+        window
+      ),
+      "seqprofile_short_sequence"
+    )
+  }
+  starts <- seq_len(n - window + 1L)
+  centre <- starts + (window - 1L) %/% 2L
+  data.frame(
+    position = as.integer(centre),
+    residue = substring(sequence, centre, centre),
+    window_seq = substring(sequence, starts, starts + window - 1L),
+    stringsAsFactors = FALSE
+  )
+}
+
+#' Group contiguous positions crossing a threshold into regions.
+#'
+#' @param profile_df data.frame with `position`, `residue` and `score`, one row
+#'   per consecutive position.
+#' @param threshold Numeric cutoff; `NA` returns no regions.
+#' @param direction "above" keeps `score >= threshold`, "below" keeps
+#'   `score <= threshold`. Positions with an `NA` score end a region.
+#' @return data.frame(region_id, start, end, length, sequence, peak_pos,
+#'   peak_score, mean_score, note). `sequence` is the run of window-centre
+#'   residues from `start` to `end`.
+extract_profile_regions <- function(
+  profile_df,
+  threshold,
+  direction = "above"
+) {
+  direction <- match.arg(direction, c("above", "below"))
+  empty <- data.frame(
+    region_id = integer(0),
+    start = integer(0),
+    end = integer(0),
+    length = integer(0),
+    sequence = character(0),
+    peak_pos = integer(0),
+    peak_score = numeric(0),
+    mean_score = numeric(0),
+    note = character(0),
+    stringsAsFactors = FALSE
+  )
+  if (nrow(profile_df) == 0 || length(threshold) != 1 || is.na(threshold)) {
+    return(empty)
+  }
+  score <- profile_df$score
+  hit <- !is.na(score) &
+    (if (direction == "above") score >= threshold else score <= threshold)
+  if (!any(hit)) {
+    return(empty)
+  }
+  runs <- rle(hit)
+  ends <- cumsum(runs$lengths)
+  starts <- ends - runs$lengths + 1L
+  keep <- which(runs$values)
+  pick <- if (direction == "above") which.max else which.min
+
+  rows <- lapply(seq_along(keep), function(k) {
+    idx <- starts[keep[k]]:ends[keep[k]]
+    peak <- idx[pick(score[idx])]
+    data.frame(
+      region_id = k,
+      start = profile_df$position[idx[1]],
+      end = profile_df$position[idx[length(idx)]],
+      length = length(idx),
+      sequence = paste(profile_df$residue[idx], collapse = ""),
+      peak_pos = profile_df$position[peak],
+      peak_score = score[peak],
+      mean_score = mean(score[idx]),
+      note = "",
+      stringsAsFactors = FALSE
+    )
+  })
+  do.call(rbind, rows)
+}
+
+# ── Immunological Propensity Scales ───────────────
+
+# Kolaskar & Tongaonkar (1990) FEBS Lett 276(1-2):172-174.
+# Source: IEDB B-Cell Analysis Resource (tools.iedb.org/bcell/help/).
+SEQPROFILE_SCALE_KOLASKAR <- c(
+  A = 1.064,
+  C = 1.412,
+  D = 0.866,
+  E = 0.851,
+  F = 1.091,
+  G = 0.874,
+  H = 1.105,
+  I = 1.152,
+  K = 0.930,
+  L = 1.250,
+  M = 0.826,
+  N = 0.776,
+  P = 1.064,
+  Q = 1.015,
+  R = 0.873,
+  S = 1.012,
+  T = 0.909,
+  V = 1.383,
+  W = 0.893,
+  Y = 1.161
+)
+
+# Emini et al. (1985) J Virol 55(3):836-839 (fractional surface probability d_n).
+# Source: IEDB B-Cell Analysis Resource (tools.iedb.org/bcell/help/).
+SEQPROFILE_SCALE_EMINI <- c(
+  A = 0.49,
+  C = 0.26,
+  D = 0.81,
+  E = 0.84,
+  F = 0.42,
+  G = 0.48,
+  H = 0.66,
+  I = 0.34,
+  K = 0.97,
+  L = 0.40,
+  M = 0.48,
+  N = 0.78,
+  P = 0.75,
+  Q = 0.84,
+  R = 0.95,
+  S = 0.65,
+  T = 0.70,
+  V = 0.36,
+  W = 0.51,
+  Y = 0.76
+)
+
+# Parker, Guo & Hodges (1986) Biochemistry 25(19):5425-5432 (HPLC hydrophilicity).
+# Source: IEDB B-Cell Analysis Resource (tools.iedb.org/bcell/help/).
+SEQPROFILE_SCALE_PARKER <- c(
+  A = 2.1,
+  C = 1.4,
+  D = 10.0,
+  E = 7.8,
+  F = -9.2,
+  G = 5.7,
+  H = 2.1,
+  I = -8.0,
+  K = 5.7,
+  L = -9.2,
+  M = -4.2,
+  N = 7.0,
+  P = 2.1,
+  Q = 6.0,
+  R = 4.2,
+  S = 6.5,
+  T = 5.2,
+  V = -3.7,
+  W = -10.0,
+  Y = -1.9
+)
+
+# Chou & Fasman (1978) Adv Enzymol Relat Areas Mol Biol 47:45-148 (beta-turn P_t).
+# Source: IEDB B-Cell Analysis Resource (tools.iedb.org/bcell/help/).
+SEQPROFILE_SCALE_CHOU_FASMAN_TURN <- c(
+  A = 0.66,
+  C = 1.19,
+  D = 1.46,
+  E = 0.74,
+  F = 0.60,
+  G = 1.56,
+  H = 0.95,
+  I = 0.47,
+  K = 1.01,
+  L = 0.59,
+  M = 0.60,
+  N = 1.56,
+  P = 1.52,
+  Q = 0.98,
+  R = 0.95,
+  S = 1.43,
+  T = 0.96,
+  V = 0.50,
+  W = 0.96,
+  Y = 1.14
+)
+
+# Calis et al. (2013) PLoS Comput Biol 9(10):e1003266 (Table 2 & IEDB Class I
+# Immunogenicity). Logarithmic amino-acid enrichment scores and nonamer
+# position weights (Kullback-Leibler divergence; P1, P2, P9 = 0).
+SEQPROFILE_SCALE_CALIS <- c(
+  A = 0.127,
+  C = -0.175,
+  D = 0.072,
+  E = 0.325,
+  F = 0.380,
+  G = 0.110,
+  H = 0.105,
+  I = 0.432,
+  K = -0.700,
+  L = -0.036,
+  M = -0.570,
+  N = -0.021,
+  P = -0.036,
+  Q = -0.376,
+  R = 0.168,
+  S = -0.537,
+  T = 0.126,
+  V = 0.134,
+  W = 0.719,
+  Y = -0.012
+)
+
+SEQPROFILE_WEIGHTS_CALIS_9MER <- c(
+  0.00,
+  0.00,
+  0.10,
+  0.31,
+  0.30,
+  0.29,
+  0.26,
+  0.18,
+  0.00
+)
+
+# ── Immunological Scoring Helpers ─────────────────────────────────────
+
+#' Mean amino acid scale value per window (Kolaskar, Parker, Chou-Fasman).
+seqprofile_scale_mean <- function(window_seq, scale) {
+  if (length(window_seq) == 0L) {
+    return(numeric(0))
+  }
+  vapply(
+    strsplit(toupper(window_seq), "", fixed = TRUE),
+    function(aa) {
+      if (length(aa) == 0L) {
+        return(NA_real_)
+      }
+      vals <- unname(scale[aa])
+      if (anyNA(vals)) NA_real_ else mean(vals)
+    },
+    numeric(1),
+    USE.NAMES = FALSE
+  )
+}
+
+#' Kolaskar & Tongaonkar (1990) antigenicity score per window.
+score_kolaskar_tongaonkar <- function(window_seq) {
+  seqprofile_scale_mean(window_seq, SEQPROFILE_SCALE_KOLASKAR)
+}
+
+#' Emini et al. (1985) surface accessibility score per window:
+#' S_n = prod(d_i) * (0.37)^(-w)
+score_emini_surface <- function(window_seq) {
+  if (length(window_seq) == 0L) {
+    return(numeric(0))
+  }
+  vapply(
+    strsplit(toupper(window_seq), "", fixed = TRUE),
+    function(aa) {
+      w <- length(aa)
+      if (w == 0L) {
+        return(NA_real_)
+      }
+      vals <- unname(SEQPROFILE_SCALE_EMINI[aa])
+      if (anyNA(vals)) NA_real_ else prod(vals) * (0.37)^(-w)
+    },
+    numeric(1),
+    USE.NAMES = FALSE
+  )
+}
+
+#' Parker et al. (1986) HPLC hydrophilicity score per window.
+score_parker_hydrophilicity <- function(window_seq) {
+  seqprofile_scale_mean(window_seq, SEQPROFILE_SCALE_PARKER)
+}
+
+#' Chou & Fasman (1978) beta-turn propensity score per window.
+score_chou_fasman_turn <- function(window_seq) {
+  seqprofile_scale_mean(window_seq, SEQPROFILE_SCALE_CHOU_FASMAN_TURN)
+}
+
+#' Parse a comma/space-separated mask specification (1-based indices or "C" for
+#' C-terminus) into integer positions for a peptide of length `pep_len`.
+parse_calis_mask <- function(mask, pep_len) {
+  if (is.null(mask) || length(mask) == 0L) {
+    return(integer(0))
+  }
+  if (is.numeric(mask)) {
+    idx <- as.integer(mask[!is.na(mask)])
+  } else {
+    raw <- trimws(paste(as.character(mask), collapse = ","))
+    if (!nzchar(raw)) {
+      return(integer(0))
+    }
+    tokens <- toupper(strsplit(raw, "[,;[:space:]]+")[[1]])
+    tokens <- tokens[nzchar(tokens)]
+    idx <- vapply(
+      tokens,
+      function(tok) {
+        if (tok %in% c("C", "CTERM", "C-TERM")) {
+          as.integer(pep_len)
+        } else if (grepl("^[0-9]+$", tok)) {
+          as.integer(tok)
+        } else {
+          seqprofile_abort(
+            sprintf(
+              "Invalid mask token '%s'. Use 1-based positions and/or 'C' (e.g. '1,2,C').",
+              tok
+            ),
+            "seqprofile_bad_param"
+          )
+        }
+      },
+      integer(1),
+      USE.NAMES = FALSE
+    )
+  }
+  unique(idx[idx >= 1L & idx <= pep_len])
+}
+
+#' Calis et al. (2013) MHC-I T-cell immunogenicity score for peptides of length >= 9.
+#'
+#' Replicates IEDB Class I Immunogenicity (`predict_immunogenicity.py`):
+#' nonamers use the published 9-position weights; longer peptides insert the
+#' central P5 weight (0.30) for each extra internal residue beyond 9.
+score_calis_immunogenicity <- function(window_seq, mask = "1,2,C") {
+  if (length(window_seq) == 0L) {
+    return(numeric(0))
+  }
+  vapply(
+    strsplit(toupper(window_seq), "", fixed = TRUE),
+    function(aa) {
+      L <- length(aa)
+      if (L < 9L) {
+        seqprofile_abort(
+          "Calis MHC-I immunogenicity requires a window/peptide length of at least 9 residues.",
+          "seqprofile_bad_param"
+        )
+      }
+      vals <- unname(SEQPROFILE_SCALE_CALIS[aa])
+      if (anyNA(vals)) {
+        return(NA_real_)
+      }
+      w9 <- SEQPROFILE_WEIGHTS_CALIS_9MER
+      weights <- if (L == 9L) {
+        w9
+      } else {
+        c(w9[1:5], rep(w9[5], L - 9L), w9[6:9])
+      }
+      mask_idx <- parse_calis_mask(mask, L)
+      if (length(mask_idx) > 0L) {
+        weights[mask_idx] <- 0
+      }
+      sum(vals * weights)
+    },
+    numeric(1),
+    USE.NAMES = FALSE
+  )
+}
+
+#' Registry of sequence-profiling algorithms.
+#'
+#' One entry per algorithm. `defaults` lists exactly the parameters the
+#' algorithm takes (the module renders a control for each); `score_fn` receives
+#' the window subsequences (canonical residues only) and the resolved
+#' parameters and returns one score per window.
+seqprofile_registry <- function() {
+  list(
+    charge_lehninger = list(
+      id = "charge_lehninger",
+      name = "Charge Density (Lehninger)",
+      category = "Physicochemical",
+      y_label = "Net charge per residue",
+      defaults = list(window = 9L, pH = 7.4, threshold = 0),
+      direction = "above",
+      baseline = 0,
+      region_note = "Net positive segment",
+      score_fn = function(window_seq, p) {
+        Peptides::charge(window_seq, pH = p$pH, pKscale = "Lehninger") /
+          nchar(window_seq)
+      },
+      interpretation = list(
+        summary = "Net charge of each window at the chosen pH, from the Henderson-Hasselbalch equation with the Lehninger pKa set, divided by the window length.",
+        reading = "Positive values mark basic (Lys/Arg/His-rich) stretches, negative values acidic (Asp/Glu-rich) stretches; values near 0 are neutral or charge-balanced.",
+        thresholds = "The default window of 9 residues gives a local view; the 0 line separates net positive from net negative segments. Shaded regions are net positive at the chosen pH.",
+        caveats = "Each window is scored as a free peptide, so one N-terminal amine and one C-terminal carboxyl are included in every window. pKa values are for free amino acids and ignore the local environment in a folded protein.",
+        reference = "Moore DS (1985) Biochem Educ 13:10-11; pKa set from Nelson DL, Cox MM, Lehninger Principles of Biochemistry, 4th ed. (2004). Computed with Peptides::charge()."
+      )
+    ),
+    hydropathy_kd = list(
+      id = "hydropathy_kd",
+      name = "Hydropathy (Kyte-Doolittle)",
+      category = "Physicochemical",
+      y_label = "Mean hydropathy (Kyte-Doolittle)",
+      defaults = list(window = 9L, threshold = 0),
+      direction = "above",
+      baseline = 0,
+      region_note = "Hydrophobic segment",
+      score_fn = function(window_seq, p) {
+        Peptides::hydrophobicity(window_seq, scale = "KyteDoolittle")
+      },
+      interpretation = list(
+        summary = "Mean Kyte-Doolittle hydropathy of the residues in each window.",
+        reading = "Positive = hydrophobic (likely buried or membrane-embedded), negative = hydrophilic (likely solvent-exposed). Note the sign is opposite to Hopp-Woods.",
+        thresholds = "A window of 9 suits surface / interior patterns of globular proteins (threshold 0). To look for membrane-spanning segments use a window of 19 and a threshold of 1.6, as proposed by Kyte and Doolittle.",
+        caveats = "A hydropathy peak is suggestive, not proof, of a transmembrane helix; signal peptides also score high.",
+        reference = "Kyte J, Doolittle RF (1982) J Mol Biol 157:105-132. Computed with Peptides::hydrophobicity(scale = \"KyteDoolittle\")."
+      )
+    ),
+    hydrophilicity_hw = list(
+      id = "hydrophilicity_hw",
+      name = "Hydrophilicity (Hopp-Woods)",
+      category = "Physicochemical",
+      y_label = "Mean hydrophilicity (Hopp-Woods)",
+      defaults = list(window = 6L, threshold = 0),
+      direction = "above",
+      baseline = 0,
+      region_note = "Hydrophilic segment",
+      score_fn = function(window_seq, p) {
+        Peptides::hydrophobicity(window_seq, scale = "HoppWoods")
+      },
+      interpretation = list(
+        summary = "Mean Hopp-Woods hydrophilicity of the residues in each window.",
+        reading = "Positive = hydrophilic, likely surface-exposed; negative = hydrophobic. Note the sign is opposite to Kyte-Doolittle.",
+        thresholds = "Hopp and Woods used a 6-residue window and looked for the highest peaks as candidate antigenic determinants; the 0 line separates net hydrophilic from net hydrophobic windows.",
+        caveats = "With an even window the score is reported at the residue just left of the window midpoint. Hydrophilicity alone is a weak predictor of epitopes.",
+        reference = "Hopp TP, Woods KR (1981) Proc Natl Acad Sci USA 78:3824-3828. Computed with Peptides::hydrophobicity(scale = \"HoppWoods\")."
+      )
+    ),
+    hmoment_eisenberg = list(
+      id = "hmoment_eisenberg",
+      name = "Amphiphilicity (Eisenberg hydrophobic moment)",
+      category = "Structural / Membrane",
+      y_label = "Hydrophobic moment (uH)",
+      defaults = list(window = 11L, angle = 100, threshold = NA_real_),
+      direction = "above",
+      baseline = NA_real_,
+      region_note = "Amphiphilic segment",
+      score_fn = function(window_seq, p) {
+        Peptides::hmoment(window_seq, angle = p$angle, window = p$window)
+      },
+      interpretation = list(
+        summary = "Hydrophobic moment of each window: how strongly hydrophobic residues cluster on one face of a periodic structure with the chosen rotation angle per residue.",
+        reading = "Higher values = more amphiphilic (one hydrophobic and one polar face). Values are never negative. Low values mean hydrophobicity is spread evenly around the axis.",
+        thresholds = "The default window is 11 residues. An angle of 100 degrees assumes an alpha-helix, 160 degrees a beta-strand. No cutoff is preset; enter a threshold to shade regions above it.",
+        caveats = "The result is only meaningful if the segment really adopts the assumed periodicity; a high moment at 100 degrees does not show that the segment is helical.",
+        reference = "Eisenberg D, Weiss RM, Terwilliger TC (1984) Proc Natl Acad Sci USA 81:140-144. Computed with Peptides::hmoment()."
+      )
+    ),
+    antigenicity_kolaskar = list(
+      id = "antigenicity_kolaskar",
+      name = "Antigenicity (Kolaskar-Tongaonkar)",
+      category = "Immunogenicity / Epitopes",
+      y_label = "Antigenic propensity",
+      defaults = list(window = 7L, threshold = 1.0),
+      direction = "above",
+      baseline = 1.0,
+      needs_peptides = FALSE,
+      region_note = "Predicted antigenic determinant",
+      score_fn = function(window_seq, p) {
+        score_kolaskar_tongaonkar(window_seq)
+      },
+      interpretation = list(
+        summary = "Semi-empirical antigenic propensity averaged over each window, derived from amino acid frequencies in experimentally known linear B-cell epitopes versus protein surfaces.",
+        reading = "Values above 1.0 indicate residues enriched in antigenic determinants (notably Cys, Val, Leu, Tyr, Ile). Higher peaks mark stronger linear epitope candidates.",
+        thresholds = "The default 7-residue window and 1.0 parity line match the Kolaskar-Tongaonkar convention; IEDB also commonly uses the protein's own mean score (shown in the summary strip) as a sequence-specific cutoff.",
+        caveats = "Hydrophobic residues such as Val, Leu, and Cys carry high propensities, so buried hydrophobic cores can score high. Cross-check peaks with Emini surface accessibility or Parker hydrophilicity.",
+        reference = "Kolaskar AS, Tongaonkar PC (1990) FEBS Lett 276(1-2):172-174; scale values from IEDB B-Cell Analysis Resource."
+      )
+    ),
+    surface_emini = list(
+      id = "surface_emini",
+      name = "Surface Accessibility (Emini)",
+      category = "Structural / Membrane",
+      y_label = "Surface probability (Sn)",
+      defaults = list(window = 6L, threshold = 1.0),
+      direction = "above",
+      baseline = 1.0,
+      needs_peptides = FALSE,
+      region_note = "Surface-exposed segment",
+      score_fn = function(window_seq, p) {
+        score_emini_surface(window_seq)
+      },
+      interpretation = list(
+        summary = "Multiplicative surface probability Sn = prod(d_i) * (0.37)^(-w) of each window, estimating the likelihood that a stretch is exposed on the protein surface.",
+        reading = "Scores above 1.0 indicate an increased probability of surface exposure relative to an average hexapeptide. Because the formula is multiplicative, a single strongly buried residue sharply suppresses the window score.",
+        thresholds = "Emini et al. defined a 6-residue window with a threshold of 1.0. With an even window, the score is assigned to the residue just left of the midpoint (position 3 of residues 1-6).",
+        caveats = "Scores can span several orders of magnitude in highly charged loops. Surface exposure is necessary for antibody binding but does not guarantee immunogenicity on its own.",
+        reference = "Emini EA, Hughes JV, Perlow DS, Boger J (1985) J Virol 55(3):836-839; scale values from IEDB B-Cell Analysis Resource."
+      )
+    ),
+    hydrophilicity_parker = list(
+      id = "hydrophilicity_parker",
+      name = "Hydrophilicity (Parker HPLC)",
+      category = "Physicochemical",
+      y_label = "Mean hydrophilicity (Parker)",
+      defaults = list(window = 7L, threshold = 0),
+      direction = "above",
+      baseline = 0,
+      needs_peptides = FALSE,
+      region_note = "Hydrophilic / surface loop",
+      score_fn = function(window_seq, p) {
+        score_parker_hydrophilicity(window_seq)
+      },
+      interpretation = list(
+        summary = "Mean hydrophilicity per window based on reversed-phase HPLC peptide retention times (scale ranges from -10.0 for Trp to +10.0 for Asp).",
+        reading = "Positive peaks mark hydrophilic, solvent-exposed stretches often associated with linear B-cell epitopes; negative valleys correspond to hydrophobic segments.",
+        thresholds = "Parker et al. used a 7-residue window with the score assigned to the central (4th) residue. The 0 line separates net hydrophilic from net hydrophobic windows; you can raise the threshold to the sequence mean to isolate top peaks.",
+        caveats = "Hydrophilicity correlates with solvent accessibility rather than antibody binding directly; combine with beta-turn and surface accessibility profiles.",
+        reference = "Parker JMR, Guo D, Hodges RS (1986) Biochemistry 25(19):5425-5432; scale values from IEDB B-Cell Analysis Resource."
+      )
+    ),
+    betaturn_chou_fasman = list(
+      id = "betaturn_chou_fasman",
+      name = "Beta-Turn Propensity (Chou-Fasman)",
+      category = "Structural / Membrane",
+      y_label = "Mean beta-turn propensity (Pt)",
+      defaults = list(window = 7L, threshold = 1.0),
+      direction = "above",
+      baseline = 1.0,
+      needs_peptides = FALSE,
+      region_note = "Predicted beta-turn region",
+      score_fn = function(window_seq, p) {
+        score_chou_fasman_turn(window_seq)
+      },
+      interpretation = list(
+        summary = "Mean Chou-Fasman beta-turn conformational parameter (Pt) over each window, highlighting regions enriched in turn-forming residues (Gly, Asn, Pro, Asp, Ser).",
+        reading = "Values above 1.0 indicate above-average beta-turn propensity. Exposed beta-turns frequently coincide with linear B-cell epitopes.",
+        thresholds = "The IEDB sliding-window convention uses a 7-residue window. A threshold of 1.0 marks windows above random-coil expectation; the sequence mean can be used for stricter peak picking.",
+        caveats = "This profile evaluates single-residue turn propensity only, not full 4-residue Chou-Fasman positional bend rules or competing alpha-helix/beta-sheet propensities.",
+        reference = "Chou PY, Fasman GD (1978) Adv Enzymol Relat Areas Mol Biol 47:45-148; scale values from IEDB B-Cell Analysis Resource."
+      )
+    ),
+    immunogenicity_calis = list(
+      id = "immunogenicity_calis",
+      name = "MHC-I T-Cell Immunogenicity (Calis)",
+      category = "Immunogenicity / Epitopes",
+      y_label = "Immunogenicity score",
+      defaults = list(window = 9L, mask = "1,2,C", threshold = 0),
+      min_window = 9L,
+      direction = "above",
+      baseline = 0,
+      needs_peptides = FALSE,
+      region_note = "Predicted immunogenic MHC-I peptide",
+      score_fn = function(window_seq, p) {
+        score_calis_immunogenicity(window_seq, mask = p$mask)
+      },
+      interpretation = list(
+        summary = "Position-weighted sum of amino acid log-enrichment scores across each candidate MHC class I peptide (9-mer or longer), emphasizing TCR-facing residues (positions 4-6) enriched in large/aromatic amino acids (Trp, Ile, Phe, Glu).",
+        reading = "Higher positive scores indicate a greater likelihood of T-cell recognition once presented on MHC-I; negative scores indicate depletion of immunogenic features.",
+        thresholds = "Default window is 9 residues (standard MHC-I peptide length) with anchor positions 1, 2, and C-terminus masked ('1,2,C') and threshold 0. Longer windows (>=10 aa) replicate IEDB's central-weight insertion.",
+        caveats = "Calis et al. models TCR recognition of peptides already bound to MHC-I; it does not predict HLA binding affinity or proteasomal cleavage. Combine top windows with an MHC-I binding predictor.",
+        reference = "Calis JJA et al. (2013) PLoS Comput Biol 9(10):e1003266 (IEDB Class I Immunogenicity)."
+      )
+    )
+  )
+}
+
+# Display order of the algorithm groups in the selectInput().
+SEQPROFILE_CATEGORIES <- c(
+  "Physicochemical",
+  "Structural / Membrane",
+  "Immunogenicity / Epitopes"
+)
+
+# Choices for a grouped selectInput(): list(category = list(name = id, ...)).
+# Groups follow SEQPROFILE_CATEGORIES (any other category is appended);
+# algorithms keep their registry order within a group.
+seqprofile_choices <- function() {
+  reg <- seqprofile_registry()
+  cats <- vapply(reg, function(x) x$category, character(1))
+  lvls <- union(SEQPROFILE_CATEGORIES, cats)
+  lapply(split(reg, factor(cats, levels = lvls), drop = TRUE), function(group) {
+    as.list(stats::setNames(
+      vapply(group, function(x) x$id, character(1)),
+      vapply(group, function(x) x$name, character(1))
+    ))
+  })
+}
+
+#' Run one profiling algorithm on a cleaned sequence.
+#'
+#' Windows containing a residue outside the 20 canonical amino acids get an
+#' `NA` score (Peptides only warns and still returns a number for them).
+#'
+#' @param sequence Cleaned sequence, e.g. `clean_protein_sequence()$sequence`.
+#' @param algorithm_id A name of `seqprofile_registry()`.
+#' @param params Named list overriding the algorithm's defaults; unknown names
+#'   and NULL entries are ignored.
+#' @return Named list: algorithm_id, algorithm_name, sequence, params, profile,
+#'   regions, global_stats, interpretation, plus y_label, direction, baseline
+#'   and masked_residues.
+run_seq_profile <- function(sequence, algorithm_id, params = list()) {
+  spec <- seqprofile_registry()[[algorithm_id]]
+  if (is.null(spec)) {
+    seqprofile_abort(
+      paste0("Unknown algorithm: ", algorithm_id),
+      "seqprofile_bad_param"
+    )
+  }
+  if (
+    !identical(spec$needs_peptides, FALSE) &&
+      !requireNamespace("Peptides", quietly = TRUE)
+  ) {
+    seqprofile_abort(
+      "The 'Peptides' package is not installed. Start proteOmni through run.R so it is installed from proteOmni.lock.",
+      "seqprofile_missing_package"
+    )
+  }
+  sequence <- toupper(as.character(sequence)[1])
+  if (is.na(sequence) || !nzchar(sequence)) {
+    seqprofile_abort("The sequence is empty.", "seqprofile_empty")
+  }
+
+  p <- spec$defaults
+  for (nm in intersect(names(params), names(p))) {
+    value <- params[[nm]]
+    if (length(value) == 1) p[[nm]] <- value
+  }
+  min_w <- if (!is.null(spec$min_window)) as.integer(spec$min_window) else 2L
+  if (is.na(p$window) || p$window < min_w || p$window != round(p$window)) {
+    seqprofile_abort(
+      sprintf("Window size must be a whole number of at least %d.", min_w),
+      "seqprofile_bad_param"
+    )
+  }
+  p$window <- as.integer(p$window)
+  if (!is.null(p$pH) && (is.na(p$pH) || p$pH < 0 || p$pH > 14)) {
+    seqprofile_abort("pH must be between 0 and 14.", "seqprofile_bad_param")
+  }
+  if (!is.null(p$angle) && is.na(p$angle)) {
+    seqprofile_abort("Rotation angle is missing.", "seqprofile_bad_param")
+  }
+  p$threshold <- as.numeric(p$threshold)
+
+  profile <- seqprofile_windows(sequence, p$window)
+  scorable <- !grepl("[^ACDEFGHIKLMNPQRSTVWY]", profile$window_seq)
+  profile$score <- NA_real_
+  if (any(scorable)) {
+    profile$score[scorable] <- as.numeric(
+      spec$score_fn(profile$window_seq[scorable], p)
+    )
+  }
+  profile$above_thr <- if (is.na(p$threshold)) {
+    NA
+  } else if (spec$direction == "above") {
+    profile$score >= p$threshold
+  } else {
+    profile$score <= p$threshold
+  }
+
+  regions <- extract_profile_regions(profile, p$threshold, spec$direction)
+  regions$note <- rep(spec$region_note, nrow(regions))
+
+  has_score <- any(scorable)
+  i_min <- if (has_score) which.min(profile$score) else NA_integer_
+  i_max <- if (has_score) which.max(profile$score) else NA_integer_
+  global_stats <- list(
+    seq_length = nchar(sequence),
+    mean_score = if (has_score) mean(profile$score, na.rm = TRUE) else NA_real_,
+    sd_score = if (has_score) {
+      stats::sd(profile$score, na.rm = TRUE)
+    } else {
+      NA_real_
+    },
+    min_score = if (has_score) profile$score[i_min] else NA_real_,
+    max_score = if (has_score) profile$score[i_max] else NA_real_,
+    n_regions = nrow(regions),
+    # Share of scored windows, not of all residues
+    pct_above = if (has_score && !is.na(p$threshold)) {
+      100 * mean(profile$above_thr, na.rm = TRUE)
+    } else {
+      NA_real_
+    },
+    min_pos = if (has_score) profile$position[i_min] else NA_integer_,
+    max_pos = if (has_score) profile$position[i_max] else NA_integer_,
+    n_windows = nrow(profile),
+    n_masked = sum(!scorable)
+  )
+
+  list(
+    algorithm_id = spec$id,
+    algorithm_name = spec$name,
+    sequence = sequence,
+    params = p,
+    profile = profile,
+    regions = regions,
+    global_stats = global_stats,
+    interpretation = spec$interpretation,
+    y_label = spec$y_label,
+    direction = spec$direction,
+    baseline = spec$baseline,
+    masked_residues = sort(setdiff(
+      unique(strsplit(sequence, "")[[1]]),
+      SEQPROFILE_AA
+    ))
+  )
+}
+
+#' Whole-sequence descriptors from Peptides.
+#'
+#' @return Named list (mw, pI, gravy, boman, aliphatic_index,
+#'   instability_index); all `NA` when the sequence holds a non-canonical
+#'   residue, because Peptides does not score those reliably.
+seqprofile_global_descriptors <- function(sequence) {
+  nms <- c(
+    "mw",
+    "pI",
+    "gravy",
+    "boman",
+    "aliphatic_index",
+    "instability_index"
+  )
+  sequence <- toupper(as.character(sequence)[1])
+  if (
+    is.na(sequence) ||
+      !nzchar(sequence) ||
+      grepl("[^ACDEFGHIKLMNPQRSTVWY]", sequence) ||
+      !requireNamespace("Peptides", quietly = TRUE)
+  ) {
+    return(stats::setNames(as.list(rep(NA_real_, length(nms))), nms))
+  }
+  list(
+    mw = Peptides::mw(sequence),
+    pI = Peptides::pI(sequence, pKscale = "Lehninger"),
+    gravy = Peptides::hydrophobicity(sequence, scale = "KyteDoolittle"),
+    boman = Peptides::boman(sequence),
+    aliphatic_index = Peptides::aIndex(sequence),
+    instability_index = Peptides::instaIndex(sequence)
+  )
+}
+
+#' Profile plot for a `run_seq_profile()` result.
+#'
+#' Line of score vs. window-centre position, a dashed threshold line, a solid
+#' baseline where the algorithm has one, and shaded bands over the predicted
+#' regions. The points carry a `text` aesthetic for plotly hover.
+plot_seq_profile <- function(result) {
+  prof <- result$profile
+  if (all(is.na(prof$score))) {
+    return(
+      ggplot2::ggplot() +
+        ggplot2::annotate(
+          "text",
+          x = 0.5,
+          y = 0.5,
+          label = "No window could be scored (non-canonical residues in every window)"
+        ) +
+        ggplot2::theme_void()
+    )
+  }
+  thr <- result$params$threshold
+  base <- result$baseline
+  prof$hover <- sprintf(
+    "Position: %d<br>Residue: %s<br>Window: %s<br>Score: %.3f",
+    prof$position,
+    prof$residue,
+    prof$window_seq,
+    prof$score
+  )
+  # Finite band limits: plotly does not draw rectangles with infinite bounds
+  y_rng <- range(c(prof$score, thr, base), na.rm = TRUE)
+  pad <- diff(y_rng) * 0.05
+  if (pad == 0) {
+    pad <- 0.5
+  }
+  y_rng <- y_rng + c(-pad, pad)
+
+  p <- ggplot2::ggplot(prof, ggplot2::aes(x = position, y = score))
+  if (nrow(result$regions) > 0) {
+    bands <- data.frame(
+      xmin = result$regions$start - 0.5,
+      xmax = result$regions$end + 0.5,
+      ymin = y_rng[1],
+      ymax = y_rng[2]
+    )
+    p <- p +
+      ggplot2::geom_rect(
+        data = bands,
+        ggplot2::aes(xmin = xmin, xmax = xmax, ymin = ymin, ymax = ymax),
+        inherit.aes = FALSE,
+        fill = "#5FA8D3",
+        alpha = 0.25
+      )
+  }
+  if (!is.na(base)) {
+    p <- p + ggplot2::geom_hline(yintercept = base, colour = "grey60")
+  }
+  if (!is.na(thr)) {
+    p <- p +
+      ggplot2::geom_hline(
+        yintercept = thr,
+        linetype = "dashed",
+        colour = "#c0392b"
+      )
+  }
+  p +
+    ggplot2::geom_line(colour = "#1B4965", na.rm = TRUE) +
+    # `text` is not a ggplot2 aesthetic; it is read by plotly::ggplotly()
+    suppressWarnings(ggplot2::geom_point(
+      ggplot2::aes(text = hover),
+      colour = "#1B4965",
+      size = 0.7,
+      na.rm = TRUE
+    )) +
+    ggplot2::labs(
+      title = result$algorithm_name,
+      x = "Residue position (window centre)",
+      y = result$y_label
+    )
+}
+
+# ── In silico digestion of one sequence (Digestion tab of mod_SeqProfile.r) ──
+
+# Monoisotopic residue masses in Da (amino acid minus water), unmodified.
+SEQPROFILE_MONO_MASS <- c(
+  G = 57.021464,
+  A = 71.037114,
+  S = 87.032028,
+  P = 97.052764,
+  V = 99.068414,
+  T = 101.047679,
+  C = 103.009185,
+  L = 113.084064,
+  I = 113.084064,
+  N = 114.042927,
+  D = 115.026943,
+  Q = 128.058578,
+  K = 128.094963,
+  E = 129.042593,
+  M = 131.040485,
+  H = 137.058912,
+  F = 147.068414,
+  R = 156.101111,
+  Y = 163.063329,
+  W = 186.079313
+)
+SEQPROFILE_WATER_MONO <- 18.010565
+SEQPROFILE_PROTON_MONO <- 1.007276467
+# Carbamidomethylation of Cys (iodoacetamide alkylation), C2H3NO
+SEQPROFILE_CARBAMIDOMETHYL_MONO <- 57.021464
+# Oxidation of Met, +O
+SEQPROFILE_OXIDATION_MONO <- 15.994915
+
+# Preset cleavage rules. `terminus` is the side of `residues` that is cut;
+# `blocked_by` holds residues that prevent cleavage when they sit on the other
+# side of the bond (e.g. trypsin does not cut K|P).
+SEQPROFILE_ENZYMES <- list(
+  trypsin = list(
+    name = "Trypsin",
+    residues = "KR",
+    terminus = "C",
+    blocked_by = "P"
+  ),
+  gluc = list(name = "GluC", residues = "E", terminus = "C", blocked_by = "P"),
+  lysn = list(name = "LysN", residues = "K", terminus = "N", blocked_by = ""),
+  aspn = list(name = "AspN", residues = "D", terminus = "N", blocked_by = ""),
+  chymotrypsin = list(
+    name = "Chymotrypsin",
+    residues = "FWYL",
+    terminus = "C",
+    blocked_by = "P"
+  ),
+  elastase = list(
+    name = "Elastase",
+    residues = "AGILV",
+    terminus = "C",
+    blocked_by = "P"
+  )
+)
+
+# Choices for the enzyme selectInput(); "custom" is handled by the module.
+seqprofile_enzyme_choices <- function() {
+  c(
+    stats::setNames(
+      names(SEQPROFILE_ENZYMES),
+      vapply(SEQPROFILE_ENZYMES, function(x) x$name, character(1))
+    ),
+    "Custom rule" = "custom"
+  )
+}
+
+# "KR", "k, r" or c("K", "R") -> c("K", "R"); aborts on anything but letters.
+seqprofile_parse_residues <- function(x, what = "Cleavage residues") {
+  if (is.null(x) || all(is.na(x))) {
+    x <- ""
+  }
+  x <- toupper(gsub("[[:space:],;/|]", "", paste(x, collapse = "")))
+  if (!grepl("^[A-Z]*$", x)) {
+    seqprofile_abort(
+      paste0(what, " must be one-letter amino acid codes, e.g. KR."),
+      "seqprofile_bad_param"
+    )
+  }
+  unique(strsplit(x, "")[[1]])
+}
+
+# Plain-language description of a cleavage rule.
+seqprofile_enzyme_rule <- function(residues, terminus, blocked_by = "") {
+  residues <- seqprofile_parse_residues(residues)
+  blocked_by <- seqprofile_parse_residues(blocked_by)
+  rule <- sprintf(
+    "Cleaves %s-terminal to %s",
+    terminus,
+    paste(residues, collapse = "/")
+  )
+  if (length(blocked_by) > 0) {
+    rule <- sprintf(
+      "%s, except when %s by %s",
+      rule,
+      if (terminus == "C") "followed" else "preceded",
+      paste(blocked_by, collapse = "/")
+    )
+  }
+  rule
+}
+
+# Residue masses with the chosen modifications applied to every Cys / Met.
+seqprofile_residue_masses <- function(
+  carbamidomethyl = FALSE,
+  oxidation = FALSE
+) {
+  masses <- SEQPROFILE_MONO_MASS
+  if (isTRUE(carbamidomethyl)) {
+    masses[["C"]] <- masses[["C"]] + SEQPROFILE_CARBAMIDOMETHYL_MONO
+  }
+  if (isTRUE(oxidation)) {
+    masses[["M"]] <- masses[["M"]] + SEQPROFILE_OXIDATION_MONO
+  }
+  masses
+}
+
+#' Monoisotopic mass of peptides (neutral, [M]).
+#'
+#' @param masses Residue masses; the default is unmodified, see
+#'   `seqprofile_residue_masses()` for modified Cys / Met.
+#' @return Numeric vector; `NA` for a peptide with a non-canonical residue.
+seqprofile_mono_mass <- function(peptides, masses = SEQPROFILE_MONO_MASS) {
+  vapply(
+    strsplit(as.character(peptides), ""),
+    function(aa) {
+      if (length(aa) == 0) {
+        return(NA_real_)
+      }
+      sum(masses[aa]) + SEQPROFILE_WATER_MONO
+    },
+    numeric(1)
+  )
+}
+
+#' Theoretical b and y fragment ions of one peptide.
+#'
+#' b(i) holds the first i residues, y(i) the last i residues plus water; both
+#' carry `charge` protons. Ions run from 1 to length - 1.
+#'
+#' @return data.frame(ion, type, number, fragment, mz, intensity), with
+#'   `intensity` fixed at 1.
+seqprofile_fragment_ions <- function(
+  peptide,
+  carbamidomethyl = FALSE,
+  oxidation = FALSE,
+  charge = 1L
+) {
+  peptide <- toupper(as.character(peptide)[1])
+  aa <- strsplit(peptide, "")[[1]]
+  n <- length(aa)
+  if (n < 2) {
+    seqprofile_abort(
+      "A peptide needs at least 2 residues to have b/y fragment ions.",
+      "seqprofile_short_sequence"
+    )
+  }
+  res_mass <- seqprofile_residue_masses(carbamidomethyl, oxidation)[aa]
+  if (anyNA(res_mass)) {
+    seqprofile_abort(
+      "Fragment ions cannot be computed for a peptide with non-canonical residues.",
+      "seqprofile_bad_param"
+    )
+  }
+  if (length(charge) != 1 || is.na(charge) || charge < 1) {
+    seqprofile_abort(
+      "Fragment charge must be 1 or more.",
+      "seqprofile_bad_param"
+    )
+  }
+  i <- seq_len(n - 1L)
+  b <- cumsum(res_mass)[i]
+  y <- cumsum(rev(res_mass))[i] + SEQPROFILE_WATER_MONO
+  suffix <- if (charge > 1) paste0(" ", charge, "+") else ""
+  data.frame(
+    ion = paste0(rep(c("b", "y"), each = n - 1L), c(i, i), suffix),
+    type = rep(c("b", "y"), each = n - 1L),
+    number = c(i, i),
+    fragment = c(substring(peptide, 1L, i), substring(peptide, n - i + 1L, n)),
+    mz = (unname(c(b, y)) + charge * SEQPROFILE_PROTON_MONO) / charge,
+    intensity = 1,
+    stringsAsFactors = FALSE
+  )
+}
+
+#' Stick spectrum for a `seqprofile_fragment_ions()` result.
+#'
+#' The points carry a `text` aesthetic for plotly hover.
+plot_fragment_spectrum <- function(ions, title = NULL) {
+  ions$hover <- sprintf(
+    "%s (%s)<br>m/z: %.4f",
+    ions$ion,
+    ions$fragment,
+    ions$mz
+  )
+  # b and y labels at different heights so near-isobaric pairs stay readable
+  ions$label_y <- ions$intensity + ifelse(ions$type == "b", 0.04, 0.09)
+  ggplot2::ggplot(ions, ggplot2::aes(x = mz, colour = type)) +
+    ggplot2::geom_segment(ggplot2::aes(xend = mz, y = 0, yend = intensity)) +
+    # `text` is not a ggplot2 aesthetic; it is read by plotly::ggplotly()
+    suppressWarnings(ggplot2::geom_point(
+      ggplot2::aes(y = intensity, text = hover),
+      size = 0.8
+    )) +
+    ggplot2::geom_text(
+      ggplot2::aes(y = label_y, label = ion),
+      size = 3,
+      show.legend = FALSE
+    ) +
+    ggplot2::scale_colour_manual(
+      values = c(b = "#1B4965", y = "#c0392b"),
+      name = "Ion series"
+    ) +
+    ggplot2::labs(title = title, x = "m/z", y = "Relative intensity")
+}
+
+#' Cleave one sequence with a residue-specific rule.
+#'
+#' @param residues,blocked_by Character vectors of one-letter codes.
+#' @param terminus "C" cuts after `residues`, "N" cuts before them.
+#' @param max_missed Peptides spanning up to this many uncut sites are added.
+#' @return data.frame(start, end, length, sequence, missed_cleavages,
+#'   mono_mass), ordered by start then end.
+digest_single_sequence <- function(
+  sequence,
+  residues,
+  terminus = "C",
+  blocked_by = character(0),
+  max_missed = 0L
+) {
+  aa <- strsplit(sequence, "")[[1]]
+  n <- length(aa)
+  # Bond i joins residues i and i + 1
+  i <- seq_len(max(n - 1L, 0L))
+  cut <- if (terminus == "C") {
+    aa[i] %in% residues & !(aa[i + 1L] %in% blocked_by)
+  } else {
+    aa[i + 1L] %in% residues & !(aa[i] %in% blocked_by)
+  }
+  bonds <- i[cut]
+  starts <- c(1L, bonds + 1L)
+  ends <- c(bonds, n)
+  k <- length(starts)
+
+  pep <- do.call(
+    rbind,
+    lapply(0:min(max_missed, k - 1L), function(m) {
+      idx <- seq_len(k - m)
+      data.frame(
+        start = starts[idx],
+        end = ends[idx + m],
+        missed_cleavages = rep(as.integer(m), length(idx))
+      )
+    })
+  )
+  pep <- pep[order(pep$start, pep$end), ]
+  rownames(pep) <- NULL
+  pep$length <- pep$end - pep$start + 1L
+  pep$sequence <- substring(sequence, pep$start, pep$end)
+  pep$mono_mass <- seqprofile_mono_mass(pep$sequence)
+  pep[c("start", "end", "length", "sequence", "missed_cleavages", "mono_mass")]
+}
+
+#' Theoretical digestion of a cleaned sequence and its sequence coverage.
+#'
+#' Coverage counts the residues that lie in at least one peptide whose length
+#' is within `min_len`..`max_len` (a complete digest always covers 100 % of
+#' the sequence, so only the peptides in a detectable size range are counted).
+#' When `mz_min` and `mz_max` are given, a peptide must also have its 2+ or
+#' 3+ ion inside that m/z range.
+#'
+#' @param sequence Cleaned sequence, e.g. `clean_protein_sequence()$sequence`.
+#' @param enzyme_id A name of `SEQPROFILE_ENZYMES`, or "custom".
+#' @param params Named list: `max_missed`, `min_len`, `max_len`, `mz_min`,
+#'   `mz_max` (both `NA` or absent for no m/z filter), `carbamidomethyl` (TRUE
+#'   adds 57.021464 Da per Cys), `oxidation` (TRUE adds 15.994915 Da per Met),
+#'   and for the custom rule `residues`, `terminus` ("C" / "N") and
+#'   `blocked_by`.
+#' @return Named list: enzyme_id, enzyme_name, rule, sequence, params,
+#'   peptides (with `mz_1`, `mz_2`, `mz_3` for [M+zH]z+ and an `in_range`
+#'   column), covered (one logical per residue) and stats.
+run_seq_digest <- function(sequence, enzyme_id = "trypsin", params = list()) {
+  sequence <- toupper(as.character(sequence)[1])
+  if (is.na(sequence) || !nzchar(sequence)) {
+    seqprofile_abort("The sequence is empty.", "seqprofile_empty")
+  }
+
+  if (identical(enzyme_id, "custom")) {
+    spec <- list(
+      name = "Custom rule",
+      residues = params$residues,
+      terminus = toupper(as.character(params$terminus)[1]),
+      blocked_by = params$blocked_by
+    )
+  } else {
+    spec <- SEQPROFILE_ENZYMES[[enzyme_id]]
+    if (is.null(spec)) {
+      seqprofile_abort(
+        paste0("Unknown enzyme: ", enzyme_id),
+        "seqprofile_bad_param"
+      )
+    }
+  }
+  residues <- seqprofile_parse_residues(spec$residues)
+  blocked_by <- seqprofile_parse_residues(spec$blocked_by, "Blocking residues")
+  if (length(residues) == 0) {
+    seqprofile_abort(
+      "Enter at least one cleavage residue for the custom rule.",
+      "seqprofile_bad_param"
+    )
+  }
+  if (is.na(spec$terminus) || !spec$terminus %in% c("C", "N")) {
+    seqprofile_abort(
+      "The cleavage side must be 'C' or 'N'.",
+      "seqprofile_bad_param"
+    )
+  }
+
+  p <- list(max_missed = 0L, min_len = 6L, max_len = 30L)
+  for (nm in intersect(names(params), names(p))) {
+    value <- params[[nm]]
+    if (length(value) == 1) p[[nm]] <- value
+  }
+  whole <- function(x, min) !is.na(x) && x >= min && x == round(x)
+  if (!whole(p$max_missed, 0)) {
+    seqprofile_abort(
+      "Missed cleavages must be a whole number of 0 or more.",
+      "seqprofile_bad_param"
+    )
+  }
+  if (!whole(p$min_len, 1) || !whole(p$max_len, 1) || p$min_len > p$max_len) {
+    seqprofile_abort(
+      "Peptide length limits must be whole numbers with minimum <= maximum.",
+      "seqprofile_bad_param"
+    )
+  }
+  p <- lapply(p, as.integer)
+  p$carbamidomethyl <- isTRUE(params$carbamidomethyl)
+  p$oxidation <- isTRUE(params$oxidation)
+  one_number <- function(x) {
+    if (length(x) == 1) suppressWarnings(as.numeric(x)) else NA_real_
+  }
+  p$mz_min <- one_number(params$mz_min)
+  p$mz_max <- one_number(params$mz_max)
+  use_mz <- !is.na(p$mz_min) || !is.na(p$mz_max)
+  if (
+    use_mz &&
+      (is.na(p$mz_min) ||
+        is.na(p$mz_max) ||
+        p$mz_min < 0 ||
+        p$mz_min >= p$mz_max)
+  ) {
+    seqprofile_abort(
+      "Enter both m/z limits, with minimum < maximum, or switch the m/z filter off.",
+      "seqprofile_bad_param"
+    )
+  }
+
+  peptides <- digest_single_sequence(
+    sequence,
+    residues,
+    spec$terminus,
+    blocked_by,
+    p$max_missed
+  )
+  peptides$mono_mass <- seqprofile_mono_mass(
+    peptides$sequence,
+    seqprofile_residue_masses(p$carbamidomethyl, p$oxidation)
+  )
+  for (z in 1:3) {
+    peptides[[paste0("mz_", z)]] <- (peptides$mono_mass +
+      z * SEQPROFILE_PROTON_MONO) /
+      z
+  }
+  in_mz <- function(mz) !is.na(mz) & mz >= p$mz_min & mz <= p$mz_max
+  peptides$in_range <- peptides$length >= p$min_len &
+    peptides$length <= p$max_len &
+    (!use_mz | in_mz(peptides$mz_2) | in_mz(peptides$mz_3))
+
+  n <- nchar(sequence)
+  kept <- peptides[peptides$in_range, ]
+  depth <- cumsum(
+    tabulate(kept$start, n + 1L) - tabulate(kept$end + 1L, n + 1L)
+  )
+  covered <- depth[seq_len(n)] > 0
+
+  list(
+    enzyme_id = enzyme_id,
+    enzyme_name = spec$name,
+    rule = seqprofile_enzyme_rule(residues, spec$terminus, blocked_by),
+    sequence = sequence,
+    params = p,
+    peptides = peptides,
+    covered = covered,
+    stats = list(
+      seq_length = n,
+      n_sites = sum(peptides$missed_cleavages == 0) - 1L,
+      n_peptides = nrow(peptides),
+      n_in_range = sum(peptides$in_range),
+      covered_residues = sum(covered),
+      coverage_pct = 100 * mean(covered)
+    )
+  )
+}
