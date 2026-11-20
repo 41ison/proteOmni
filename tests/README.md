@@ -174,13 +174,16 @@ A passing run ends like this:
 ✔ |         44 | digest
 ✔ |         27 | fasta-parsing
 ✔ |         46 | ibaq
+✔ |        130 | seqprofile
 
 ══ Results ══════════════════════════════════════════════════════════════
-[ FAIL 0 | WARN 0 | SKIP 0 | PASS 134 ]
+[ FAIL 0 | WARN 0 | SKIP 0 | PASS 264 ]
 ```
 
-`FAIL 0`, `WARN 0` and `SKIP 0` are all expected; nothing in this suite depends
-on an optional package.
+`FAIL 0`, `WARN 0` and `SKIP 0` are all expected. The `seqprofile` tests need
+the `Peptides` package (pinned in `proteOmni.lock`), plus `shiny`, `plotly`,
+`DT` and `ggplot2` for the module-server and plot tests; they are skipped when
+a package is missing.
 
 | File | Covers |
 |------|--------|
@@ -188,6 +191,7 @@ on an optional package.
 | `test-digest.R` | `count_theoretical_peptides()` and its agreement with `in_silico_digest()`; `build_theoretical_peptide_counts()`; `protease_regex_from_rule()` for C- and N-terminal cleavage; `classify_peptides()`; `compute_protein_abundance()` (sum and top3) |
 | `test-coverage.R` | `peptide_starts()` and `protein_coverage()` |
 | `test-ibaq.R` | `filter_diann_report()` (each filter on its own, inclusive cutoffs, absent columns) and `compute_ibaq()` (wide and long output, log2, unmatched protein groups, digest settings, error messages, and the regression test for `id_col = "Genes"` / `"Protein.Names"`) |
+| `test-seqprofile.R` | Sequence profiling: `clean_protein_sequence()` (raw vs FASTA, lower case / digits / spaces, several entries, non-canonical and illegal characters, empty input), `seqprofile_windows()`, `extract_profile_regions()`, `run_seq_profile()` for every registered algorithm (data contract, agreement with direct `Peptides` calls and with the in-repo `GRAVY()`, masking of windows with non-canonical residues, classed errors for short sequences and bad parameters), `seqprofile_global_descriptors()`, `plot_seq_profile()`, and `SeqProfile_server()` in `mod_SeqProfile.r` (computes only on **Predict**) |
 
 Not covered: the peptide property and plotting helpers in the same file
 (`GRAVY()`, `calculate_pI()`, `calculate_MW()`, `plot_2d_gel()`),
