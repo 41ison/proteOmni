@@ -257,7 +257,7 @@ calculate_pI <- function(sequence) {
   pk_nterm <- 9.69
   pk_cterm <- 2.34
   pk_acid <- c(D = 3.86, E = 4.25, C = 8.33, Y = 10.07) # HA -> A- + H+
-  pk_base <- c(H = 6.00, K = 9.74, R = 12.48) # BH+ -> B + H+
+  pk_base <- c(H = 6.00, K = 10.53, R = 12.48) # BH+ -> B + H+
 
   count_res <- function(letter) {
     nchar(gsub(paste0("[^", letter, "]"), "", seqs))
