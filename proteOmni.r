@@ -189,6 +189,7 @@ source("modules/mod_InstaNovo.r")
 source("modules/mod_EncyclopeDIA.r")
 source("modules/mod_Sage.r")
 source("modules/mod_MaxQuantMSMS.r")
+source("modules/mod_SeqProfile.r")
 
 
 # ── Global options ────────────────────────────────────────────────────────────
@@ -369,6 +370,7 @@ ui <- dashboardPage(
       menuItem("InstaNovo", tabName = "ins_tab", icon = icon("brain")),
       menuItem("EncyclopeDIA", tabName = "enc_tab", icon = icon("book-open")),
       menuItem("Sage", tabName = "sag_tab", icon = icon("leaf")),
+      menuItem("SeqProfile", tabName = "seq_tab", icon = icon("wave-square")),
       menuItem("Documentation", tabName = "doc_tab", icon = icon("book"))
     ),
     tags$hr(style = "border-color:#2d3741;margin:4px 0;"),
@@ -514,6 +516,22 @@ ui <- dashboardPage(
                     "Complete PwrQuant guide: parameters, statistical rationale and interpretation."
                   ),
                   tags$span("Guide / Statistics", class = "tool-badge")
+                )
+              )
+            ),
+            fluidRow(
+              column(
+                4,
+                div(
+                  class = "tool-card",
+                  id = "card_seq",
+                  onclick = "Shiny.setInputValue('select_tool','seq',{priority:'event'})",
+                  div(class = "tool-icon", icon("wave-square")),
+                  tags$h3("SeqProfile"),
+                  tags$p(
+                    "Sliding-window profiles and in silico digestion of a protein sequence."
+                  ),
+                  tags$span("Peptides / sequence", class = "tool-badge")
                 )
               )
             ),
@@ -675,6 +693,23 @@ ui <- dashboardPage(
         MaxQuantMSMS_body_ui("mqt")
       ),
 
+      # ── SeqProfile ────────────────────────────────────────────────────────
+      tabItem(
+        tabName = "seq_tab",
+        fluidRow(column(
+          12,
+          div(
+            class = "back-btn",
+            actionButton(
+              "back_to_home_seq",
+              "← Home",
+              class = "btn btn-default btn-sm"
+            )
+          )
+        )),
+        SeqProfile_body_ui("seq")
+      ),
+
       # ── Documentation ─────────────────────────────────────────────────────
       tabItem(
         tabName = "doc_tab",
@@ -723,6 +758,7 @@ server <- function(input, output, session) {
       enc = "enc_tab",
       sag = "sag_tab",
       mqt = "mqt_tab",
+      seq = "seq_tab",
       doc = "doc_tab"
     )
     if (!is.null(tab)) updateTabItems(session, "main_menu", selected = tab)
@@ -764,6 +800,7 @@ server <- function(input, output, session) {
     back_to_home_enc = "home",
     back_to_home_sag = "home",
     back_to_home_mqt = "home",
+    back_to_home_seq = "home",
     back_to_home_doc = "home"
   )
   for (btn in names(back_buttons)) {
@@ -792,6 +829,11 @@ server <- function(input, output, session) {
       enc_tab = EncyclopeDIA_sidebar_ui("enc"),
       sag_tab = Sage_sidebar_ui("sag"),
       mqt_tab = MaxQuantMSMS_sidebar_ui("mqt"),
+      seq_tab = tags$div(
+        style = "padding:16px;color:#adb5bd;font-size:13px;",
+        icon("wave-square", style = "margin-right:6px;"),
+        "Sequence, algorithm and parameters are set in the main panel."
+      ),
       doc_tab = tags$div(
         style = "padding:16px;color:#adb5bd;font-size:13px;",
         icon("book", style = "margin-right:6px;"),
@@ -818,6 +860,7 @@ server <- function(input, output, session) {
   EncyclopeDIA_server("enc", global_fasta_digest)
   Sage_server("sag", global_fasta_digest)
   MaxQuantMSMS_server("mqt")
+  SeqProfile_server("seq")
 }
 
 shinyApp(ui = ui, server = server)
