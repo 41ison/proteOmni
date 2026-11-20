@@ -66,6 +66,7 @@ cran_bioc_direct <- c(
   "httr",
   "jsonlite",
   "arrow",
+  "Peptides",
   # Bioconductor
   "limma",
   "edgeR",
