@@ -4,7 +4,7 @@
 
 # proteOmni
 
-**proteOmni** is a comprehensive, unified Shiny-based dashboard for visual quality control (QC), diagnostics, and differential abundance analysis of proteomics results from multiple search engines and acquisition strategies. It centralizes eight specialized modules covering DDA, DIA, and *de novo* sequencing workflows into a single interactive application, plus an in-app *Documentation* page describing the PwrQuant statistical workflow.
+**proteOmni** is a comprehensive, unified Shiny-based dashboard for visual quality control (QC), diagnostics, and differential abundance analysis of proteomics results from multiple search engines and acquisition strategies. It centralizes nine specialized modules covering DDA, DIA, and *de novo* sequencing workflows, plus single-sequence profiling and *in silico* digestion, into a single interactive application, with an in-app *Documentation* page describing the PwrQuant statistical workflow.
 
 <p align="center">
 <img src="https://github.com/41ison/proteOmni/blob/main/images/proteomni_interface.png" width="700">
@@ -27,6 +27,7 @@
    - [EncyclopeDIA](#6-encyclopedia--encyclopedia--dia)
    - [Sage](#7-sage--sage--ddadia)
    - [MaxQuant](#8-maxquant--maxquant--dda)
+   - [SeqProfile](#9-seqprofile--sequence-profiling)
 6. [Input File Reference](#input-file-reference)
 7. [PwrQuant — Analytical Pipeline](#pwrquant--analytical-pipeline)
 8. [Session Logging](#session-logging)
@@ -41,6 +42,7 @@
 - **Deep QC Insights** — Generate detailed metrics including protease fingerprints, sequence logos, mass accuracy (ppm), retention time prediction errors, charge state and peptide length distributions, missed cleavages, GRAVY index, and isoelectric point (pI) profiles.
 - **Interactive Visualization** — Explore 3D QuantUMS score distributions, interactive PCA plots, sample correlation matrices, cosine/Euclidean/Jaccard similarity heatmaps, and annotated MS/MS fragmentation spectra directly in the browser.
 - **Peptide-to-Protein Mapping** — Map identified peptides onto user-provided FASTA sequences with a colour-coded protein sequence viewer.
+- **Sequence Profiling & *In Silico* Digestion** — Paste any protein or peptide sequence to get sliding-window profiles (charge, hydropathy, hydrophilicity, amphiphilicity, surface accessibility, beta-turn propensity, B-cell antigenicity, MHC-I T-cell immunogenicity), or digest it with a preset or custom enzyme rule to see the theoretical peptides, the sequence coverage reachable in a given length and m/z window, and theoretical b/y spectra.
 - **Differential Abundance Analysis** — Full limma-based workflow with normalization (limma between-array methods or edgeR TMM), batch correction (ComBat/SVA), flexible missing value imputation (KNN, MinProb, BPCA or missForest), MA plots, volcano plots, and a simulation-based prospective power analysis.
 - **Prospective Power / Sensitivity Analysis** — Minimum detectable difference (MDD) estimated by simulating fresh datasets from the fitted empirical Bayes priors, spiking in known fold changes, and re-running the real design through `lmFit` → `eBayes` → BH — optionally including intensity-dependent missingness and imputation. A replicate sweep answers "how many replicates would I need?".
 - **Functional Enrichment** — GO over-representation analysis (ORA) with `clusterProfiler::enrichGO`, run per contrast and split by regulation direction, using Bioconductor OrgDb annotation packages for 20 supported organisms.
@@ -78,7 +80,7 @@ proteOmni auto-installs all required packages on first launch via the `bootstrap
 
 The direct dependencies are listed below; `proteOmni.lock` also pins everything they depend on.
 
-**CRAN packages:** `shiny`, `shinydashboard`, `shinyjs`, `fresh`, `tidyverse`, `tidytext`, `janitor`, `ggpointdensity`, `ggtext`, `ggrepel`, `ggseqlogo`, `ggsci`, `plotly`, `viridis`, `RColorBrewer`, `ggfortify`, `seqinr`, `zip`, `DT`, `colourpicker`, `R6`, `gridExtra`, `scales`, `lavaan`, `naniar`, `patchwork`, `missForest`, `data.table`, `GGally`, `arrow`, `httr`, `jsonlite`, `BiocManager`
+**CRAN packages:** `shiny`, `shinydashboard`, `shinyjs`, `fresh`, `tidyverse`, `tidytext`, `janitor`, `ggpointdensity`, `ggtext`, `ggrepel`, `ggseqlogo`, `ggsci`, `plotly`, `viridis`, `RColorBrewer`, `ggfortify`, `seqinr`, `zip`, `DT`, `colourpicker`, `R6`, `gridExtra`, `scales`, `lavaan`, `naniar`, `patchwork`, `missForest`, `data.table`, `GGally`, `arrow`, `Peptides`, `httr`, `jsonlite`, `BiocManager`
 
 **Bioconductor packages:** `limma`, `edgeR`, `Biostrings`, `sva`, `impute`, `pcaMethods`, `ComplexHeatmap`, `clusterProfiler`, `enrichplot`, `AnnotationDbi`, `STRINGdb`, `mixOmics`, `org.Hs.eg.db`
 
@@ -151,7 +153,10 @@ proteOmni/
 │   ├── mod_EncyclopeDIA.r       # EncyclopeDIA module
 │   ├── mod_Sage.r               # Sage module
 │   ├── mod_MaxQuantMSMS.r       # MaxQuant module
+│   ├── mod_SeqProfile.r         # SeqProfile module (sequence profiles + in silico digestion)
 │   ├── utils_fasta.r            # Shared FASTA parsing / digestion + Global FASTA sidebar
+│   │                            #   + SeqProfile backend (profiling algorithms, single-sequence
+│   │                            #   digestion, peptide masses and b/y fragment ions)
 │   └── mod_TEMPLATE.r           # Template for adding new modules
 ├── tests/
 │   ├── README.md                # How to run the tests and what they cover
@@ -161,6 +166,9 @@ proteOmni/
 │   │   └── test-*.R             # cv, id-helpers, imputation, ingestion, limma-pipeline,
 │   │                            #   missingness, plot-helpers, power-helpers, server,
 │   │                            #   simulation, tmm
+│   ├── utils_fasta/             # testthat unit tests for utils_fasta.r, including the
+│   │                            #   SeqProfile backend (test-seqprofile.R, test-seqdigest.R)
+│   ├── Sage/                    # testthat unit tests for the Sage iBAQ calculation
 │   ├── imputation_strategies_sim.R  # Simulation behind the imputation FDR / power table
 │   ├── test_mdd.R               # Smoke test of the MDD machinery on a real matrix
 │   └── pwr_diag.R               # Temporary diagnostic of the Shiny reactive graph
@@ -181,7 +189,7 @@ Each module follows the standard Shiny module pattern with three exported functi
 - `<Module>_body_ui(id)` — main panel tabs and plots
 - `<Module>_server(id, ...)` — reactive server logic
 
-The sidebar menu lists the modules in this order: **Home**, **PwrQuant**, **PSManalyst**, **QC4DIANN**, **MaxQuant**, **Casanovo**, **InstaNovo**, **EncyclopeDIA**, **Sage**, **Documentation**. Below the module-specific controls, a **Global FASTA Mapping** panel (FASTA upload + max missed cleavages) is always visible; its *in silico* digest is shared by the InstaNovo, EncyclopeDIA, and Sage modules.
+The sidebar menu lists the modules in this order: **Home**, **PwrQuant**, **PSManalyst**, **QC4DIANN**, **MaxQuant**, **Casanovo**, **InstaNovo**, **EncyclopeDIA**, **Sage**, **SeqProfile**, **Documentation**. Below the module-specific controls, a **Global FASTA Mapping** panel (FASTA upload + max missed cleavages) is always visible; its *in silico* digest is shared by the InstaNovo, EncyclopeDIA, and Sage modules.
 
 ---
 
@@ -324,6 +332,67 @@ Each QC tab (Evidence, Peptides, MS/MS Scans) has its own plot selector, plot bu
 
 ---
 
+### 9. SeqProfile — *sequence profiling*
+
+Tools for a single protein or peptide sequence; no input file is needed. Paste a raw or FASTA-formatted sequence (or load the built-in example) in the **Sequence** box at the top, which shows the sequence length and warns about non-canonical or unsupported characters as you type. If several FASTA entries are pasted, only the first is used. The sequence is shared by two tabs: **Prediction Algorithms** (sliding-window profiles) and **In Silico Digestion** (theoretical peptides, sequence coverage and b/y spectra). Nothing is computed until **Predict** or **Digest** is clicked. All controls are in the main panel, so the module has no sidebar controls.
+
+#### Prediction Algorithms tab
+
+Choose an algorithm, adjust its parameters and click **Predict**. The selector groups the nine algorithms into *Physicochemical*, *Structural / Membrane* and *Immunogenicity / Epitopes*.
+
+The first four profiles and the whole-sequence descriptors are computed by the [`Peptides`](https://cran.r-project.org/package=Peptides) package. The other five use amino-acid scales stored in `modules/utils_fasta.r`: the Kolaskar-Tongaonkar, Emini, Parker and Chou-Fasman values are those of the IEDB B-cell analysis resource, and the Calis score follows the IEDB Class I Immunogenicity tool. Windows containing non-canonical residues (B, Z, X, U, O, `*`) are left unscored.
+
+> These are propensity-scale profiles, not trained predictors. A peak marks a candidate region to examine further; the in-app reading guide lists the caveats of each algorithm.
+
+| Algorithm | Computed with | Default window | Default threshold |
+|---|---|---|---|
+| **Charge Density (Lehninger)** | `Peptides::charge()` / window length, at a chosen pH (default 7.4) | 9 | 0 |
+| **Hydropathy (Kyte-Doolittle)** | `Peptides::hydrophobicity(scale = "KyteDoolittle")` | 9 | 0 |
+| **Hydrophilicity (Hopp-Woods)** | `Peptides::hydrophobicity(scale = "HoppWoods")` | 6 | 0 |
+| **Amphiphilicity (Eisenberg hydrophobic moment)** | `Peptides::hmoment()` at 100° (α-helix) or 160° (β-strand) | 11 | none |
+| **Hydrophilicity (Parker HPLC)** | Window mean of the Parker scale | 7 | 0 |
+| **Surface Accessibility (Emini)** | Product of the Emini scale values over the window × 0.37^(−window) | 6 | 1 |
+| **Beta-Turn Propensity (Chou-Fasman)** | Window mean of the Chou-Fasman turn parameter (single-residue propensity only) | 7 | 1 |
+| **Antigenicity (Kolaskar-Tongaonkar)** | Window mean of the Kolaskar-Tongaonkar scale | 7 | 1 |
+| **MHC-I T-Cell Immunogenicity (Calis)** | Position-weighted sum of the Calis scale; window ≥ 9, anchor positions masked (default `1,2,C`) | 9 | 0 |
+
+A threshold can be changed or left empty; regions above it are shaded in the plot and listed in the summary table.
+
+**Boxes:**
+
+| Box | Content |
+|---|---|
+| **Algorithm** | Grouped algorithm selector, algorithm-specific parameters (window size, plus pH, rotation angle or masked anchor positions where they apply, and threshold), **Predict** |
+| **Profile Plot & Interpretation** | Interactive profile (hover: position, residue, window, score) with threshold line and shaded predicted regions, PNG download, and a reading guide for the selected algorithm with its literature reference |
+| **Summary** | Profile statistics, whole-sequence descriptors (MW, pI, GRAVY, Boman, aliphatic and instability indices), and a table of predicted regions or the full per-position profile with copy / CSV / Excel export |
+
+#### In Silico Digestion tab
+
+Theoretical digestion of the pasted sequence. Choose an enzyme, set the limits and click **Digest**.
+
+| Enzyme | Cleavage rule |
+|---|---|
+| **Trypsin** | C-terminal to K/R, except when followed by P |
+| **GluC** | C-terminal to E, except when followed by P |
+| **LysN** | N-terminal to K |
+| **AspN** | N-terminal to D |
+| **Chymotrypsin** | C-terminal to F/W/Y/L, except when followed by P |
+| **Elastase** | C-terminal to A/G/I/L/V, except when followed by P |
+| **Custom rule** | Any set of one-letter residues, cleaved on the C- or N-terminal side, with optional residues that block cleavage |
+
+A complete digest always covers the whole sequence, so coverage counts only the residues that lie in at least one peptide likely to be observed: length within the chosen limits (default 6–30 residues) and, when the m/z filter is on (default), a 2+ or 3+ ion inside the m/z range (default 350–1500). Missed cleavages default to 0 (maximum 5). Masses are monoisotopic; carbamidomethyl Cys (+57.0215 Da) and oxidised Met (+15.9949 Da) are off by default and, when ticked, are applied to every Cys / Met as fixed modifications.
+
+**Boxes:**
+
+| Box | Content |
+|---|---|
+| **Enzyme** | Enzyme selector with its cleavage rule in plain language (or the custom-rule inputs), missed cleavages, peptide length limits, m/z window, Cys / Met modifications, **Digest** |
+| **Sequence Coverage** | Number of cleavage sites, peptides, peptides counted and sequence coverage (% and residues), plus the sequence with covered residues highlighted and the residues found only in peptides outside the limits in red |
+| **Theoretical Peptides** | One row per peptide: start, end, sequence, length, monoisotopic mass, m/z at 1+, 2+ and 3+, missed cleavages and whether it counts for coverage, with copy / CSV / Excel export |
+| **Theoretical b/y Spectrum** | Interactive b/y fragment ion spectrum (1+ or 2+ fragments) of the peptide clicked in the table, with the selected modifications applied; all ions are drawn at the same height because no intensities are predicted |
+
+---
+
 ## Input File Reference
 
 | Module | Required files | Optional |
@@ -336,6 +405,7 @@ Each QC tab (Evidence, Peptides, MS/MS Scans) has its own plot selector, plot bu
 | **EncyclopeDIA** | Directory path containing `*.encyclopedia2.txt` result files | Global FASTA Mapping |
 | **Sage** | `results.sage.tsv` or `results.sage.parquet` | Global FASTA Mapping |
 | **MaxQuant** | Path to the MaxQuant `combined` directory (`txt/` subfolder is located automatically) | — |
+| **SeqProfile** | None; a protein or peptide sequence (raw or FASTA) pasted into the module | — |
 
 ### PwrQuant abundance matrix format
 
