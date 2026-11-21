@@ -1027,7 +1027,11 @@ SeqProfile_server <- function(id) {
         ),
         tags$p(
           style = "font-size:12.5px;color:#6c757d;",
-          "Click a region in the table to project it down the helix axis (100\u00B0 per residue). Residues are coloured by Eisenberg hydrophobicity and joined in sequence order; the red arrow is the hydrophobic moment and points at the hydrophobic face. Residues 19 onwards sit on outer rings."
+          "Click a region in the table to project it down the helix axis (100\u00B0 per residue). Residues are coloured by Eisenberg hydrophobicity and joined in sequence order; the red arrow is the hydrophobic moment and points at the hydrophobic face. Residues 19 onwards sit on outer rings. NOTE: Only applies to alpha-helix."
+        ),
+        tags$p(
+          style = "font-size:12.5px;color:#6c757d;",
+          "Reference: Schiffer M, Edmundson AB. Use of helical wheels to represent the structures of proteins and to identify segments with helical potential. Biophys J. 1967 Mar;7(2):121-35. doi: 10.1016/S0006-3495(67)86579-2."
         ),
         plotOutput(ns("wheel_plot"), height = 480)
       )
