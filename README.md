@@ -346,7 +346,8 @@ When the **Eisenberg hydrophobic moment** is run at 100° with a threshold, clic
 
 The charge, Kyte-Doolittle, Hopp-Woods and Eisenberg profiles and the whole-sequence descriptors are computed by the [`Peptides`](https://cran.r-project.org/package=Peptides) package. TopPred and FoldIndex are built on `Peptides` values too (the Engelman-Steitz-Goldman scale for the former; Kyte-Doolittle hydropathy and Lehninger charge for the latter), with the window weighting and the formula in `modules/utils_fasta.r`. The remaining profiles use amino-acid scales stored in `modules/utils_fasta.r`: the Kolaskar-Tongaonkar, Emini, Parker and Chou-Fasman values are those of the IEDB B-cell analysis resource, the Calis score follows the IEDB Class I Immunogenicity tool, and the Karplus-Schulz flexibility scale is AAindex `KARP850102`. The Jameson-Wolf index combines four of these profiles (Hopp-Woods, Emini, Karplus-Schulz, Chou-Fasman). Windows containing non-canonical residues (B, Z, X, U, O, `*`) are left unscored.
 
-> These are propensity-scale profiles, not trained predictors. A peak marks a candidate region to examine further; the in-app reading guide lists the caveats of each algorithm.
+> [!IMPORTANT]
+> These are propensity-scale profiles, not trained predictors. **A peak marks a candidate region to examine further**; the in-app reading guide lists the caveats of each algorithm.
 
 | Group | Algorithm | Computed with | Default window | Default threshold |
 |---|---|---|---|---|
