@@ -334,37 +334,47 @@ Each QC tab (Evidence, Peptides, MS/MS Scans) has its own plot selector, plot bu
 
 ### 9. SeqProfile — *sequence profiling*
 
-Tools for a single protein or peptide sequence; no input file is needed. Paste a raw or FASTA-formatted sequence (or load the built-in example) in the **Sequence** box at the top, which shows the sequence length and warns about non-canonical or unsupported characters as you type. If several FASTA entries are pasted, only the first is used. The sequence is shared by two tabs: **Prediction Algorithms** (sliding-window profiles) and **In Silico Digestion** (theoretical peptides, sequence coverage and b/y spectra). Nothing is computed until **Predict** or **Digest** is clicked. All controls are in the main panel, so the module has no sidebar controls.
+Tools for a single protein or peptide sequence; no input file is needed. Paste a raw or FASTA-formatted sequence (or load the built-in example) in the **Sequence** box at the top, or type a UniProtKB accession (e.g. `Q07730`) and click **Fetch from UniProt** to load the canonical FASTA entry, header with protein name included, from `rest.uniprot.org/uniprotkb/{accession}.fasta` (needs internet access). The box shows the sequence length and warns about non-canonical or unsupported characters as you type. If several FASTA entries are pasted, only the first is used. The sequence is shared by two tabs: **Prediction Algorithms** (sliding-window profiles) and **In Silico Digestion** (theoretical peptides, sequence coverage and b/y spectra). Nothing is computed until **Predict** or **Digest** is clicked. All controls are in the main panel, so the module has no sidebar controls.
 
 #### Prediction Algorithms tab
 
-Choose an algorithm, adjust its parameters and click **Predict**. The selector groups the nine algorithms into *Physicochemical*, *Structural / Membrane* and *Immunogenicity / Epitopes*.
+Choose one to three algorithms, adjust their parameters (one row per algorithm) and click **Predict**. The selector groups the thirteen algorithms into *Physicochemical*, *Structural / Membrane* and *Immunogenicity / Epitopes*.
 
-The first four profiles and the whole-sequence descriptors are computed by the [`Peptides`](https://cran.r-project.org/package=Peptides) package. The other five use amino-acid scales stored in `modules/utils_fasta.r`: the Kolaskar-Tongaonkar, Emini, Parker and Chou-Fasman values are those of the IEDB B-cell analysis resource, and the Calis score follows the IEDB Class I Immunogenicity tool. Windows containing non-canonical residues (B, Z, X, U, O, `*`) are left unscored.
+A single scale can mislead (hydrophobic cores score high in Kolaskar-Tongaonkar, for instance), so several algorithms are drawn as **stacked tracks on a shared x axis**: zooming or panning one track moves the others, which lets peaks be compared position by position. With two or three algorithms the summary table also offers **Consensus regions**: stretches of window-centre positions where every selected algorithm crosses its own threshold at once (each algorithm needs a threshold; positions an algorithm does not score never count). A **minimum consensus length** next to the table drops shorter stretches, and the remaining consensus regions are shaded in orange across every track, over the blue bands of each algorithm's own regions.
+
+When the **Eisenberg hydrophobic moment** is run at 100° with a threshold, clicking a region in the *Predicted regions* table draws a **helical wheel** (Schiffer-Edmundson projection) of the residues behind that region: the region's window centres plus the flanks of its first and last window, or 18 residues around the peak when that stretch exceeds 36 residues. Residues are coloured by Eisenberg hydrophobicity (read from `Peptides`) and the arrow is the hydrophobic moment of the drawn residues, pointing at the hydrophobic face.
+
+The charge, Kyte-Doolittle, Hopp-Woods and Eisenberg profiles and the whole-sequence descriptors are computed by the [`Peptides`](https://cran.r-project.org/package=Peptides) package. TopPred and FoldIndex are built on `Peptides` values too (the Engelman-Steitz-Goldman scale for the former; Kyte-Doolittle hydropathy and Lehninger charge for the latter), with the window weighting and the formula in `modules/utils_fasta.r`. The remaining profiles use amino-acid scales stored in `modules/utils_fasta.r`: the Kolaskar-Tongaonkar, Emini, Parker and Chou-Fasman values are those of the IEDB B-cell analysis resource, the Calis score follows the IEDB Class I Immunogenicity tool, and the Karplus-Schulz flexibility scale is AAindex `KARP850102`. The Jameson-Wolf index combines four of these profiles (Hopp-Woods, Emini, Karplus-Schulz, Chou-Fasman). Windows containing non-canonical residues (B, Z, X, U, O, `*`) are left unscored.
 
 > These are propensity-scale profiles, not trained predictors. A peak marks a candidate region to examine further; the in-app reading guide lists the caveats of each algorithm.
 
-| Algorithm | Computed with | Default window | Default threshold |
-|---|---|---|---|
-| **Charge Density (Lehninger)** | `Peptides::charge()` / window length, at a chosen pH (default 7.4) | 9 | 0 |
-| **Hydropathy (Kyte-Doolittle)** | `Peptides::hydrophobicity(scale = "KyteDoolittle")` | 9 | 0 |
-| **Hydrophilicity (Hopp-Woods)** | `Peptides::hydrophobicity(scale = "HoppWoods")` | 6 | 0 |
-| **Amphiphilicity (Eisenberg hydrophobic moment)** | `Peptides::hmoment()` at 100° (α-helix) or 160° (β-strand) | 11 | none |
-| **Hydrophilicity (Parker HPLC)** | Window mean of the Parker scale | 7 | 0 |
-| **Surface Accessibility (Emini)** | Product of the Emini scale values over the window × 0.37^(−window) | 6 | 1 |
-| **Beta-Turn Propensity (Chou-Fasman)** | Window mean of the Chou-Fasman turn parameter (single-residue propensity only) | 7 | 1 |
-| **Antigenicity (Kolaskar-Tongaonkar)** | Window mean of the Kolaskar-Tongaonkar scale | 7 | 1 |
-| **MHC-I T-Cell Immunogenicity (Calis)** | Position-weighted sum of the Calis scale; window ≥ 9, anchor positions masked (default `1,2,C`) | 9 | 0 |
+| Group | Algorithm | Computed with | Default window | Default threshold |
+|---|---|---|---|---|
+| Physicochemical | **Charge Density (Lehninger)** | `Peptides::charge()` / window length, at a chosen pH (default 7.4) | 9 | 0 |
+| Physicochemical | **Hydropathy (Kyte-Doolittle)** | `Peptides::hydrophobicity(scale = "KyteDoolittle")` | 9 | 0 |
+| Physicochemical | **Hydrophilicity (Hopp-Woods)** | `Peptides::hydrophobicity(scale = "HoppWoods")` | 6 | 0 |
+| Physicochemical | **Hydrophilicity (Parker HPLC)** | Window mean of the Parker scale | 7 | 0 |
+| Structural / Membrane | **Backbone Flexibility (Karplus-Schulz)** | Triangularly weighted window sum of the Karplus-Schulz flexibility scale (one-rigid-neighbour table only); window ≥ 3 | 7 | 1 |
+| Structural / Membrane | **Transmembrane Helices (von Heijne TopPred)** | Trapezoid-weighted window (11-residue core, 5-residue flanks at the default width) over the GES scale, `Peptides::hydrophobicity(scale = "Engelman")`; window ≥ 11 | 21 | 0.6 |
+| Structural / Membrane | **Intrinsically Disordered Regions (FoldIndex / Uversky CH)** | 2.785 × mean Kyte-Doolittle hydropathy rescaled to 0–1 − absolute net charge per residue − 1.151, at a chosen pH (default 7.4); window ≥ 11 | 51 | 0 (regions **below**) |
+| Structural / Membrane | **Amphiphilicity (Eisenberg hydrophobic moment)** | `Peptides::hmoment()` at 100° (α-helix) or 160° (β-strand) | 11 | none |
+| Structural / Membrane | **Surface Accessibility (Emini)** | Product of the Emini scale values over the window × 0.37^(−window) | 6 | 1 |
+| Structural / Membrane | **Beta-Turn Propensity (Chou-Fasman)** | Window mean of the Chou-Fasman turn parameter (single-residue propensity only) | 7 | 1 |
+| Immunogenicity / Epitopes | **Antigenic Index (Jameson-Wolf)** | 0.30 × Hopp-Woods + 0.15 × Emini (inner 6 residues) + 0.15 × Karplus-Schulz + 0.40 × Chou-Fasman turn, each discretised first; window ≥ 6 | 7 | 0 |
+| Immunogenicity / Epitopes | **Antigenicity (Kolaskar-Tongaonkar)** | Window mean of the Kolaskar-Tongaonkar scale | 7 | 1 |
+| Immunogenicity / Epitopes | **MHC-I T-Cell Immunogenicity (Calis)** | Position-weighted sum of the Calis scale; window ≥ 9, anchor positions masked (default `1,2,C`) | 9 | 0 |
 
-A threshold can be changed or left empty; regions above it are shaded in the plot and listed in the summary table.
+A threshold can be changed or left empty; regions that cross it are shaded in the plot and listed in the summary table. Regions lie above the threshold for every algorithm except FoldIndex, where scores at or below it mark predicted disorder and the summary reports *windows below threshold*.
+
+Three of the newer profiles depart from the published methods, as their reading guides explain: Karplus-Schulz uses a single flexibility table instead of switching between three by neighbour rigidity; Jameson-Wolf gives the whole 0.40 secondary-structure weight to Chou-Fasman turns (the original splits it with Garnier-Robson) and skips the peak smoothing; FoldIndex is a charge-hydropathy proxy that can miss neutral polar disordered regions. For TopPred, the *Note* column of the regions table labels each segment *Certain TM* (peak ≥ 1.0) or *Putative TM* (peak ≥ 0.6) and gives a heuristic orientation from the K+R counts in the 15 residues on either side (positive-inside rule); N-terminal signal peptides can pass as a first helix.
 
 **Boxes:**
 
 | Box | Content |
 |---|---|
-| **Algorithm** | Grouped algorithm selector, algorithm-specific parameters (window size, plus pH, rotation angle or masked anchor positions where they apply, and threshold), **Predict** |
-| **Profile Plot & Interpretation** | Interactive profile (hover: position, residue, window, score) with threshold line and shaded predicted regions, PNG download, and a reading guide for the selected algorithm with its literature reference |
-| **Summary** | Profile statistics, whole-sequence descriptors (MW, pI, GRAVY, Boman, aliphatic and instability indices), and a table of predicted regions or the full per-position profile with copy / CSV / Excel export |
+| **Algorithm** | Grouped selector for up to three algorithms, a parameter row per algorithm (window size, plus pH, rotation angle or masked anchor positions where they apply, and threshold), **Predict** |
+| **Profile Plot & Interpretation** | Interactive profile (hover: position, residue, window, score) with threshold line and shaded predicted regions, one stacked track per algorithm, PNG download, and a reading guide per algorithm with its literature reference |
+| **Summary** | Profile statistics and whole-sequence descriptors (MW, pI, GRAVY, Boman, aliphatic and instability indices) for the algorithm chosen in the box, a table of its predicted regions (with a note per region), its full per-position profile or the consensus regions with copy / CSV / Excel export, and the helical wheel of a clicked Eisenberg region |
 
 #### In Silico Digestion tab
 
