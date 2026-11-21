@@ -1,8 +1,12 @@
 ## ============================================================
 ## mod_SeqProfile.r  —  Sequence profiling and in silico digestion
 ## ============================================================
-## Paste a protein / peptide sequence, then use one of two tabs:
-##   Prediction Algorithms  pick an algorithm, click Predict
+## Paste a protein / peptide sequence (or fetch one from UniProt by accession),
+## then use one of two tabs:
+##   Prediction Algorithms  pick one to three algorithms, click Predict.
+##                          Several algorithms give stacked tracks on a shared
+##                          x axis and a consensus-region table; regions of the
+##                          Eisenberg moment at 100 degrees open a helical wheel
 ##   In Silico Digestion    pick an enzyme (or a custom rule), click Digest
 ## All computation lives in utils_fasta.r (section "SEQUENCE PROFILING");
 ## this file is UI and reactive wiring only.
@@ -101,7 +105,7 @@ SeqProfile_body_ui <- function(id) {
           placeholder = "Paste an amino acid sequence, with or without a >header line"
         ),
         tags$div(
-          style = "display:flex;gap:6px;margin-bottom:8px;",
+          style = "display:flex;flex-wrap:wrap;align-items:center;gap:6px;margin-bottom:8px;",
           actionButton(
             ns("load_example"),
             "Load example sequence",
@@ -110,6 +114,23 @@ SeqProfile_body_ui <- function(id) {
           actionButton(
             ns("clear"),
             "Clear",
+            class = "btn btn-default btn-sm"
+          ),
+          tags$span(
+            style = "margin-left:14px;font-size:13px;color:#6c757d;",
+            "or UniProt accession:"
+          ),
+          tags$input(
+            id = ns("accession"),
+            type = "text",
+            class = "shiny-input-text form-control input-sm",
+            style = "width:130px;",
+            placeholder = "e.g. Q07730"
+          ),
+          actionButton(
+            ns("fetch_uniprot"),
+            "Fetch from UniProt",
+            icon = icon("cloud-arrow-down"),
             class = "btn btn-default btn-sm"
           )
         ),
@@ -132,19 +153,16 @@ SeqProfile_body_ui <- function(id) {
             solidHeader = TRUE,
             width = 12,
             collapsible = TRUE,
-            # Controls run left to right and wrap; flex-end keeps the inputs
-            # on one baseline when a label wraps onto two lines.
             tags$div(
               style = "display:flex;flex-wrap:wrap;align-items:flex-end;gap:0 16px;",
-              selectInput(
+              selectizeInput(
                 ns("algorithm"),
-                "Algorithm",
+                "Algorithms (up to 3; several are stacked on a shared x axis)",
                 choices = seqprofile_choices(),
-                width = "280px"
-              ),
-              uiOutput(
-                ns("param_ui"),
-                style = "display:flex;flex-wrap:wrap;align-items:flex-end;gap:0 16px;"
+                selected = names(seqprofile_registry())[1],
+                multiple = TRUE,
+                options = list(maxItems = 3, plugins = list("remove_button")),
+                width = "560px"
               ),
               actionButton(
                 ns("predict"),
@@ -154,7 +172,9 @@ SeqProfile_body_ui <- function(id) {
                 # Matches the bottom margin of the inputs' form-group
                 style = "font-weight:bold;min-width:140px;margin-bottom:15px;"
               )
-            )
+            ),
+            # One row of parameters per selected algorithm
+            uiOutput(ns("param_ui"))
           )
         ),
         fluidRow(
@@ -168,7 +188,8 @@ SeqProfile_body_ui <- function(id) {
               style = "text-align:right;margin-bottom:6px;",
               downloadButton(ns("download_plot"), "Download Plot (.png)")
             ),
-            plotly::plotlyOutput(ns("profile_plot"), height = 420),
+            # Rendered server-side: the height grows with the number of tracks
+            uiOutput(ns("profile_plot_ui")),
             uiOutput(ns("interpretation"))
           )
         ),
@@ -179,17 +200,35 @@ SeqProfile_body_ui <- function(id) {
             solidHeader = TRUE,
             width = 12,
             collapsible = TRUE,
+            uiOutput(ns("summary_algorithm_ui")),
             uiOutput(ns("summary_strip")),
             radioButtons(
               ns("table_view"),
               NULL,
               choices = c(
                 "Predicted regions" = "regions",
-                "Full per-position profile" = "profile"
+                "Full per-position profile" = "profile",
+                "Consensus regions (all selected algorithms)" = "consensus"
               ),
               inline = TRUE
             ),
-            DT::dataTableOutput(ns("summary_table"))
+            conditionalPanel(
+              condition = sprintf(
+                "input['%s'] == 'consensus'",
+                ns("table_view")
+              ),
+              numericInput(
+                ns("consensus_min_len"),
+                "Minimum consensus length (positions)",
+                value = 1,
+                min = 1,
+                step = 1,
+                width = "260px"
+              )
+            ),
+            uiOutput(ns("table_note")),
+            DT::dataTableOutput(ns("summary_table")),
+            uiOutput(ns("wheel_ui"))
           )
         )
       ),
@@ -399,10 +438,38 @@ SeqProfile_server <- function(id) {
       updateTextAreaInput(session, "sequence", value = "")
     })
 
+    # ── UniProt: canonical FASTA of an accession into the text area ─────────
+    observeEvent(input$fetch_uniprot, {
+      entry <- tryCatch(
+        fetch_uniprot_fasta(input$accession),
+        seqprofile_error = function(e) e
+      )
+      if (inherits(entry, "condition")) {
+        showNotification(conditionMessage(entry), type = "error", duration = 8)
+        return()
+      }
+      updateTextAreaInput(session, "sequence", value = entry$fasta)
+      showNotification(
+        sprintf(
+          "%s: %s (%d aa) loaded from UniProt.",
+          entry$accession,
+          entry$protein_name,
+          nchar(entry$sequence)
+        ),
+        type = "message"
+      )
+    })
+
     # ── Live sequence feedback (the only output that follows keystrokes) ────
     output$seq_info <- renderUI({
       cs <- clean_protein_sequence(input$sequence)
       parts <- list(tags$strong(sprintf("Length: %d aa", cs$length)))
+      if (!is.na(cs$header)) {
+        parts <- c(
+          parts,
+          list(tags$div(style = "color:#6c757d;", cs$header))
+        )
+      }
       if (cs$n_entries > 1) {
         parts <- c(
           parts,
@@ -444,66 +511,98 @@ SeqProfile_server <- function(id) {
     })
 
     # ── Parameters of the selected algorithm ────────────────────────────────
+    # Input ids are "<parameter>_<algorithm id>", e.g. window_hydropathy_kd.
+    selected_algorithms <- reactive({
+      intersect(input$algorithm, names(registry))
+    })
+
     output$param_ui <- renderUI({
-      spec <- registry[[req(input$algorithm)]]
-      d <- spec$defaults
-      min_w <- if (!is.null(spec$min_window)) spec$min_window else 2
-      tagList(
-        numericInput(
-          ns("window"),
-          "Window size (residues)",
-          value = d$window,
-          min = min_w,
-          step = 1,
-          width = "180px"
-        ),
-        if (!is.null(d$pH)) {
-          numericInput(
-            ns("ph"),
-            "pH",
-            value = d$pH,
-            min = 0,
-            max = 14,
-            step = 0.1,
-            width = "110px"
-          )
-        },
-        if (!is.null(d$angle)) {
-          selectInput(
-            ns("angle"),
-            "Rotation angle",
-            choices = c(
-              "100\u00B0 (alpha-helix)" = "100",
-              "160\u00B0 (beta-strand)" = "160"
+      ids <- selected_algorithms()
+      if (length(ids) == 0) {
+        return(tags$p(
+          style = "color:#6c757d;",
+          "Select one to three algorithms."
+        ))
+      }
+      # Adding or removing an algorithm redraws every row, so values already
+      # entered are read back instead of being reset to the defaults.
+      current <- function(param, id, default) {
+        value <- isolate(input[[paste0(param, "_", id)]])
+        if (is.null(value)) default else value
+      }
+      lapply(ids, function(id) {
+        spec <- registry[[id]]
+        d <- spec$defaults
+        min_w <- if (!is.null(spec$min_window)) spec$min_window else 2
+        tags$div(
+          tags$div(style = "font-weight:700;margin-bottom:2px;", spec$name),
+          # Controls run left to right and wrap; flex-end keeps the inputs
+          # on one baseline when a label wraps onto two lines.
+          tags$div(
+            style = "display:flex;flex-wrap:wrap;align-items:flex-end;gap:0 16px;",
+            numericInput(
+              ns(paste0("window_", id)),
+              "Window size (residues)",
+              value = current("window", id, d$window),
+              min = min_w,
+              step = 1,
+              width = "180px"
             ),
-            selected = as.character(d$angle),
-            width = "200px"
+            if (!is.null(d$pH)) {
+              numericInput(
+                ns(paste0("ph_", id)),
+                "pH",
+                value = current("ph", id, d$pH),
+                min = 0,
+                max = 14,
+                step = 0.1,
+                width = "110px"
+              )
+            },
+            if (!is.null(d$angle)) {
+              selectInput(
+                ns(paste0("angle_", id)),
+                "Rotation angle",
+                choices = c(
+                  "100\u00B0 (alpha-helix)" = "100",
+                  "160\u00B0 (beta-strand)" = "160"
+                ),
+                selected = as.character(current("angle", id, d$angle)),
+                width = "200px"
+              )
+            },
+            if (!is.null(d$mask)) {
+              textInput(
+                ns(paste0("mask_", id)),
+                "Masked anchor positions (1-based, 'C' = C-term)",
+                value = current("mask", id, d$mask),
+                placeholder = "e.g. 1,2,C",
+                width = "300px"
+              )
+            },
+            numericInput(
+              ns(paste0("threshold_", id)),
+              "Threshold (leave empty for none)",
+              value = current("threshold", id, d$threshold),
+              step = 0.1,
+              width = "220px"
+            )
           )
-        },
-        if (!is.null(d$mask)) {
-          textInput(
-            ns("mask"),
-            "Masked anchor positions (1-based, 'C' = C-term)",
-            value = d$mask,
-            placeholder = "e.g. 1,2,C",
-            width = "300px"
-          )
-        },
-        numericInput(
-          ns("threshold"),
-          "Threshold (leave empty for none)",
-          value = d$threshold,
-          step = 0.1,
-          width = "220px"
         )
-      )
+      })
     })
 
     # ── Prediction: runs only when Predict is clicked ───────────────────────
-    result <- eventReactive(input$predict, {
+    # Named list with one run_seq_profile() result per selected algorithm.
+    results <- eventReactive(input$predict, {
       cs <- clean_protein_sequence(input$sequence)
+      ids <- selected_algorithms()
       # jsonlite::validate() masks shiny's in proteOmni.
       shiny::validate(
+        shiny::need(
+          length(ids) >= 1 && length(ids) <= 3,
+          "Select one to three algorithms."
+        ),
         shiny::need(
           nzchar(cs$sequence),
           "Paste a sequence (or load the example) and click Predict."
@@ -526,56 +625,175 @@ SeqProfile_server <- function(id) {
         )
       }
 
-      res <- tryCatch(
-        run_seq_profile(
-          cs$sequence,
-          input$algorithm,
-          list(
-            window = input$window,
-            pH = input$ph,
-            angle = suppressWarnings(as.numeric(input$angle)),
-            mask = input$mask,
-            threshold = input$threshold
-          )
-        ),
-        seqprofile_error = function(e) e
-      )
-      if (inherits(res, "condition")) {
-        shiny::validate(shiny::need(FALSE, conditionMessage(res)))
-      }
-      if (length(res$masked_residues) > 0) {
+      out <- lapply(ids, function(id) {
+        param <- function(name) input[[paste0(name, "_", id)]]
+        res <- tryCatch(
+          run_seq_profile(
+            cs$sequence,
+            id,
+            list(
+              window = param("window"),
+              pH = param("ph"),
+              angle = suppressWarnings(as.numeric(param("angle"))),
+              mask = param("mask"),
+              threshold = param("threshold")
+            )
+          ),
+          seqprofile_error = function(e) e
+        )
+        if (inherits(res, "condition")) {
+          msg <- conditionMessage(res)
+          if (length(ids) > 1) {
+            msg <- paste0(registry[[id]]$name, ": ", msg)
+          }
+          shiny::validate(shiny::need(FALSE, msg))
+        }
+        res$header <- cs$header
+        res
+      })
+      names(out) <- ids
+
+      # Window sizes differ between algorithms, so report the worst case
+      masked <- vapply(out, function(r) r$global_stats$n_masked, numeric(1))
+      worst <- out[[which.max(masked)]]
+      if (length(worst$masked_residues) > 0) {
         showNotification(
           sprintf(
-            "%d of %d windows contain non-canonical residues (%s) and were not scored.",
-            res$global_stats$n_masked,
-            res$global_stats$n_windows,
-            paste(res$masked_residues, collapse = ", ")
+            "%s%d of %d windows contain non-canonical residues (%s) and were not scored.",
+            if (length(out) > 1) "Up to " else "",
+            worst$global_stats$n_masked,
+            worst$global_stats$n_windows,
+            paste(worst$masked_residues, collapse = ", ")
           ),
           type = "warning",
           duration = 8
         )
       }
-      res$header <- cs$header
-      res
+      out
     })
 
-    # ── Plot ────────────────────────────────────────────────────────────────
+    # The algorithm shown in the Summary box (the first one unless changed)
+    result <- reactive({
+      res <- results()
+      id <- input$summary_algorithm
+      if (is.null(id) || !id %in% names(res)) {
+        id <- names(res)[1]
+      }
+      res[[id]]
+    })
+
+    # ── Consensus regions of the last prediction ────────────────────────────
+    # Follows the minimum-length input without a new Predict. Returns the
+    # condition instead of failing, so the table can show its message while
+    # the plot simply draws no consensus bands.
+    consensus <- reactive({
+      all_res <- results()
+      min_len <- input$consensus_min_len
+      tryCatch(
+        seqprofile_consensus_regions(
+          all_res,
+          min_length = if (is.null(min_len)) 1L else min_len
+        ),
+        seqprofile_error = function(e) e
+      )
+    })
+    consensus_bands <- reactive({
+      d <- consensus()
+      if (is.data.frame(d)) d else NULL
+    })
+
+    # ── Plot: one track per algorithm on a shared x axis ────────────────────
+    output$profile_plot_ui <- renderUI({
+      # Before the first Predict (or on a validation error) keep one track,
+      # so the message of profile_plot is still shown.
+      n <- tryCatch(length(results()), error = function(e) 1L)
+      bands <- tryCatch(consensus_bands(), error = function(e) NULL)
+      tagList(
+        plotly::plotlyOutput(
+          ns("profile_plot"),
+          height = if (n > 1) 260 * n else 420
+        ),
+        if (n > 1) {
+          tags$p(
+            style = "font-size:12.5px;color:#6c757d;margin-top:6px;",
+            if (is.null(bands)) {
+              "No consensus bands are drawn: every algorithm needs a threshold and a valid minimum consensus length."
+            } else {
+              sprintf(
+                "Blue bands: regions of each algorithm. Orange bands: the %d consensus region(s), where all selected algorithms cross their thresholds (minimum length set under Summary > Consensus regions).",
+                nrow(bands)
+              )
+            }
+          )
+        }
+      )
+    })
+
     output$profile_plot <- plotly::renderPlotly({
-      res <- result()
-      plotly::ggplotly(plot_seq_profile(res), tooltip = "text") |>
-        plotly::config(displaylogo = FALSE)
+      res <- results()
+      bands <- consensus_bands()
+      tracks <- lapply(res, function(r) {
+        plotly::ggplotly(
+          plot_seq_profile(r, consensus = bands),
+          tooltip = "text"
+        )
+      })
+      if (length(tracks) == 1) {
+        p <- tracks[[1]]
+      } else {
+        p <- plotly::subplot(
+          tracks,
+          nrows = length(tracks),
+          shareX = TRUE,
+          titleY = TRUE,
+          margin = 0.035
+        ) |>
+          plotly::layout(title = list(text = ""))
+        # subplot() keeps one title only, so each track is labelled inside
+        # its own panel ("y domain", "y2 domain", ... refer to the panels).
+        for (i in seq_along(res)) {
+          p <- plotly::add_annotations(
+            p,
+            text = paste0("<b>", res[[i]]$algorithm_name, "</b>"),
+            x = 0,
+            y = 1,
+            xref = "paper",
+            yref = paste0("y", if (i > 1) i else "", " domain"),
+            xanchor = "left",
+            yanchor = "bottom",
+            showarrow = FALSE,
+            font = list(size = 12)
+          )
+        }
+      }
+      plotly::config(p, displaylogo = FALSE)
     })
 
     output$download_plot <- downloadHandler(
       filename = function() {
-        paste0("SeqProfile_", result()$algorithm_id, "_", Sys.Date(), ".png")
+        paste0(
+          "SeqProfile_",
+          paste(names(results()), collapse = "-"),
+          "_",
+          Sys.Date(),
+          ".png"
+        )
       },
       content = function(file) {
+        plots <- lapply(
+          results(),
+          plot_seq_profile,
+          consensus = consensus_bands()
+        )
         ggplot2::ggsave(
           file,
-          plot_seq_profile(result()),
+          if (length(plots) == 1) {
+            plots[[1]]
+          } else {
+            patchwork::wrap_plots(plots, ncol = 1)
+          },
           width = 11,
-          height = 5,
+          height = if (length(plots) == 1) 5 else 3.5 * length(plots),
           bg = "white",
           device = "png"
         )
@@ -584,22 +802,58 @@ SeqProfile_server <- function(id) {
 
     # ── Interpretation ──────────────────────────────────────────────────────
     output$interpretation <- renderUI({
-      res <- result()
-      it <- res$interpretation
+      all_res <- results()
       item <- function(label, text) {
         tags$p(style = "margin:0 0 6px;", tags$strong(label), " ", text)
       }
-      tags$div(
-        style = "margin-top:12px;padding:12px 16px;background:#eaf4fb;border-left:4px solid #5FA8D3;border-radius:6px;font-size:13.5px;",
-        tags$h4(
-          style = "margin-top:0;font-weight:700;",
-          paste("How to read:", res$algorithm_name)
-        ),
-        item("What it measures.", it$summary),
-        item("Reading the plot.", it$reading),
-        item("Threshold and window.", it$thresholds),
-        item("Caveats.", it$caveats),
-        item("Reference.", it$reference)
+      lapply(all_res, function(res) {
+        it <- res$interpretation
+        body <- tagList(
+          item("What it measures.", it$summary),
+          item("Reading the plot.", it$reading),
+          item("Threshold and window.", it$thresholds),
+          item("Caveats.", it$caveats),
+          item("Reference.", it$reference)
+        )
+        heading <- paste("How to read:", res$algorithm_name)
+        tags$div(
+          style = "margin-top:12px;padding:12px 16px;background:#eaf4fb;border-left:4px solid #5FA8D3;border-radius:6px;font-size:13.5px;",
+          if (length(all_res) == 1) {
+            tagList(
+              tags$h4(style = "margin-top:0;font-weight:700;", heading),
+              body
+            )
+          } else {
+            # Collapsed, so three guides do not push the summary off screen
+            tags$details(
+              tags$summary(
+                style = "font-size:15px;font-weight:700;cursor:pointer;",
+                heading
+              ),
+              tags$div(style = "margin-top:8px;", body)
+            )
+          }
+        )
+      })
+    })
+
+    # ── Summary: which algorithm the strip and tables describe ──────────────
+    output$summary_algorithm_ui <- renderUI({
+      res <- results()
+      if (length(res) < 2) {
+        return(NULL)
+      }
+      choices <- stats::setNames(
+        names(res),
+        vapply(res, function(r) r$algorithm_name, character(1))
+      )
+      previous <- isolate(input$summary_algorithm)
+      selectInput(
+        ns("summary_algorithm"),
+        "Statistics, regions and profile of",
+        choices = choices,
+        selected = if (isTRUE(previous %in% choices)) previous else choices[1],
+        width = "420px"
       )
     })
 
@@ -628,7 +882,11 @@ SeqProfile_server <- function(id) {
           seqprofile_stat("Min score", with_pos(gs$min_score, gs$min_pos)),
           seqprofile_stat("Max score", with_pos(gs$max_score, gs$max_pos)),
           seqprofile_stat(
-            "Windows above threshold",
+            if (identical(res$direction, "below")) {
+              "Windows below threshold"
+            } else {
+              "Windows above threshold"
+            },
             if (is.na(gs$pct_above)) {
               "n/a"
             } else {
@@ -661,7 +919,28 @@ SeqProfile_server <- function(id) {
     # ── Summary table ───────────────────────────────────────────────────────
     table_data <- reactive({
       res <- result()
-      if (identical(input$table_view, "profile")) {
+      if (identical(input$table_view, "consensus")) {
+        all_res <- results()
+        shiny::validate(shiny::need(
+          length(all_res) >= 2,
+          "Select two or three algorithms and click Predict to call consensus regions."
+        ))
+        d <- consensus()
+        if (inherits(d, "condition")) {
+          shiny::validate(shiny::need(FALSE, conditionMessage(d)))
+        }
+        names(d) <- c(
+          "Region_ID",
+          "Start",
+          "End",
+          "Length",
+          "Sequence",
+          paste0(
+            "Mean: ",
+            vapply(all_res, function(r) r$algorithm_name, character(1))
+          )
+        )
+      } else if (identical(input$table_view, "profile")) {
         d <- res$profile
         names(d) <- c(
           "Position",
@@ -689,6 +968,25 @@ SeqProfile_server <- function(id) {
       d
     })
 
+    output$table_note <- renderUI({
+      if (!identical(input$table_view, "consensus")) {
+        return(NULL)
+      }
+      tags$p(
+        style = "font-size:12.5px;color:#6c757d;",
+        "Stretches of window-centre positions where every selected algorithm crosses its own threshold at the same time. Positions an algorithm does not score (sequence ends, masked windows) never count. The minimum length also applies to the orange consensus bands in the plot."
+      )
+    })
+
+    # The helical wheel applies to regions of the Eisenberg moment at 100 degrees
+    wheel_available <- reactive({
+      res <- result()
+      identical(res$algorithm_id, "hmoment_eisenberg") &&
+        isTRUE(res$params$angle == 100) &&
+        !identical(input$table_view, "profile") &&
+        !identical(input$table_view, "consensus")
+    })
+
     # server = FALSE so the export buttons write every row, not just the page
     output$summary_table <- DT::renderDataTable(
       {
@@ -700,16 +998,89 @@ SeqProfile_server <- function(id) {
             dom = "Bfrtip",
             buttons = c("copy", "csv", "excel"),
             language = list(
-              emptyTable = "No region crosses the threshold (or no threshold is set)."
+              emptyTable = if (identical(input$table_view, "consensus")) {
+                "No stretch of the minimum length crosses the thresholds of all selected algorithms at once."
+              } else {
+                "No region crosses the threshold (or no threshold is set)."
+              }
             )
           ),
           rownames = FALSE,
+          selection = if (wheel_available()) "single" else "none",
           extensions = "Buttons",
           class = "cell-border stripe hover"
         )
       },
       server = FALSE
     )
+
+    # ── Helical wheel of the clicked amphiphilic region ─────────────────────
+    output$wheel_ui <- renderUI({
+      if (!wheel_available()) {
+        return(NULL)
+      }
+      tags$div(
+        style = "margin-top:14px;",
+        tags$h4(
+          style = "font-weight:700;",
+          "Helical wheel (Schiffer-Edmundson projection)"
+        ),
+        tags$p(
+          style = "font-size:12.5px;color:#6c757d;",
+          "Click a region in the table to project it down the helix axis (100\u00B0 per residue). Residues are coloured by Eisenberg hydrophobicity and joined in sequence order; the red arrow is the hydrophobic moment and points at the hydrophobic face. Residues 19 onwards sit on outer rings."
+        ),
+        plotOutput(ns("wheel_plot"), height = 480)
+      )
+    })
+
+    wheel_data <- reactive({
+      req(wheel_available())
+      res <- result()
+      shiny::validate(shiny::need(
+        nrow(res$regions) > 0,
+        "No region to project: enter a threshold for the hydrophobic moment and click Predict."
+      ))
+      i <- input$summary_table_rows_selected
+      shiny::validate(shiny::need(
+        length(i) == 1 && i <= nrow(res$regions),
+        "Click a region in the table above to draw its helical wheel."
+      ))
+      segment <- seqprofile_wheel_segment(res, i)
+      wheel <- tryCatch(
+        seqprofile_helical_wheel(segment$sequence, segment$start, angle = 100),
+        seqprofile_error = function(e) e
+      )
+      if (inherits(wheel, "condition")) {
+        shiny::validate(shiny::need(FALSE, conditionMessage(wheel)))
+      }
+      attr(wheel, "segment") <- segment
+      attr(wheel, "region_id") <- res$regions$region_id[i]
+      wheel
+    })
+
+    output$wheel_plot <- renderPlot({
+      wheel <- wheel_data()
+      segment <- attr(wheel, "segment")
+      plot_helical_wheel(
+        wheel,
+        title = sprintf(
+          "Region %d: residues %d-%d",
+          attr(wheel, "region_id"),
+          segment$start,
+          segment$end
+        ),
+        subtitle = sprintf(
+          "%s\nuH of the drawn residues = %.3f%s",
+          segment$sequence,
+          attr(wheel, "moment")$uH,
+          if (segment$truncated) {
+            " (long region: 18 residues around its peak)"
+          } else {
+            ""
+          }
+        )
+      )
+    })
 
     # ── Digestion: cleavage rule of the selected enzyme ─────────────────────
     output$enzyme_rule <- renderUI({
