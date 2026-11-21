@@ -174,10 +174,11 @@ A passing run ends like this:
 ✔ |         44 | digest
 ✔ |         27 | fasta-parsing
 ✔ |         46 | ibaq
-✔ |        130 | seqprofile
+✔ |         95 | seqdigest
+✔ |        633 | seqprofile
 
 ══ Results ══════════════════════════════════════════════════════════════
-[ FAIL 0 | WARN 0 | SKIP 0 | PASS 264 ]
+[ FAIL 0 | WARN 0 | SKIP 0 | PASS 862 ]
 ```
 
 `FAIL 0`, `WARN 0` and `SKIP 0` are all expected. The `seqprofile` tests need
@@ -191,7 +192,8 @@ a package is missing.
 | `test-digest.R` | `count_theoretical_peptides()` and its agreement with `in_silico_digest()`; `build_theoretical_peptide_counts()`; `protease_regex_from_rule()` for C- and N-terminal cleavage; `classify_peptides()`; `compute_protein_abundance()` (sum and top3) |
 | `test-coverage.R` | `peptide_starts()` and `protein_coverage()` |
 | `test-ibaq.R` | `filter_diann_report()` (each filter on its own, inclusive cutoffs, absent columns) and `compute_ibaq()` (wide and long output, log2, unmatched protein groups, digest settings, error messages, and the regression test for `id_col = "Genes"` / `"Protein.Names"`) |
-| `test-seqprofile.R` | Sequence profiling: `clean_protein_sequence()` (raw vs FASTA, lower case / digits / spaces, several entries, non-canonical and illegal characters, empty input), `seqprofile_windows()`, `extract_profile_regions()`, `run_seq_profile()` for every registered algorithm (data contract, agreement with direct `Peptides` calls and with the in-repo `GRAVY()`, masking of windows with non-canonical residues, classed errors for short sequences and bad parameters), `seqprofile_global_descriptors()`, `plot_seq_profile()`, and `SeqProfile_server()` in `mod_SeqProfile.r` (computes only on **Predict**) |
+| `test-seqprofile.R` | Sequence profiling: `clean_protein_sequence()` (raw vs FASTA, lower case / digits / spaces, several entries, non-canonical and illegal characters, empty input), `seqprofile_windows()`, `extract_profile_regions()`, `run_seq_profile()` for every registered algorithm (data contract, agreement with direct `Peptides` calls and with the in-repo `GRAVY()`, masking of windows with non-canonical residues, classed errors for short sequences and bad parameters), the Karplus-Schulz, TopPred, Jameson-Wolf and FoldIndex profiles (window weights of `ks_triangular_weights()` and `toppred_trapezoid_weights()`; `score_karplus_schulz()`, `score_von_heijne_tm()`, `score_jameson_wolf()` and `score_foldindex()` against hand-worked values and independent recomputation; `annotate_von_heijne_regions()` certainty and orientation notes; FoldIndex regions at or below the threshold; minimum window sizes; their use in a consensus and in the module), the in-file scale profiles (completeness of the five scales; `seqprofile_scale_mean()`; `score_kolaskar_tongaonkar()`, `score_parker_hydrophilicity()`, `score_chou_fasman_turn()` and `score_emini_surface()` against hand-worked values; default windows, thresholds and reporting positions), the Calis score (`parse_calis_mask()`, `score_calis_immunogenicity()` for 9-mers and longer peptides, masked positions, classed errors for short peptides and bad mask tokens), `seqprofile_global_descriptors()`, `plot_seq_profile()`, and `SeqProfile_server()` in `mod_SeqProfile.r` (computes only on **Predict**) |
+| `test-seqdigest.R` | In silico digestion of one sequence (Digestion tab of SeqProfile): `seqprofile_mono_mass()` against known values and `Peptides::mw()`; `run_seq_digest()` for each preset enzyme and for custom rules (C- or N-terminal cleavage, blocking residues), missed cleavages, coverage within the length limits, the 2+ / 3+ m/z filter, carbamidomethyl Cys and oxidised Met, edge cases and classed errors; `seqprofile_fragment_ions()` (b/y values, complementary pairs, 2+ fragments, modifications) and `plot_fragment_spectrum()`; `seqprofile_coverage_map()`; and `SeqProfile_server()` (digests only on **Digest**, spectrum of the clicked peptide) |
 
 Not covered: the peptide property and plotting helpers in the same file
 (`GRAVY()`, `calculate_pI()`, `calculate_MW()`, `plot_2d_gel()`),
