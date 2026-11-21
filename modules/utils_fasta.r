@@ -1345,6 +1345,192 @@ score_calis_immunogenicity <- function(window_seq, mask = "1,2,C") {
   )
 }
 
+# ── Classic Biophysical & IDR Scales / Helpers ───────────────────────────────
+
+# Karplus & Schulz (1985) Naturwissenschaften 72:212-213.
+# Source: AAindex KARP850102 (Flexibility parameter for one rigid neighbor;
+# GenomeNet https://www.genome.jp/dbget-bin/www_bget?aaindex:KARP850102).
+SEQPROFILE_SCALE_KS_FLEX <- c(
+  A = 0.946, R = 1.028, N = 1.006, D = 1.089, C = 0.878,
+  Q = 1.025, E = 1.036, G = 1.042, H = 0.952, I = 0.892,
+  L = 0.961, K = 1.082, M = 0.862, F = 0.912, P = 1.085,
+  S = 1.048, T = 1.051, W = 0.917, Y = 0.930, V = 0.927
+)
+
+#' Triangular smoothing weights for Karplus-Schulz flexibility.
+#' For the default 7-residue window this gives c(0.25, 0.5, 0.75, 1, 0.75, 0.5, 0.25) / 4.
+ks_triangular_weights <- function(w) {
+  mid <- (w + 1) / 2
+  dist <- abs(seq_len(w) - mid)
+  raw <- 1 - dist / (mid)
+  raw / sum(raw)
+}
+
+#' Karplus & Schulz (1985) backbone flexibility score per window.
+score_karplus_schulz <- function(window_seq) {
+  if (length(window_seq) == 0L) {
+    return(numeric(0))
+  }
+  vapply(
+    strsplit(toupper(window_seq), "", fixed = TRUE),
+    function(aa) {
+      w <- length(aa)
+      if (w == 0L) {
+        return(NA_real_)
+      }
+      vals <- unname(SEQPROFILE_SCALE_KS_FLEX[aa])
+      if (anyNA(vals)) {
+        return(NA_real_)
+      }
+      sum(vals * ks_triangular_weights(w))
+    },
+    numeric(1),
+    USE.NAMES = FALSE
+  )
+}
+
+#' Trapezoidal weights for von Heijne (1992) TopPred.
+#' For window = 21: 5-residue flanks ramping linearly + 11-residue flat core.
+toppred_trapezoid_weights <- function(w) {
+  if (w == 21L) {
+    flank <- 5L
+    core <- 11L
+  } else {
+    flank <- max(1L, as.integer(floor(w / 4)))
+    core <- max(1L, w - 2L * flank)
+  }
+  ramp <- seq_len(flank) / (flank + 1)
+  raw <- c(ramp, rep(1, core), rev(ramp))
+  raw / sum(raw)
+}
+
+#' von Heijne (1992) TopPred transmembrane hydrophobicity profile using the
+#' Engelman-Steitz-Goldman (GES) scale from Peptides and a trapezoidal window.
+score_von_heijne_tm <- function(window_seq) {
+  if (length(window_seq) == 0L) {
+    return(numeric(0))
+  }
+  # Ensure positive = hydrophobic (GES convention in TopPred)
+  ges_vals <- vapply(
+    SEQPROFILE_AA,
+    function(a) as.numeric(Peptides::hydrophobicity(a, scale = "Engelman")),
+    numeric(1)
+  )
+  if (ges_vals[["I"]] < 0) {
+    ges_vals <- -ges_vals
+  }
+
+  vapply(
+    strsplit(toupper(window_seq), "", fixed = TRUE),
+    function(aa) {
+      w <- length(aa)
+      if (w == 0L) {
+        return(NA_real_)
+      }
+      vals <- unname(ges_vals[aa])
+      if (anyNA(vals)) {
+        return(NA_real_)
+      }
+      sum(vals * toppred_trapezoid_weights(w))
+    },
+    numeric(1),
+    USE.NAMES = FALSE
+  )
+}
+
+#' Annotate von Heijne TopPred TM regions with certainty (putative >= 0.6,
+#' certain >= 1.0) and positive-inside topology bias (K+R in 15-aa flanks).
+annotate_von_heijne_regions <- function(regions, sequence, params) {
+  if (nrow(regions) == 0L) {
+    return(character(0))
+  }
+  n <- nchar(sequence)
+  half_w <- (params$window - 1L) %/% 2L
+  flank_len <- 15L
+
+  count_kr <- function(s, e) {
+    if (s > e || e < 1L || s > n) {
+      return(0L)
+    }
+    subseq <- substring(sequence, max(1L, s), min(n, e))
+    nchar(gsub("[^KR]", "", subseq))
+  }
+
+  vapply(
+    seq_len(nrow(regions)),
+    function(i) {
+      cert <- if (regions$peak_score[i] >= 1.0) "Certain TM" else "Putative TM"
+      tm_start <- max(1L, regions$start[i] - half_w)
+      tm_end <- min(n, regions$end[i] + half_w)
+      kr_n <- count_kr(tm_start - flank_len, tm_start - 1L)
+      kr_c <- count_kr(tm_end + 1L, tm_end + flank_len)
+      orient <- if (kr_n > kr_c) {
+        "N-in/C-out"
+      } else if (kr_c > kr_n) {
+        "N-out/C-in"
+      } else {
+        "Balanced flanks"
+      }
+      sprintf("%s | %s (N-flank K+R=%d, C-flank K+R=%d)", cert, orient, kr_n, kr_c)
+    },
+    character(1)
+  )
+}
+
+#' Jameson & Wolf (1988) composite Antigenic Index per window.
+#'
+#' Combines discretized Hopp-Woods hydrophilicity (weight 0.30), Emini surface
+#' accessibility (0.15), Karplus-Schulz flexibility (0.15), and Chou-Fasman
+#' beta-turn propensity (0.40, carrying the combined secondary-structure turn
+#' weight because Garnier-Robson's 1,360-parameter matrix is not in Peptides).
+score_jameson_wolf <- function(window_seq) {
+  if (length(window_seq) == 0L) {
+    return(numeric(0))
+  }
+  h_raw <- as.numeric(Peptides::hydrophobicity(window_seq, scale = "HoppWoods"))
+  # Emini uses a 6-residue hexapeptide; evaluate inner 6 aa when window >= 6
+  w_len <- nchar(window_seq[1])
+  emini_sub <- if (w_len > 6L) {
+    offset <- (w_len - 6L) %/% 2L
+    substring(window_seq, 1L + offset, 6L + offset)
+  } else {
+    window_seq
+  }
+  s_raw <- score_emini_surface(emini_sub)
+  f_raw <- score_karplus_schulz(window_seq)
+  t_raw <- score_chou_fasman_turn(window_seq)
+
+  # Table I discretization (Jameson & Wolf 1988, CABIOS 4:181-186)
+  h_disc <- ifelse(
+    h_raw > 0.5, 2,
+    ifelse(h_raw > 0.0, 1, ifelse(h_raw > -0.4, -1, -2))
+  )
+  s_disc <- ifelse(s_raw >= 1.0, 1, 0)
+  f_disc <- ifelse(f_raw >= 1.0, 1, 0)
+  t_disc <- ifelse(t_raw >= 1.2, 2, ifelse(t_raw >= 1.0, 1, 0))
+
+  0.30 * h_disc + 0.15 * s_disc + 0.15 * f_disc + 0.40 * t_disc
+}
+
+#' FoldIndex (Prilusky et al., 2005; Uversky et al., 2000) sliding-window IDR proxy.
+#'
+#' I_F = 2.785 * <H_scaled> - |<R>| - 1.151
+#' where <H_scaled> is mean Kyte-Doolittle hydropathy rescaled to [0, 1]
+#' via (KD + 4.5) / 9, and |<R>| is absolute mean net charge per residue.
+#' Negative scores predict intrinsically disordered (unfolded) regions.
+score_foldindex <- function(window_seq, pH = 7.4) {
+  if (length(window_seq) == 0L) {
+    return(numeric(0))
+  }
+  kd <- as.numeric(Peptides::hydrophobicity(window_seq, scale = "KyteDoolittle"))
+  h_scaled <- (kd + 4.5) / 9.0
+  abs_charge <- abs(
+    as.numeric(Peptides::charge(window_seq, pH = pH, pKscale = "Lehninger")) /
+      nchar(window_seq)
+  )
+  2.785 * h_scaled - abs_charge - 1.151
+}
+
 #' Registry of sequence-profiling algorithms.
 #'
 #' One entry per algorithm. `defaults` lists exactly the parameters the
@@ -1353,6 +1539,92 @@ score_calis_immunogenicity <- function(window_seq, mask = "1,2,C") {
 #' parameters and returns one score per window.
 seqprofile_registry <- function() {
   list(
+    flexibility_ks = list(
+      id = "flexibility_ks",
+      name = "Backbone Flexibility (Karplus-Schulz)",
+      category = "Structural / Membrane",
+      y_label = "Flexibility index (Bnorm)",
+      defaults = list(window = 7L, threshold = 1.0),
+      min_window = 3L,
+      direction = "above",
+      baseline = 1.0,
+      needs_peptides = FALSE,
+      region_note = "Flexible loop / segment",
+      score_fn = function(window_seq, p) {
+        score_karplus_schulz(window_seq)
+      },
+      interpretation = list(
+        summary = "Triangularly weighted sliding-window backbone flexibility derived from normalized crystallographic alpha-carbon B-factors (AAindex KARP850102).",
+        reading = "Values above 1.0 indicate mobile, solvent-exposed loops or linkers; values below 1.0 mark rigid secondary-structure cores.",
+        thresholds = "The default 7-residue window uses Karplus-Schulz triangular weights (0.25, 0.50, 0.75, 1.00, 0.75, 0.50, 0.25) with a 1.0 baseline.",
+        caveats = "Uses the single-table KARP850102 (one-rigid-neighbor) scale rather than full 3-table neighbor switching. High flexibility often overlaps with surface loops and linear B-cell epitopes.",
+        reference = "Karplus PA, Schulz GE (1985) Naturwissenschaften 72:212-213; AAindex KARP850102."
+      )
+    ),
+    tm_von_heijne = list(
+      id = "tm_von_heijne",
+      name = "Transmembrane Helices (von Heijne TopPred)",
+      category = "Structural / Membrane",
+      y_label = "Trapezoidal GES hydropathy (kcal/mol)",
+      defaults = list(window = 21L, threshold = 0.6),
+      min_window = 11L,
+      direction = "above",
+      baseline = 1.0,
+      region_note = "Predicted TM helix",
+      region_note_fn = annotate_von_heijne_regions,
+      score_fn = function(window_seq, p) {
+        score_von_heijne_tm(window_seq)
+      },
+      interpretation = list(
+        summary = "TopPred sliding trapezoidal window (11-residue core + 5-residue flanking wedges = 21 aa) over the Engelman-Steitz-Goldman (GES) hydrophobicity scale, paired with positive-inside flanking K+R charge bias.",
+        reading = "High positive peaks indicate nonpolar transbilayer alpha-helices. The regions table classifies each hit as Certain (>= 1.0) or Putative (>= 0.6) and reports N- vs C-flank K+R counts (positive-inside rule: the more positively charged loop tends to face the cytoplasm).",
+        thresholds = "TopPred defines 0.6 as the lower (putative TM) cutoff (dashed red line) and 1.0 as the upper (certain TM) cutoff (solid grey line) over a 21-residue trapezoidal window.",
+        caveats = "N-terminal hydrophobic signal peptides frequently exceed the 1.0 cutoff and can mimic a first transmembrane helix. Orientation calls are heuristic for single helices.",
+        reference = "von Heijne G (1992) J Mol Biol 225:487-494; Engelman DM, Steitz TA, Goldman A (1986) Annu Rev Biophys Biophys Chem 15:321-353. GES scale via Peptides::hydrophobicity(scale = \"Engelman\")."
+      )
+    ),
+    antigenicity_jw = list(
+      id = "antigenicity_jw",
+      name = "Antigenic Index (Jameson-Wolf)",
+      category = "Immunogenicity / Epitopes",
+      y_label = "Antigenic Index (AI)",
+      defaults = list(window = 7L, threshold = 0.0),
+      min_window = 6L,
+      direction = "above",
+      baseline = 0.0,
+      region_note = "Predicted antigenic peak",
+      score_fn = function(window_seq, p) {
+        score_jameson_wolf(window_seq)
+      },
+      interpretation = list(
+        summary = "Composite linear epitope index combining discretized Hopp-Woods hydrophilicity (0.30), Emini surface probability (0.15), Karplus-Schulz flexibility (0.15), and Chou-Fasman beta-turn propensity (0.40).",
+        reading = "Positive peaks highlight hydrophilic, flexible, surface-exposed turns likely to act as linear B-cell antigenic determinants; negative regions correspond to buried or hydrophobic cores.",
+        thresholds = "Default window is 7 residues (evaluating Emini over the inner 6 residues) with a 0.0 baseline. Raising the threshold to 0.5-1.0 isolates only the strongest composite peaks.",
+        caveats = "The original 1988 algorithm splits the 0.40 secondary-structure turn weight evenly between Chou-Fasman (0.20) and Garnier-Robson (0.20); here all 0.40 is assigned to Chou-Fasman beta-turn propensity, and peak-broadening smoothing is omitted so raw scores stay transparent.",
+        reference = "Jameson BA, Wolf H (1988) Comput Appl Biosci 4(1):181-186; Wolf H et al. (1988) Comput Appl Biosci 4(1):187-191."
+      )
+    ),
+    idr_foldindex = list(
+      id = "idr_foldindex",
+      name = "Intrinsically Disordered Regions (FoldIndex / Uversky CH)",
+      category = "Structural / Membrane",
+      y_label = "FoldIndex (IF; < 0 = disordered)",
+      defaults = list(window = 51L, pH = 7.4, threshold = 0.0),
+      min_window = 11L,
+      direction = "below",
+      baseline = 0.0,
+      region_note = "Predicted intrinsically disordered region (IDR)",
+      score_fn = function(window_seq, p) {
+        score_foldindex(window_seq, pH = p$pH)
+      },
+      interpretation = list(
+        summary = "Sliding-window FoldIndex (IF = 2.785 * <H_scaled> - |<R>| - 1.151) derived from the Uversky charge-hydropathy boundary, combining rescaled Kyte-Doolittle hydropathy and absolute Lehninger net charge per residue.",
+        reading = "Negative values (< 0, shaded) predict intrinsically disordered / unfolded regions characterized by low mean hydrophobicity and high net charge; positive values (> 0) predict ordered, folded domains.",
+        thresholds = "Prilusky et al. (2005) recommend a 51-residue window and a 0.0 fold-boundary cutoff. For short peptides (< 51 aa), reduce the window size (e.g. 15-21 aa).",
+        caveats = "FoldIndex is a fast biophysical proxy based on net charge and hydropathy; neutral polar IDRs (e.g. Q/N-rich prion-like domains) with low net charge can score near or above 0.",
+        reference = "Prilusky J et al. (2005) Bioinformatics 21(16):3435-3438; Uversky VN, Gillespie JR, Fink AL (2000) Proteins 41(3):415-427. Computed with Peptides::hydrophobicity() and Peptides::charge()."
+      )
+    ),
     charge_lehninger = list(
       id = "charge_lehninger",
       name = "Charge Density (Lehninger)",
@@ -1637,7 +1909,11 @@ run_seq_profile <- function(sequence, algorithm_id, params = list()) {
   }
 
   regions <- extract_profile_regions(profile, p$threshold, spec$direction)
-  regions$note <- rep(spec$region_note, nrow(regions))
+  regions$note <- if (!is.null(spec$region_note_fn) && nrow(regions) > 0L) {
+    spec$region_note_fn(regions, sequence, p)
+  } else {
+    rep(spec$region_note, nrow(regions))
+  }
 
   has_score <- any(scorable)
   i_min <- if (has_score) which.min(profile$score) else NA_integer_
@@ -1722,7 +1998,11 @@ seqprofile_global_descriptors <- function(sequence) {
 #' Line of score vs. window-centre position, a dashed threshold line, a solid
 #' baseline where the algorithm has one, and shaded bands over the predicted
 #' regions. The points carry a `text` aesthetic for plotly hover.
-plot_seq_profile <- function(result) {
+#'
+#' @param consensus Optional `seqprofile_consensus_regions()` output; its
+#'   intervals are shaded in orange on top of the algorithm's own regions, so
+#'   the same bands line up across stacked tracks.
+plot_seq_profile <- function(result, consensus = NULL) {
   prof <- result$profile
   if (all(is.na(prof$score))) {
     return(
@@ -1770,6 +2050,22 @@ plot_seq_profile <- function(result) {
         alpha = 0.25
       )
   }
+  if (!is.null(consensus) && nrow(consensus) > 0) {
+    consensus_bands <- data.frame(
+      xmin = consensus$start - 0.5,
+      xmax = consensus$end + 0.5,
+      ymin = y_rng[1],
+      ymax = y_rng[2]
+    )
+    p <- p +
+      ggplot2::geom_rect(
+        data = consensus_bands,
+        ggplot2::aes(xmin = xmin, xmax = xmax, ymin = ymin, ymax = ymax),
+        inherit.aes = FALSE,
+        fill = "#E8A33D",
+        alpha = 0.45
+      )
+  }
   if (!is.na(base)) {
     p <- p + ggplot2::geom_hline(yintercept = base, colour = "grey60")
   }
@@ -1794,6 +2090,328 @@ plot_seq_profile <- function(result) {
       title = result$algorithm_name,
       x = "Residue position (window centre)",
       y = result$y_label
+    )
+}
+
+# ── UniProt retrieval ────────────────────────────────────────────────────────
+
+# UniProtKB accession format (uniprot.org/help/accession_numbers), with an
+# optional isoform suffix such as P05067-2.
+SEQPROFILE_UNIPROT_ACCESSION <- "^([OPQ][0-9][A-Z0-9]{3}[0-9]|[A-NR-Z][0-9]([A-Z][A-Z0-9]{2}[0-9]){1,2})(-[0-9]+)?$"
+
+# Trims and upper-cases an accession; aborts when it is not a UniProtKB one, so
+# nothing typed by the user reaches the request URL unchecked.
+seqprofile_clean_accession <- function(accession) {
+  acc <- toupper(trimws(paste(as.character(accession), collapse = "")))
+  if (!grepl(SEQPROFILE_UNIPROT_ACCESSION, acc)) {
+    seqprofile_abort(
+      "Enter a UniProtKB accession such as Q07730 or P05067-2.",
+      "seqprofile_bad_accession"
+    )
+  }
+  acc
+}
+
+#' Split the text of a single-entry UniProt FASTA file.
+#'
+#' @return list(fasta, header, protein_name, sequence). `protein_name` is the
+#'   header text between the identifier and the first OS= / OX= / GN= / PE= /
+#'   SV= field.
+parse_uniprot_fasta <- function(text) {
+  text <- trimws(paste(as.character(text), collapse = "\n"))
+  cs <- clean_protein_sequence(text)
+  if (!startsWith(text, ">") || !nzchar(cs$sequence)) {
+    seqprofile_abort(
+      "UniProt returned no FASTA sequence for this accession (the entry may be obsolete).",
+      "seqprofile_fetch_failed"
+    )
+  }
+  description <- sub("^\\S+\\s*", "", cs$header)
+  list(
+    fasta = gsub("\r\n|\r", "\n", text),
+    header = cs$header,
+    protein_name = trimws(sub("\\s+(OS|OX|GN|PE|SV)=.*$", "", description)),
+    sequence = cs$sequence
+  )
+}
+
+#' Download one entry from the UniProt REST API as FASTA.
+#'
+#' Requests rest.uniprot.org/uniprotkb/{accession}.fasta, which returns the
+#' canonical sequence (or the named isoform when the accession has a suffix).
+#'
+#' @return `parse_uniprot_fasta()` output plus `accession`.
+fetch_uniprot_fasta <- function(accession, timeout = 15) {
+  acc <- seqprofile_clean_accession(accession)
+  if (!requireNamespace("httr", quietly = TRUE)) {
+    seqprofile_abort(
+      "The 'httr' package is not installed. Start proteOmni through run.R so it is installed from proteOmni.lock.",
+      "seqprofile_missing_package"
+    )
+  }
+  url <- sprintf("https://rest.uniprot.org/uniprotkb/%s.fasta", acc)
+  resp <- tryCatch(
+    httr::GET(url, httr::timeout(timeout)),
+    error = function(e) e
+  )
+  if (inherits(resp, "error")) {
+    seqprofile_abort(
+      paste0("Could not reach UniProt: ", conditionMessage(resp)),
+      "seqprofile_fetch_failed"
+    )
+  }
+  status <- httr::status_code(resp)
+  if (status %in% c(400L, 404L)) {
+    seqprofile_abort(
+      sprintf("UniProt has no entry for accession %s.", acc),
+      "seqprofile_fetch_failed"
+    )
+  }
+  if (status != 200L) {
+    seqprofile_abort(
+      sprintf("The UniProt request failed (HTTP %d).", status),
+      "seqprofile_fetch_failed"
+    )
+  }
+  out <- parse_uniprot_fasta(
+    httr::content(resp, as = "text", encoding = "UTF-8")
+  )
+  out$accession <- acc
+  out
+}
+
+# ── Consensus regions across several profiles ────────────────────────────────
+
+#' Intervals where every profile crosses its own threshold.
+#'
+#' A position counts when it is the window centre of a window that passes the
+#' threshold in every result. Positions that one algorithm does not score (the
+#' sequence ends, where its window does not fit, or masked windows) never count.
+#'
+#' @param results List of `run_seq_profile()` results for the same sequence.
+#' @param min_length Shortest stretch (in positions) reported as a region;
+#'   regions are numbered after this filter.
+#' @return data.frame(region_id, start, end, length, sequence, mean_<id>...),
+#'   with one mean-score column per algorithm.
+seqprofile_consensus_regions <- function(results, min_length = 1L) {
+  if (length(results) < 2) {
+    seqprofile_abort(
+      "Consensus regions need at least two algorithms.",
+      "seqprofile_bad_param"
+    )
+  }
+  if (
+    length(min_length) != 1 ||
+      is.na(min_length) ||
+      min_length < 1 ||
+      min_length != round(min_length)
+  ) {
+    seqprofile_abort(
+      "The minimum consensus length must be a whole number of at least 1.",
+      "seqprofile_bad_param"
+    )
+  }
+  no_thr <- vapply(results, function(r) is.na(r$params$threshold), logical(1))
+  if (any(no_thr)) {
+    seqprofile_abort(
+      sprintf(
+        "Consensus regions need a threshold for every algorithm. None is set for: %s.",
+        paste(
+          vapply(results[no_thr], function(r) r$algorithm_name, character(1)),
+          collapse = ", "
+        )
+      ),
+      "seqprofile_bad_param"
+    )
+  }
+  sequence <- results[[1]]$sequence
+  same_seq <- vapply(
+    results,
+    function(r) identical(r$sequence, sequence),
+    logical(1)
+  )
+  if (!all(same_seq)) {
+    seqprofile_abort(
+      "Consensus regions need profiles of the same sequence.",
+      "seqprofile_bad_param"
+    )
+  }
+
+  n <- nchar(sequence)
+  k <- length(results)
+  hit <- matrix(FALSE, nrow = n, ncol = k)
+  score <- matrix(NA_real_, nrow = n, ncol = k)
+  for (j in seq_len(k)) {
+    prof <- results[[j]]$profile
+    hit[prof$position, j] <- prof$above_thr %in% TRUE
+    score[prof$position, j] <- prof$score
+  }
+  runs <- rle(rowSums(hit) == k)
+  ends <- cumsum(runs$lengths)
+  starts <- ends - runs$lengths + 1L
+  keep <- which(runs$values & runs$lengths >= min_length)
+
+  out <- data.frame(
+    region_id = seq_along(keep),
+    start = starts[keep],
+    end = ends[keep],
+    length = runs$lengths[keep],
+    # substring() rejects zero-length positions when no region is found
+    sequence = if (length(keep) > 0) {
+      substring(sequence, starts[keep], ends[keep])
+    } else {
+      character(0)
+    },
+    stringsAsFactors = FALSE
+  )
+  for (j in seq_len(k)) {
+    out[[paste0("mean_", results[[j]]$algorithm_id)]] <- vapply(
+      keep,
+      function(r) mean(score[starts[r]:ends[r], j]),
+      numeric(1)
+    )
+  }
+  out
+}
+
+# ── Helical wheel (Schiffer-Edmundson projection) ────────────────────────────
+
+#' Residues to draw for one predicted region of a profile.
+#'
+#' A region lists window centres, so the stretch that produced it also includes
+#' the flanks of its first and last window. Stretches longer than `max_len` are
+#' cut to `wheel_len` residues around the region's peak position.
+#'
+#' @param region Row number in `result$regions`.
+#' @return list(start, end, sequence, truncated).
+seqprofile_wheel_segment <- function(
+  result,
+  region,
+  max_len = 36L,
+  wheel_len = 18L
+) {
+  regions <- result$regions
+  if (
+    length(region) != 1 || is.na(region) || region < 1 || region > nrow(regions)
+  ) {
+    seqprofile_abort("Unknown region.", "seqprofile_bad_param")
+  }
+  window <- result$params$window
+  left <- (window - 1L) %/% 2L
+  lo <- regions$start[region] - left
+  hi <- regions$end[region] + (window - 1L - left)
+  truncated <- (hi - lo + 1L) > max_len
+  if (truncated) {
+    centred <- regions$peak_pos[region] - (wheel_len - 1L) %/% 2L
+    lo <- max(lo, min(centred, hi - wheel_len + 1L))
+    hi <- lo + wheel_len - 1L
+  }
+  list(
+    start = as.integer(lo),
+    end = as.integer(hi),
+    sequence = substring(result$sequence, lo, hi),
+    truncated = truncated
+  )
+}
+
+#' Helical wheel coordinates of a segment.
+#'
+#' Residue i is placed `angle` degrees clockwise from residue i - 1, starting at
+#' the top. At 100 degrees residue 19 falls on residue 1, so every `per_ring`
+#' residues move one ring outwards. Hydrophobicity is the Eisenberg consensus
+#' scale read from Peptides, the scale Peptides::hmoment() uses.
+#'
+#' @param start Sequence position of the first residue of `segment`.
+#' @return data.frame(position, residue, angle_deg, x, y, hydrophobicity) with
+#'   attribute `moment` = list(x, y, uH): the mean hydrophobicity vector of the
+#'   whole segment and its length (the hydrophobic moment).
+seqprofile_helical_wheel <- function(
+  segment,
+  start = 1L,
+  angle = 100,
+  per_ring = 18L
+) {
+  segment <- toupper(as.character(segment)[1])
+  if (
+    is.na(segment) ||
+      nchar(segment) < 3 ||
+      grepl("[^ACDEFGHIKLMNPQRSTVWY]", segment)
+  ) {
+    seqprofile_abort(
+      "A helical wheel needs at least 3 canonical residues.",
+      "seqprofile_bad_param"
+    )
+  }
+  if (!requireNamespace("Peptides", quietly = TRUE)) {
+    seqprofile_abort(
+      "The 'Peptides' package is not installed. Start proteOmni through run.R so it is installed from proteOmni.lock.",
+      "seqprofile_missing_package"
+    )
+  }
+  aa <- strsplit(segment, "")[[1]]
+  i <- seq_along(aa) - 1L
+  theta <- i * angle * pi / 180
+  h <- as.numeric(Peptides::hydrophobicity(aa, scale = "Eisenberg"))
+  radius <- 1 + 0.3 * (i %/% per_ring)
+  wheel <- data.frame(
+    position = as.integer(start) + i,
+    residue = aa,
+    angle_deg = (i * angle) %% 360,
+    x = radius * sin(theta),
+    y = radius * cos(theta),
+    hydrophobicity = h,
+    stringsAsFactors = FALSE
+  )
+  mx <- mean(h * sin(theta))
+  my <- mean(h * cos(theta))
+  attr(wheel, "moment") <- list(x = mx, y = my, uH = sqrt(mx^2 + my^2))
+  wheel
+}
+
+#' Helical wheel plot for a `seqprofile_helical_wheel()` result.
+#'
+#' Residues are filled by Eisenberg hydrophobicity and joined in sequence
+#' order; the arrow is the hydrophobic moment vector (length = uH), pointing at
+#' the hydrophobic face.
+plot_helical_wheel <- function(wheel, title = NULL, subtitle = NULL) {
+  moment <- attr(wheel, "moment")
+  lim <- max(abs(c(wheel$x, wheel$y))) + 0.25
+  ggplot2::ggplot(wheel, ggplot2::aes(x = x, y = y)) +
+    ggplot2::geom_path(colour = "grey75", linewidth = 0.4) +
+    ggplot2::geom_point(
+      ggplot2::aes(fill = hydrophobicity),
+      shape = 21,
+      size = 10,
+      colour = "grey30"
+    ) +
+    ggplot2::geom_text(
+      ggplot2::aes(label = paste0(residue, "\n", position)),
+      size = 3,
+      lineheight = 0.85
+    ) +
+    ggplot2::annotate(
+      "segment",
+      x = 0,
+      y = 0,
+      xend = moment$x,
+      yend = moment$y,
+      colour = "#c0392b",
+      linewidth = 1,
+      arrow = grid::arrow(length = grid::unit(0.12, "inches"))
+    ) +
+    ggplot2::scale_fill_gradient2(
+      low = "#5FA8D3",
+      mid = "white",
+      high = "#E8A33D",
+      midpoint = 0,
+      name = "Eisenberg\nhydrophobicity"
+    ) +
+    ggplot2::coord_fixed(xlim = c(-lim, lim), ylim = c(-lim, lim)) +
+    ggplot2::labs(title = title, subtitle = subtitle) +
+    ggplot2::theme_void() +
+    ggplot2::theme(
+      plot.title = ggplot2::element_text(face = "bold"),
+      plot.margin = ggplot2::margin(8, 8, 8, 8)
     )
 }
 
