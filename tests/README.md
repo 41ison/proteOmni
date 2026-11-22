@@ -121,6 +121,7 @@ How to read it:
 | `test-missingness.R` | The intensity-dependent dropout model and simulated missingness |
 | `test-tmm.R` | TMM normalization, its fallbacks and input validation |
 | `test-limma-pipeline.R` | The limma fit on the training matrix and `extract_power_stats()` |
+| `test-sam.R` | SAM: the statistic against the pooled-variance t-test, s0, complete and blocked (within-batch) label permutations, the Δ table, q-values, both FDR estimators, missing values and the result layout |
 | `test-power-helpers.R` | `bh_effective_alpha()` and `solve_ncp()` |
 | `test-simulation.R` | `simulate_pipeline_mdd()` (grid and bisection) and the replicate sweep |
 | `test-plot-helpers.R` | Heatmap clustering, palettes and STRING colour helpers |
