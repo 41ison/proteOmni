@@ -507,6 +507,22 @@ ui <- dashboardPage(
                 4,
                 div(
                   class = "tool-card",
+                  id = "card_seq",
+                  onclick = "Shiny.setInputValue('select_tool','seq',{priority:'event'})",
+                  div(class = "tool-icon", icon("wave-square")),
+                  tags$h3("SeqProfile"),
+                  tags$p(
+                    "Sliding-window profiles and in silico digestion of a protein sequence."
+                  ),
+                  tags$span("Peptides / sequence", class = "tool-badge")
+                )
+              )
+            ),
+            fluidRow(
+              column(
+                4,
+                div(
+                  class = "tool-card",
                   id = "card_doc",
                   style = "background-color:#eaf4fb;border:2px solid #5FA8D3;",
                   onclick = "Shiny.setInputValue('select_tool','doc',{priority:'event'})",
@@ -516,22 +532,6 @@ ui <- dashboardPage(
                     "Complete PwrQuant guide: parameters, statistical rationale and interpretation."
                   ),
                   tags$span("Guide / Statistics", class = "tool-badge")
-                )
-              )
-            ),
-            fluidRow(
-              column(
-                4,
-                div(
-                  class = "tool-card",
-                  id = "card_seq",
-                  onclick = "Shiny.setInputValue('select_tool','seq',{priority:'event'})",
-                  div(class = "tool-icon", icon("wave-square")),
-                  tags$h3("SeqProfile"),
-                  tags$p(
-                    "Sliding-window profiles and in silico digestion of a protein sequence."
-                  ),
-                  tags$span("Peptides / sequence", class = "tool-badge")
                 )
               )
             ),
