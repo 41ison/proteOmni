@@ -1,4 +1,12 @@
 # ── Helper Functions ────────────────────────────────────────────────────────
+
+#' Within-group coefficient of variation (%), per protein
+#'
+#' CV = 100 * SD / mean over the group's observed values (NAs dropped). Expects
+#' linear-scale intensities; a CV computed on log2 values is not comparable.
+#' NA when a protein has fewer than 2 observed values in the group.
+#'
+#' @return data.frame, proteins x groups, columns named `CV_<group>`.
 compute_cv_mtx <- function(protein_matrix, group_labels) {
   unique_groups <- unique(group_labels)
   cv_results <- data.frame(row.names = rownames(protein_matrix))
@@ -16,33 +24,32 @@ compute_cv_mtx <- function(protein_matrix, group_labels) {
 
 #' TMM normalization of a log2 intensity matrix
 #'
-#' Trimmed Mean of M-values (Robinson & Oshlack 2010) estimates one scaling
-#' factor per sample from the trimmed, precision-weighted mean of log-ratios
-#' against a reference sample. It assumes most proteins are *not*
-#' differentially abundant and is robust to asymmetric regulation and to a
-#' few dominant high-abundance proteins, where median or total-intensity
-#' scaling fail.
+#' Trimmed Mean of M-values (Robinson & Oshlack 2010): one scaling factor per
+#' sample, from the trimmed, precision-weighted mean of log-ratios (M) against
+#' a reference sample. Assumes most proteins are *not* differentially
+#' abundant; robust to asymmetric regulation and to a few dominant proteins,
+#' where median or total-intensity scaling fail.
 #'
-#' Adaptations for MS proteomics, which differs from RNA-seq counts:
+#' Adaptations to MS intensities (edgeR expects complete count matrices):
 #'
-#' * TMM needs linear intensities, so the matrix is back-transformed with
-#'   `2^x`. Cells with `x <= nondetect_log2` (raw zeros that became
-#'   `log2(0 + 1) = 0`) and non-finite cells are treated as non-detects.
-#' * edgeR cannot take NAs, so every sample is normalized against the
-#'   reference on the *pairwise complete-case* intersection of detected
-#'   proteins. The library sizes used inside TMM are the column sums over that
-#'   same shared set, so the two columns are always measured on the same
-#'   features.
-#' * The reference is the sample whose upper-quartile relative intensity is
-#'   closest to the across-sample mean (edgeR's rule), restricted to samples
-#'   with at least median completeness so the pairwise overlap stays large.
-#' * Only the scaling factors are applied - on the log2 scale, as a per-column
-#'   shift - so missing values stay missing and can be handled natively by
-#'   `lmFit` in least-squares mode. Factors are centred at a geometric mean of
-#'   1 to preserve the overall intensity level.
-#' * A pair with fewer than `min_shared` shared proteins gets a plain
-#'   median-of-M factor instead (or 1, with a warning, below 10 proteins);
-#'   the 30 % / 5 % trimming would otherwise leave nothing to average.
+#' * Non-detects are non-finite cells and cells with `x <= nondetect_log2`
+#'   (raw zeros, which `log2(0 + 1)` maps to 0). All other cells are
+#'   back-transformed with `2^x`, since TMM works on the linear scale.
+#' * Each sample is compared with the reference on the proteins detected in
+#'   both (pairwise complete cases). Library sizes are the column sums over
+#'   that shared set, so both columns are measured on the same proteins.
+#' * Reference: the sample whose upper-quartile relative intensity is closest
+#'   to the across-sample mean (edgeR's rule), among samples with at least
+#'   median completeness so the pairwise overlap stays large.
+#' * Fallbacks by number of shared proteins: `>= min_shared`, full TMM;
+#'   10 to `min_shared - 1`, plain median of M (the 30 % / 5 % trimming would
+#'   leave too little to average); `< 10`, factor 1 with a warning.
+#' * Factors are centred to a geometric mean of 1 (overall intensity level
+#'   preserved) and applied as a per-sample shift on the log2 scale, so NAs
+#'   stay NA.
+#'
+#' Caveat: every finite value above `nondetect_log2` counts as detected, so
+#' imputed values enter the factors when the matrix was imputed upstream.
 #'
 #' @param log2_mat Numeric matrix, proteins x samples, log2 scale, may have NAs.
 #' @param logratio_trim,sum_trim Fractions of M and A values trimmed from
@@ -73,8 +80,8 @@ tmm_normalize_log2 <- function(
     samp_names <- paste0("S", seq_len(n_samp))
   }
 
-  # edgeR >= 4.0 renamed calcNormFactors(); the old name still works but
-  # emits a message on every call.
+  # normLibSizes() is the edgeR >= 4.0 name of calcNormFactors(); use it when
+  # available.
   tmm_fun <- if (exists("normLibSizes", envir = asNamespace("edgeR"))) {
     edgeR::normLibSizes
   } else {
@@ -93,7 +100,8 @@ tmm_normalize_log2 <- function(
     )
   }
 
-  # Reference: edgeR's upper-quartile rule among well-covered samples
+  # Reference sample: edgeR's upper-quartile rule, among samples with at
+  # least median completeness.
   rel <- sweep(lin, 2, colSums(lin, na.rm = TRUE), "/")
   uq <- apply(rel, 2, stats::quantile, probs = 0.75, na.rm = TRUE)
   eligible <- which(completeness >= stats::median(completeness))
@@ -115,8 +123,9 @@ tmm_normalize_log2 <- function(
     lib <- colSums(pair)
 
     if (n_shared[j] >= min_shared) {
-      # edgeR returns factors with product 1; their ratio is the raw TMM
-      # factor of sample j relative to the reference.
+      # edgeR scales the pair's two factors to a product of 1. The log2 shift
+      # of sample j is its effective library size (lib * f) relative to the
+      # reference's, both on the shared proteins.
       f <- tmm_fun(
         pair,
         lib.size = lib,
@@ -126,7 +135,6 @@ tmm_normalize_log2 <- function(
         sumTrim = sum_trim,
         doWeighting = TRUE
       )
-      # Effective size of j relative to the reference, on shared features
       scale_log2[j] <- log2(lib[1] * f[1]) - log2(lib[2] * f[2])
       method[j] <- "TMM"
     } else if (n_shared[j] >= 10L) {
@@ -145,7 +153,7 @@ tmm_normalize_log2 <- function(
     }
   }
 
-  # Centre so the geometric mean of the factors is 1
+  # Centre the shifts: geometric mean of the scaling factors = 1.
   scale_log2 <- scale_log2 - mean(scale_log2)
   out <- sweep(log2_mat, 2, scale_log2, "-")
   dimnames(out) <- dimnames(log2_mat)
@@ -161,10 +169,14 @@ tmm_normalize_log2 <- function(
   out
 }
 
-# Groupwise KNN core: impute.knn on each group's proteins x samples block, so
-# neighbours are proteins and each gap is filled from its own sample column.
-# Proteins entirely missing within a group are skipped and stay NA. Errors
-# propagate so the caller can fall back.
+# Groupwise KNN (impute::impute.knn), run separately on each group's
+# proteins x samples block. Neighbours are proteins: Euclidean distance over
+# the group's samples in which the protein is observed (averaged over the
+# coordinates a candidate neighbour also has). A gap in sample j becomes the
+# unweighted mean of the k nearest proteins' observed values in sample j.
+# Proteins entirely missing within a group are skipped and stay NA. k is
+# capped at (proteins in the block - 1). Errors propagate so the caller can
+# fall back.
 knn_impute_groupwise <- function(data, group_labels, k, verbose = FALSE) {
   imputed <- data
   for (group in unique(group_labels)) {
@@ -179,12 +191,13 @@ knn_impute_groupwise <- function(data, group_labels, k, verbose = FALSE) {
       stop("KNN needs at least 2 samples in group '", group, "'")
     }
     k_use <- max(1L, min(as.integer(k), nrow(g_mat) - 1L))
-    # impute.knn writes cluster traces straight to stdout. Silence them unless
-    # asked: the MDD simulation imputes hundreds of matrices and would
-    # otherwise flood the console and the Shiny log.
-    # rowmax = 1 keeps every retained protein on the KNN path. At the default
-    # (0.5) a protein observed in under half of the group's samples, e.g. 1 of
-    # 3, is filled with the sample mean, far above where such proteins sit.
+    # rowmax = 1: every retained protein is imputed by KNN. At the default
+    # (0.5) a protein missing in more than half of the group's samples (e.g.
+    # observed in 1 of 3) would get the sample mean instead, far above where
+    # such proteins sit. impute.knn's fixed default rng.seed keeps the result
+    # deterministic.
+    # capture.output(): impute.knn prints cluster traces to stdout, which would
+    # flood the log when the MDD simulation imputes hundreds of matrices.
     knn_out <- NULL
     if (verbose) {
       knn_out <- impute::impute.knn(g_mat, k = k_use, rowmax = 1)$data
@@ -200,17 +213,23 @@ knn_impute_groupwise <- function(data, group_labels, k, verbose = FALSE) {
 
 #' Choose k for KNN imputation by masked-value cross-validation
 #'
-#' k is the number of neighbouring *proteins*, so it is bounded by the number
-#' of proteins, not samples. Its best value depends on the data (Troyanskaya et
-#' al. 2001 found a broad optimum around 10-20 on expression arrays; with only
-#' a few replicates per group the protein-protein distances are noisier).
-#' A fraction of the observed cells is hidden, re-imputed for each candidate k,
-#' and the k with the lowest mean squared reconstruction error is returned.
-#' Masking never leaves a protein with fewer than 2 observed values in a group,
-#' so the held-out cells resemble the ones KNN actually has to fill.
+#' k counts neighbouring *proteins*, so it is bounded by the number of
+#' proteins, not samples, and its best value is data-dependent (Troyanskaya et
+#' al. 2001 found a broad optimum around 10-20 on expression arrays; with few
+#' replicates per group the protein-protein distances are noisier).
 #'
-#' Runs under a fixed seed and restores the caller's RNG state, so the choice
-#' is reproducible and the KNN path stays deterministic.
+#' Procedure: hide `mask_frac` of the observed cells at random, re-impute with
+#' each k in `k_grid`, and take the mean squared error on the hidden cells;
+#' repeat `n_rep` times and return the k with the lowest average MSE (ties:
+#' smallest k). Masks are lifted wherever a protein would keep fewer than 2
+#' unmasked values in a group, so held-out cells resemble the gaps KNN really
+#' has to fill. Cells are hidden uniformly at random, so the score measures
+#' recovery of values missing at random, not of below-detection (MNAR) dropout.
+#'
+#' Candidates above `nrow(data) - 1` are dropped; `default_k` (capped at the
+#' largest candidate) is returned if no MSE could be computed. Runs under a
+#' fixed `seed` and restores the caller's RNG state, so the choice is
+#' reproducible.
 select_knn_k <- function(
   data,
   group_labels,
@@ -270,31 +289,64 @@ select_knn_k <- function(
   }
   k_grid[which.min(mse)]
 }
-# All methods are sample-wise: samples (columns) are the variables and proteins
-# (rows) are the observations. Work is done per sample over thousands of
-# proteins rather than per protein over a few replicates, and every filled
-# value is on the scale of the sample it lands in. What a fill depends on
-# differs by method:
-#   minprob    - the sample's own distribution only; independent of the protein.
-#   knn        - the same sample's values in neighbouring proteins; the
-#                protein's observed replicates decide which proteins those are.
-#   missforest - one forest per sample, with the protein's values in the
-#                group's other samples as predictors.
-#   bpca       - the sample's loadings times the protein's scores, the scores
-#                being estimated from the protein's observed values.
-# So only minprob is independent of the protein's own replicate values.
-#
-# method: "minprob" (fastest, MNAR-aware), "knn" (fast, MAR),
-#         "missforest" (slower, MAR), "bpca" (global Bayesian PCA, not groupwise)
-#
-# minprob, knn and missforest leave a protein's cells NA in any group where
-# that protein has no observed value at all; the caller fills those from
-# N(global min - 1, 0.3) and flags them as imputation-driven. knn and
-# missforest also restrict their model to the group's samples. bpca is global
-# and fills those cells itself from the other groups.
-#
-# knn_k: number of neighbouring proteins for KNN. NULL selects it by masked-value
-# cross-validation (select_knn_k()); the value used is returned as attr "knn_k".
+
+#' Evaluate `expr` under a fixed seed, then restore the caller's RNG state
+#'
+#' `expr` is evaluated in the calling frame, so assignments made inside it
+#' remain visible to the caller. The RNG state (or its absence) is restored on
+#' exit, including when `expr` fails.
+with_local_seed <- function(seed, expr) {
+  has_seed <- exists(".Random.seed", envir = globalenv(), inherits = FALSE)
+  if (has_seed) {
+    old_seed <- get(".Random.seed", envir = globalenv())
+  }
+  on.exit(
+    if (has_seed) {
+      assign(".Random.seed", old_seed, envir = globalenv())
+    } else if (exists(".Random.seed", envir = globalenv(), inherits = FALSE)) {
+      rm(".Random.seed", envir = globalenv())
+    }
+  )
+  set.seed(seed)
+  expr
+}
+
+#' Missing-value imputation of a log2 matrix (proteins x samples)
+#'
+#' Every method is sample-wise: samples (columns) are the variables, proteins
+#' (rows) the observations, and a filled value is on the scale of the sample
+#' it lands in. The methods differ in what else a fill depends on, and in the
+#' kind of missingness they suit:
+#'
+#'   minprob    - random draw from the sample's own left tail; independent of
+#'                the protein's observed values. For MNAR (below detection).
+#'   knn        - mean of the same sample's values in the k most similar
+#'                proteins; similarity is judged on the protein's observed
+#'                replicates within the group. For MAR.
+#'   missforest - one random forest per sample, predicting it from the
+#'                group's other samples. For MAR; slowest.
+#'   bpca       - Bayesian PCA on the whole matrix: the sample's loadings
+#'                times the protein's scores. For MAR.
+#'
+#' Scope: minprob, knn and missforest never fill a protein in a group where
+#' it has no observed value. Those cells are returned NA; the caller fills
+#' them with a global downshift and flags the affected contrasts as
+#' imputation-driven. knn and missforest are also fitted within each group
+#' only, so no information crosses conditions. bpca is global: it fills such
+#' cells from the other groups, and only proteins missing in every sample
+#' stay NA.
+#'
+#' Fallbacks, each with a warning: bpca -> knn -> minprob; missforest ->
+#' minprob for the failing group only.
+#'
+#' Reproducibility: knn is deterministic and missforest runs under a fixed
+#' seed. minprob draws from the caller's RNG stream and no seed is set here:
+#' the caller decides. The main pipeline seeds it (`with_local_seed()`); the
+#' MDD simulation lets it follow the simulation's own stream.
+#'
+#' @param knn_k Number of neighbouring proteins for KNN. NULL selects it with
+#'   `select_knn_k()`; the value used is returned as attribute `"knn_k"`.
+#' @return Matrix shaped like `data`; `data` itself when it has no NAs.
 groupwise_imputation <- function(
   data,
   group_labels,
@@ -302,13 +354,13 @@ groupwise_imputation <- function(
   verbose = TRUE,
   knn_k = NULL
 ) {
-  # If the dataset has zero NAs, don't waste time trying to impute
+  # Nothing to impute.
   if (sum(is.na(data)) == 0) {
     return(data)
   }
 
-  # TRUE for every cell whose protein is entirely missing within that cell's
-  # group. Groupwise methods leave these cells untouched.
+  # TRUE for cells whose protein has no observed value in that cell's group.
+  # Groupwise methods leave these NA.
   group_all_na <- matrix(FALSE, nrow(data), ncol(data))
   for (group in unique(group_labels)) {
     g_cols <- which(group_labels == group)
@@ -316,8 +368,14 @@ groupwise_imputation <- function(
     group_all_na[all_na, g_cols] <- TRUE
   }
 
-  # Sample-wise MinProb: each sample's NAs are drawn from that sample's own
-  # left tail, N(mean - 1.8 SD, 0.3 SD), using the sample's observed values.
+  # Down-shifted normal, per sample: NAs are drawn from a normal with mean
+  # (mean - 1.8 * SD) and standard deviation (0.3 * SD), where mean and SD are
+  # those of the sample's observed values (SD = 0.1 if undefined or zero).
+  # These are the Perseus defaults (down shift 1.8, width 0.3). Despite the
+  # "minprob" label this is not imputeLCMD::impute.MinProb, which centres the
+  # draw on a low quantile of the sample.
+  # Every gap gets a low value whatever the protein's own abundance, which is
+  # appropriate only for left-censored (MNAR) missingness.
   minprob_fill <- function(x, cols) {
     for (j in cols) {
       fill <- which(is.na(x[, j]) & !group_all_na[, j])
@@ -339,19 +397,20 @@ groupwise_imputation <- function(
   }
 
   if (method == "bpca") {
-    # ── Bayesian PCA: GLOBAL (full matrix, not groupwise) ────────────────────
-    # Proteins are observations and samples are variables (as in Oba et al.
-    # 2003): the latent factors describe how samples co-vary, and a missing
-    # value is reconstructed from the protein's scores and the sample's
-    # loadings. Intentionally NOT run per group; running it groupwise would
-    # undercut the factor model. Falls back to KNN if pcaMethods fails.
+    # ── Bayesian PCA (Oba et al. 2003): global, not groupwise ────────────────
+    # Proteins are observations and samples are variables: the latent factors
+    # describe how samples co-vary, and a missing value is rebuilt from the
+    # protein's scores and the sample's loadings, with min(10, samples - 1)
+    # components. Deliberately fitted on the full matrix; per-group fits would
+    # undercut the factor model. Consequence: a group with no observation for
+    # a protein is filled from the other groups. Falls back to KNN on error.
     if (verbose) {
       message("Imputation: Bayesian PCA (sample-wise, global, full matrix)...")
     }
     result <- tryCatch(
       {
-        # Proteins with no observation anywhere carry no information for the
-        # model; leave them NA for the caller's downshift.
+        # Proteins never observed carry no information for the model; they
+        # stay NA for the caller's downshift.
         keep_rows <- rowSums(!is.na(data)) > 0
         n_pcs <- max(1L, min(10L, ncol(data) - 1L))
         pc <- pcaMethods::pca(
@@ -383,18 +442,15 @@ groupwise_imputation <- function(
 
   if (method == "knn") {
     # ── KNN: sample-wise, groupwise ──────────────────────────────────────────
-    # A missing value in sample j is the average of the values that the k most
-    # similar proteins (distance over the group's samples) have in that same
-    # sample j. Running per group prevents cross-condition borrowing. k counts
-    # neighbouring proteins, so it is unrelated to the number of samples; it is
-    # chosen by masked-value cross-validation unless supplied.
-    # Every protein with at least one observed value in the group goes through
-    # KNN (rowmax = 1, see knn_impute_groupwise); one observed only once is
-    # matched on that single sample. Other impute.knn defaults stay in force:
-    # groups with more than 1500 proteins are split by two-means clustering
-    # before the neighbour search (maxp), and a sample missing more than 80% of
-    # its proteins (colmax) is an error, which triggers the MinProb fallback
-    # below.
+    # Algorithm: see knn_impute_groupwise(). Running per group prevents
+    # borrowing across conditions. k is chosen by masked-value
+    # cross-validation unless supplied. Every protein with at least one
+    # observed value in the group is imputed by KNN (rowmax = 1); one observed
+    # only once is matched to its neighbours on that single sample.
+    # impute.knn defaults still in force: blocks of more than 1500 proteins
+    # are split by two-means clustering before the neighbour search (maxp),
+    # and a sample missing more than 80 % of its proteins is an error (colmax),
+    # which triggers the MinProb fallback below.
     result <- tryCatch(
       {
         if (is.null(knn_k)) {
@@ -424,11 +480,11 @@ groupwise_imputation <- function(
     }
   }
   if (method == "minprob") {
-    # ── MinProb: sample-wise Gaussian draw ───────────────────────────────────
-    # Each sample's distribution sets its own detection limit, which is what
-    # MNAR (below-detection) dropout depends on. The draw uses no group
-    # information; groups matter only in that proteins entirely missing in a
-    # group are left NA (see group_all_na).
+    # ── MinProb: sample-wise down-shifted normal (see minprob_fill) ──────────
+    # Each sample's own distribution sets its left tail, standing in for that
+    # sample's detection limit (what MNAR dropout depends on). No group
+    # information enters the draw; groups only decide which cells are left NA
+    # (protein entirely missing in a group, see group_all_na).
     if (verbose) {
       message("Imputation: MinProb (sample-wise) ...")
     }
@@ -441,15 +497,16 @@ groupwise_imputation <- function(
 
   if (method == "missforest") {
     # ── missForest: sample-wise, groupwise ───────────────────────────────────
-    # Proteins are observations and the group's samples are variables, so one
-    # forest per sample predicts its missing values from the other samples in
-    # the same condition.
+    # Proteins are observations and the group's samples are variables: one
+    # forest per sample predicts its missing values from the other samples of
+    # the same condition, iterated with the missForest defaults (100 trees, at
+    # most 10 iterations).
     if (verbose) {
       message("Imputation: missForest (sample-wise, groupwise) ...")
     }
-    # Fixed seed so the forests (and any MinProb fallback) are reproducible.
-    # The caller's RNG state is restored on exit, so callers that draw in a
-    # loop (e.g. the power simulation) are not reset to the same stream.
+    # Fixed seed: reproducible forests (and MinProb fallback draws). The
+    # caller's RNG state is restored on exit, so callers drawing in a loop
+    # (e.g. the power simulation) keep their own stream.
     has_seed <- exists(".Random.seed", envir = globalenv(), inherits = FALSE)
     if (has_seed) {
       old_seed <- get(".Random.seed", envir = globalenv())
@@ -516,28 +573,28 @@ groupwise_imputation <- function(
 
 # ── Sensitivity / minimum detectable difference (MDD) ───────────────────────
 #
-# Two distinct quantities are computed, and they answer different questions:
+# Two quantities that answer different questions:
 #
-#   1. `extract_power_stats()` - a *conditional* (data-dependent) MDD, per
-#      protein. It states how large a log2 fold change would have had to be,
-#      given that protein's posterior variance, to be called at the FDR
-#      criterion actually used. It is a descriptive diagnostic and must NOT be
-#      used as a second significance filter (doing so is the observed-power
-#      fallacy, and is algebraically just a hidden extra cutoff on the
+#   1. `extract_power_stats()`: *conditional* (data-dependent) MDD, per
+#      protein. The |log2FC| that would reach the target power given that
+#      protein's posterior variance and the FDR criterion actually used.
+#      Descriptive only: it must NOT be used as a second significance filter
+#      (observed-power fallacy; algebraically a hidden extra cutoff on the
 #      moderated t statistic).
 #
-#   2. `simulate_pipeline_mdd()` - a *prospective* MDD for the whole pipeline,
-#      obtained by simulating fresh data from the empirical Bayes prior,
-#      spiking in known effects, and running the real design/contrasts through
+#   2. `simulate_pipeline_mdd()`: *prospective* MDD of the whole pipeline.
+#      Fresh data are simulated from the empirical Bayes prior, known effects
+#      are spiked in, and the real design and contrasts are run through
 #      lmFit -> eBayes -> BH. This one is a genuine power statement.
 
 #' Per-test alpha implied by a Benjamini-Hochberg FDR criterion
 #'
-#' Significance is called on BH-adjusted p-values, so the nominal 0.05 of a
-#' classical two-sample power calculation is not the operating threshold. At
-#' the BH boundary the largest rejected raw p-value is `fdr * R / m`, with R
-#' rejections out of m tests. With no rejections the criterion degenerates to
-#' the Bonferroni-like floor `fdr / m`.
+#' Calls are made on BH-adjusted p-values, so the nominal 0.05 of a classical
+#' power calculation is not the operating per-test threshold. With R
+#' rejections among m tests, BH rejects raw p-values up to `fdr * R / m`.
+#' With R = 0 the threshold a first rejection would have to meet, `fdr / m`
+#' (Bonferroni), is returned. Data-dependent: R comes from the observed
+#' p-values.
 bh_effective_alpha <- function(p, fdr = 0.05) {
   p <- p[is.finite(p)]
   m <- length(p)
@@ -550,14 +607,17 @@ bh_effective_alpha <- function(p, fdr = 0.05) {
 
 #' Non-centrality parameter attaining `power` for a two-sided t-test
 #'
-#' Solved from the non-central t distribution rather than a normal
-#' approximation, because moderated denominator degrees of freedom can still be
-#' modest. Results are cached over unique (alpha, df) pairs, since df is
-#' typically constant across proteins.
+#' Solves P(|T| > t_crit) = power for T ~ non-central t(df, ncp), with
+#' t_crit = qt(1 - alpha / 2, df). The non-central t is used rather than a
+#' normal approximation because moderated df can still be modest. The
+#' detectable effect is then ncp * SE. Returns 0 when `power <= alpha`, and NA
+#' for an invalid alpha or when no root lies in [0, t_crit + 20]. Solved once
+#' per unique (alpha, df) pair, since df is typically constant across proteins.
 solve_ncp <- function(alpha, df, power = 0.80) {
   n <- max(length(alpha), length(df))
   alpha <- rep_len(alpha, n)
   # pt(..., ncp = ) is unstable at df = Inf; 1e6 df is numerically equivalent.
+  # df below 1 is raised to 1.
   df <- pmin(pmax(rep_len(df, n), 1), 1e6)
 
   key <- paste(signif(alpha, 10), signif(df, 10))
@@ -593,9 +653,19 @@ solve_ncp <- function(alpha, df, power = 0.80) {
 
 #' Conditional per-protein MDD from a fitted limma contrast model
 #'
+#' Per contrast: MDD = ncp * SE, where SE = sqrt(s2.post) * stdev.unscaled
+#' (the denominator of the moderated t) and ncp comes from `solve_ncp()` at
+#' the BH-implied per-test alpha (`bh_effective_alpha()`, computed over all
+#' proteins of the contrast) and the moderated df. `Above_MDD` marks
+#' |logFC| >= MDD and is descriptive only (see the section note).
+#'
 #' @param contrast_fit An `eBayes()`-processed contrast fit.
 #' @param fdr FDR level used to call significance downstream.
 #' @param target_power Power the MDD is defined at.
+#' @return `topTable()` output (BH-adjusted within each contrast, all
+#'   proteins) for every contrast, stacked, plus `Sigma` (posterior SD), `SE`,
+#'   `df_total`, `alpha_eff`, `Conditional_MDD_Log2FC`, `Above_MDD` and
+#'   `comparison`.
 extract_power_stats <- function(
   contrast_fit,
   fdr = 0.05,
@@ -603,8 +673,9 @@ extract_power_stats <- function(
 ) {
   coef_names <- colnames(contrast_fit$coefficients)
   sigma_post <- sqrt(contrast_fit$s2.post)
-  # Moderated denominator df: eBayes borrows `df.prior` from the prior, so the
-  # classical 2n-2 understates the df that the reported p-values actually use.
+  # Moderated df = residual df + prior df; the residual df alone understates
+  # what the reported p-values use. eBayes additionally caps the total at the
+  # residual df pooled over all proteins; that cap is not applied here.
   df_total <- contrast_fit$df.residual + contrast_fit$df.prior
 
   purrr::map(coef_names, \(coef) {
@@ -619,8 +690,8 @@ extract_power_stats <- function(
 
     alpha_eff <- bh_effective_alpha(tt$P.Value, fdr = fdr)
 
-    # stdev.unscaled already encodes the design, so unbalanced group sizes and
-    # non-pairwise contrasts are handled without reconstructing n per group.
+    # stdev.unscaled encodes the design and the contrast weights, so
+    # unbalanced groups and non-pairwise contrasts need no per-group n.
     se <- sigma_post * contrast_fit$stdev.unscaled[, coef]
 
     tt |>
@@ -644,19 +715,26 @@ extract_power_stats <- function(
 
 #' Estimate an abundance-dependent (MNAR) missingness model from real data
 #'
-#' Proteomics missingness is strongly intensity-dependent: low-abundance
-#' proteins drop out more often. A binomial GLM of missing-value counts on mean
-#' log2 abundance captures that dependence with two parameters, which can then
-#' be replayed onto simulated matrices. Returns NULL for complete data.
+#' Proteomics missingness is intensity-dependent: low-abundance proteins drop
+#' out more often. A logistic regression (binomial GLM) of each protein's
+#' missing / observed cell counts on its mean observed log2 abundance captures
+#' that with two parameters, which can be replayed onto simulated matrices.
+#'
+#' Simplifications: cells are independent with one probability per protein
+#' (no sample or group effect), and proteins with no observed value are left
+#' out of the fit. Returns NULL for complete data or if the GLM fails.
 #'
 #' @param log2_matrix Proteins x samples log2 matrix, NAs = missing.
+#' @return List: `coefficients` (intercept, slope on log2 abundance),
+#'   `overall_rate` (fraction of all cells missing), `abundance_range`.
 estimate_missingness_model <- function(log2_matrix) {
   log2_matrix <- as.matrix(log2_matrix)
   present <- !is.na(log2_matrix)
   n_obs <- rowSums(present)
   n_mis <- rowSums(!present)
-  # Mean of the observed values is the only abundance summary estimable for a
-  # partly missing row; this is the standard MNAR intensity model.
+  # Mean of the observed values: the only abundance summary available for a
+  # partly missing row. It overstates abundance when low values drop out
+  # preferentially.
   abundance <- rowMeans(log2_matrix, na.rm = TRUE)
 
   usable <- is.finite(abundance) & n_obs > 0
@@ -684,10 +762,12 @@ estimate_missingness_model <- function(log2_matrix) {
 
 #' Replay a fitted missingness model onto a complete simulated matrix
 #'
-#' Cells are knocked out independently with a protein-specific probability from
-#' the intensity model. Rows that fall below `min_valid` observations in any
-#' group have values restored at random, mirroring the `min_valid_pct` filter
-#' applied to the real data and keeping the group means estimable.
+#' Each cell is dropped independently with its protein's probability,
+#' plogis(b0 + b1 * row mean of the complete matrix). Drops are then capped
+#' per group so every protein keeps at least `min_valid` values in each
+#' group, mirroring the `min_valid_pct` filter applied to the real data and
+#' keeping the group means estimable. The cap can leave the realised missing
+#' rate below the model's.
 apply_simulated_missingness <- function(
   complete_mat,
   miss_model,
@@ -701,17 +781,18 @@ apply_simulated_missingness <- function(
     miss_model$coefficients[1] + miss_model$coefficients[2] * abundance
   )
 
-  # rep(p, times = n_col) matches the column-major layout, so each cell of row
-  # g is drawn with that row's probability.
+  # rep(p, times = n_col) matches the column-major layout: every cell of a
+  # row is drawn with that row's probability.
   drop <- matrix(
     stats::runif(n_row * n_col) < rep(p_miss, times = n_col),
     nrow = n_row,
     ncol = n_col
   )
-  # Cap the number of drops per row within each group. The drop indicators are
-  # already iid within a row, so keeping the first `cap` of them in column
-  # order is an unbiased way to enforce the cap - and costs one vectorised pass
-  # per column instead of a loop over proteins.
+  # Cap the drops per row within each group at (group size - min_valid) by
+  # keeping only the first `cap` drops in column order: one vectorised pass
+  # per column instead of a loop over proteins. Later samples of a group lose
+  # fewer values as a result, which does not matter here because simulated
+  # replicates within a group are exchangeable.
   for (g in unique(group_labels)) {
     cols <- which(group_labels == g)
     cap <- max(0L, length(cols) - min(min_valid, length(cols)))
@@ -730,23 +811,41 @@ apply_simulated_missingness <- function(
 
 #' Prospective MDD by parametric simulation from the fitted eBayes priors
 #'
-#' Draws protein variances from the scaled inverse chi-squared prior estimated
-#' by `eBayes()` (`sigma^2_g ~ d0 * s0^2 / chisq(d0)`), builds fresh abundance
-#' matrices, spikes in known two-sided fold changes, and pushes them through
-#' the real design and contrast matrix. Power is then measured against the same
-#' BH-FDR criterion used on the real data, so the resulting MDD is a prospective
-#' property of the pipeline rather than a re-description of the observed effects.
+#' Each simulated dataset, per contrast and true log2FC:
 #'
-#' Note the honest caveat: the priors are still estimated from these data, so
-#' this is a design-level sensitivity *given the estimated noise structure*.
-#' What it removes is the observed-power fallacy, not data-dependence per se.
+#'   1. Variances: `sigma^2_g = d0 * s0^2 / chisq(d0)`, the scaled inverse
+#'      chi-squared prior estimated by `eBayes()` (s0^2 per protein under
+#'      `trend`, so the mean-variance trend is kept).
+#'   2. Data: `Amean_g + N(0, sigma^2_g)` in every sample; no group
+#'      differences other than the spiked ones.
+#'   3. Effects: `floor(pi1 * proteins)` random proteins (at least 1) get a
+#'      contrast value of +/- the true log2FC, sign at random.
+#'   4. Optionally, missing values and imputation (`miss_model`).
+#'   5. Test: lmFit -> contrasts.fit -> eBayes(trend) -> BH at `fdr_cutoff`,
+#'      on the real design and contrast matrix.
+#'
+#' Power = spiked proteins called / spiked proteins, averaged over `n_sim`
+#' datasets. The MDD is the log2FC at which power reaches `target_power`,
+#' interpolated linearly on the monotonised power curve.
+#'
+#' Limits. The priors and `Amean` are estimated from the analysed data, so
+#' this is a design-level sensitivity *given the estimated noise structure*:
+#' it removes the observed-power fallacy, not data-dependence. Not simulated:
+#' batch effects and ComBat, normalization, and robust regression (`lmFit`
+#' here is always least squares). Noise is Gaussian and independent across
+#' proteins.
 #'
 #' @param contrast_fit An `eBayes()`-processed contrast fit (supplies priors).
 #' @param design The design matrix used for `lmFit()`.
 #' @param contrast_matrix The contrast matrix used for `contrasts.fit()`.
 #' @param trend Whether `eBayes(trend = )` was used; propagated to the simulation.
 #' @param pi1 Assumed proportion of truly differential proteins.
+#' @param fdr_cutoff BH-FDR level at which simulated proteins are called.
+#' @param target_power Power the MDD is defined at.
+#' @param lfc_grid True log2FC values evaluated ("grid"), or whose range is
+#'   the bracket ("bisect").
 #' @param n_sim Simulation replicates per fold-change grid point.
+#' @param seed Seed set once at the start; NULL leaves the RNG alone.
 #' @param miss_model Optional `estimate_missingness_model()` output. When given,
 #'   values are knocked out of each simulated matrix before fitting, so the
 #'   sensitivity cost of missing data is included.
@@ -765,6 +864,10 @@ apply_simulated_missingness <- function(
 #'   matters more than the curve (as in the replicate sweep).
 #' @param bisect_iter,bisect_tol Iteration cap and log2FC tolerance for "bisect".
 #' @param progress Optional zero-argument callback invoked once per replicate.
+#' @return List: `curve` (per contrast and log2FC: `Power`, its Monte Carlo
+#'   `Power_SE`, mean false discovery proportion `FDP`, `Missing_Rate`), `mdd`
+#'   (per contrast, with a `note` when the target is not bracketed) and
+#'   `settings`.
 simulate_pipeline_mdd <- function(
   contrast_fit,
   design,
@@ -804,17 +907,17 @@ simulate_pipeline_mdd <- function(
     amean <- rep(0, n_proteins)
   }
 
-  # With trend = TRUE, s2.prior is a per-protein function of abundance; keeping
-  # it as a vector preserves the mean-variance trend in the simulated data.
-  # df.prior is a vector only under robust = TRUE, but rep_len covers both.
+  # Under trend = TRUE s2.prior is a per-protein function of abundance;
+  # keeping it as a vector preserves the mean-variance trend. df.prior is a
+  # vector only under robust eBayes; rep_len covers both cases.
   s2_prior <- rep_len(contrast_fit$s2.prior, n_proteins)
   df_prior <- rep_len(contrast_fit$df.prior, n_proteins)
 
   draw_sigma <- function() {
     v <- s2_prior
     estimable <- is.finite(df_prior) & df_prior > 0
-    # As d0 -> Inf the prior collapses to a point mass at s0^2, which is the
-    # correct limit; substituting an arbitrary finite df would fabricate spread.
+    # d0 = Inf: the prior is a point mass at s0^2, so s0^2 is used as is.
+    # Substituting an arbitrary finite df would fabricate spread.
     if (any(estimable)) {
       v[estimable] <- (df_prior[estimable] * s2_prior[estimable]) /
         stats::rchisq(sum(estimable), df = df_prior[estimable])
@@ -827,9 +930,9 @@ simulate_pipeline_mdd <- function(
 
   curve <- purrr::map_dfr(coef_names, function(cf) {
     w <- contrast_matrix[, cf]
-    # Any group-mean vector beta with w'beta = lfc yields the same test
-    # statistic, so this construction generalises past simple pairwise
-    # contrasts while reducing to "shift group A" for A - B.
+    # Group means beta = lfc * w / sum(w^2) give w'beta = lfc, and any beta
+    # with that contrast value yields the same test statistic, so this works
+    # for any contrast. For A - B it is +lfc/2 on A and -lfc/2 on B.
     offset_vec <- as.numeric(design %*% w) / sum(w^2)
     cm <- contrast_matrix[, cf, drop = FALSE]
 
@@ -843,12 +946,12 @@ simulate_pipeline_mdd <- function(
           sim_sd <- draw_sigma()
           de_idx <- sample.int(n_proteins, num_de)
           signed <- numeric(n_proteins)
-          # Two-sided spike-in: real experiments regulate in both directions.
+          # Random sign: real experiments regulate in both directions.
           signed[de_idx] <- true_lfc *
             sample(c(-1, 1), num_de, replace = TRUE)
 
-          # rnorm fills column-major, so the length-n_proteins sd vector is
-          # recycled once per sample column - i.e. row-wise variances.
+          # rnorm fills column-major, so the per-protein SD vector is recycled
+          # down each sample column: one SD per row.
           sim_data <- amean +
             matrix(
               stats::rnorm(n_proteins * n_samples, mean = 0, sd = sim_sd),
@@ -857,9 +960,9 @@ simulate_pipeline_mdd <- function(
             ) +
             outer(signed, offset_vec)
 
-          # Optional missing-data arm: knock out values with the intensity
-          # dependence measured on the real matrix, then run the same
-          # imputation the module applies before fitting.
+          # Optional missing-data arm: knock out values with the abundance
+          # dependence fitted on the real matrix, then impute as the module
+          # does before fitting.
           miss_rate <- 0
           if (!is.null(miss_model)) {
             sim_data <- apply_simulated_missingness(
@@ -870,11 +973,10 @@ simulate_pipeline_mdd <- function(
             )
             miss_rate <- mean(is.na(sim_data))
             if (!is.null(impute_method)) {
-              # Imputers warn about sparse rows on every call. Across hundreds of simulated
-              # matrices that is thousands of identical notes about synthetic
-              # data, so mute them here; the realised NA rate is reported in
-              # `settings` instead. Warnings on the user's real matrix, raised
-              # in the main pipeline, are untouched.
+              # Imputation warnings are muted: across hundreds of synthetic
+              # matrices they only repeat. The realised NA rate is reported in
+              # `settings` instead. Warnings on the real matrix, raised in the
+              # main pipeline, are unaffected.
               sim_data <- suppressWarnings(groupwise_imputation(
                 sim_data,
                 group_labels,
@@ -882,7 +984,8 @@ simulate_pipeline_mdd <- function(
                 verbose = FALSE,
                 knn_k = knn_k
               ))
-              # Mirror the module's downshift for regions imputation left empty.
+              # Same downshift as the module for cells imputation left NA:
+              # normal with mean (matrix min - 1) and SD 0.3.
               still_na <- which(is.na(sim_data))
               if (length(still_na) > 0) {
                 sim_data[still_na] <- stats::rnorm(
@@ -898,10 +1001,10 @@ simulate_pipeline_mdd <- function(
           is_de[de_idx] <- TRUE
 
           cfit <- limma::contrasts.fit(limma::lmFit(sim_data, design), cm)
-          # Missingness can leave a protein unestimable; eBayes(trend = ) also
-          # requires finite sigma and Amean. Drop those rows from the fit but
-          # keep them in the power denominator - a protein that cannot be
-          # tested is a protein that was not detected.
+          # Drop proteins that cannot be tested (NA coefficient, non-finite
+          # sigma or no residual df; under trend also non-finite Amean) before
+          # eBayes. They stay in the power denominator: a spiked protein that
+          # cannot be tested counts as a miss.
           estimable <- is.finite(cfit$sigma) &
             !is.na(cfit$coefficients[, 1]) &
             cfit$df.residual > 0
@@ -919,8 +1022,8 @@ simulate_pipeline_mdd <- function(
 
           c(
             power = sum(called & is_de) / num_de,
-            # Realised false discovery proportion: a sanity check that the BH
-            # machinery behaves as advertised under these priors.
+            # Realised false discovery proportion among the calls (0 when
+            # nothing is called): a check that BH holds its level here.
             fdp = if (sum(called) == 0L) {
               0
             } else {
@@ -946,11 +1049,12 @@ simulate_pipeline_mdd <- function(
       return(purrr::map_dfr(lfc_grid, eval_point))
     }
 
-    # Bisection. Power is monotone in the true effect, so the target crossing
-    # can be bracketed in ~log2(range / tol) evaluations rather than scanning
-    # the whole grid. This matters because simulating missingness makes each
-    # evaluation roughly ten times more expensive: lmFit falls back to a
-    # per-row fit as soon as NAs are present.
+    # Bisection over [min, max] of lfc_grid. Power is monotone in the true
+    # effect, so the target crossing is located in ~log2(range / tol)
+    # evaluations instead of a full grid scan. This matters with simulated
+    # missingness, where lmFit falls back to a much slower per-row fit. If the
+    # bracket does not contain the target power, only its two endpoints are
+    # evaluated and returned.
     lo <- min(lfc_grid)
     hi <- max(lfc_grid)
     visited <- list(eval_point(lo), eval_point(hi))
@@ -979,8 +1083,9 @@ simulate_pipeline_mdd <- function(
     dplyr::group_by(comparison) |>
     dplyr::group_modify(function(d, k) {
       d <- d[order(d$True_LFC), ]
-      # Monte Carlo noise can make the curve locally non-monotone; power is
-      # monotone in the true effect, so enforce it before interpolating.
+      # Monte Carlo noise can make the curve locally non-monotone; true power
+      # is monotone in the effect, so enforce it (cummax) before interpolating
+      # linearly to the target power.
       pw <- cummax(d$Power)
       if (pw[1] >= target_power) {
         return(data.frame(
@@ -1036,10 +1141,11 @@ simulate_pipeline_mdd <- function(
 #' Prospective MDD as a function of replicates per group
 #'
 #' Rebuilds a balanced design at each replicate count and reruns
-#' `simulate_pipeline_mdd()`, holding the variance prior fixed. That prior is a
-#' property of the assay rather than of the sample size, but note it was
-#' estimated at the residual df of the observed design, so the small-n end of
-#' the sweep is somewhat optimistic about how well eBayes would shrink.
+#' `simulate_pipeline_mdd()`. The variance prior used to generate the data
+#' (s0^2, d0) stays at its estimate from the observed design: it is treated
+#' as a known property of the assay, independent of sample size, and its own
+#' estimation uncertainty is not propagated. eBayes is re-run on every
+#' simulated dataset, so shrinkage is re-estimated at each replicate count.
 #'
 #' @param n_grid Replicates per group to evaluate.
 #' @param ... Passed to `simulate_pipeline_mdd()`.
@@ -1052,9 +1158,9 @@ simulate_mdd_by_replicates <- function(
   ...
 ) {
   groups <- colnames(design)
-  # Contrast weights are defined over the groups, not the samples, so they
-  # carry over unchanged to any replicate count. Reusing them (rather than
-  # re-parsing the labels) keeps free-form condition names working.
+  # Contrast weights are defined over groups, not samples, so they apply
+  # unchanged at any replicate count. Reusing them (rather than re-parsing
+  # labels) keeps free-form condition names working.
   contrast_n <- contrast_matrix[groups, , drop = FALSE]
 
   purrr::map_dfr(sort(unique(n_grid)), function(n) {
@@ -1083,13 +1189,12 @@ simulate_mdd_by_replicates <- function(
 
 # ── Free-form condition names in contrasts ──────────────────────────────────
 #
-# Condition names are typed by the user and may contain anything: spaces,
-# operators, regex metacharacters. limma::makeContrasts() parses a contrast as
-# an R expression, so it only accepts syntactic level names. Instead of
-# restricting what can be typed, a contrast is resolved against syntactic
-# aliases (grp_1, grp_2, ...) and the resulting weight matrix is labelled with
-# the user's own names again. Nothing downstream ever sees an alias, and no
-# step recovers a group by pattern-matching a contrast label.
+# Condition names are free text (spaces, operators, regex metacharacters),
+# but limma::makeContrasts() parses a contrast as an R expression and accepts
+# only syntactic level names. A contrast is therefore resolved against
+# syntactic aliases (grp_1, grp_2, ...) and the weight matrix is relabelled
+# with the user's names. Nothing downstream sees an alias, and no step
+# recovers a group by pattern-matching a contrast label.
 
 #' All ordered condition pairs, with the label shown in the contrast selector
 contrast_pair_labels <- function(conditions) {
@@ -1100,8 +1205,8 @@ contrast_pair_labels <- function(conditions) {
     stringsAsFactors = FALSE
   )
   pairs <- pairs[pairs$group_a != pairs$group_b, , drop = FALSE]
-  # " vs " rather than "-": condition names often contain a hyphen, which made
-  # labels such as "KO-1-WT" ambiguous to read and to resolve.
+  # " vs " rather than "-": condition names often contain a hyphen, which
+  # would make a label such as "KO-1-WT" ambiguous.
   pairs$label <- paste0(pairs$group_a, " vs ", pairs$group_b)
   rownames(pairs) <- NULL
   pairs
@@ -1132,9 +1237,10 @@ alias_contrast_expression <- function(expr, aliases) {
 #'
 #' Drop-in replacement for `limma::makeContrasts(contrasts =, levels =)`.
 #' A contrast that is exactly one of the `A vs B` pair labels is resolved by
-#' lookup; anything else (e.g. `(A+B)/2-C`, `A-B`) is treated as an
-#' arithmetic expression over the condition names. Only + - * / and
-#' parentheses are evaluated, so typed text cannot run arbitrary R code.
+#' lookup to weights +1 (A) and -1 (B), so its logFC is A - B. Anything else
+#' (e.g. `(A+B)/2-C`, `A-B`) is evaluated as an arithmetic expression over
+#' the condition names. Only + - * / and parentheses are allowed, so typed
+#' text cannot run arbitrary R code.
 #'
 #' @param contrasts Contrast labels as selected or typed by the user.
 #' @param conditions Condition names; become the row names (design columns).
@@ -1197,7 +1303,8 @@ build_contrast_matrix <- function(contrasts, conditions) {
 
 #' The two groups of each pairwise contrast, read off the contrast weights
 #'
-#' `group_a` / `group_b` are NA for contrasts that are not a plain A - B.
+#' `group_a` has weight +1 and `group_b` weight -1; both are NA for contrasts
+#' that are not a plain A - B.
 contrast_group_table <- function(contrast_matrix) {
   side <- function(value) {
     vapply(
@@ -1223,24 +1330,43 @@ contrast_group_table <- function(contrast_matrix) {
 
 # ── SAM: Significance Analysis of Microarrays (Tusher et al. 2001) ──────────
 #
-# Written here instead of calling the `samr` package: samr only accepts fixed
-# response types (no arbitrary contrast weights), KNN-imputes every missing
-# value on its own, and returns formatted character tables per delta. The
-# algorithm below follows the paper, generalised so that it runs on the same
-# contrast matrix and the same (possibly NA-containing) matrix as limma:
+# Implemented here rather than through the `samr` package, which accepts only
+# fixed response types (no arbitrary contrast weights), KNN-imputes every
+# missing value itself and returns formatted character tables per delta. The
+# algorithm follows the paper, generalised to run on the same contrast matrix
+# and the same (possibly NA-containing) matrix as limma.
+#
+# Statistic for protein i, with w_g the contrast weight of group g, n_g its
+# number of observed values, K the number of groups with non-zero weight and
+# n the sum of their n_g:
 #
 #   d(i) = r(i) / (s(i) + s0)                                        [Eq. 1]
 #   r(i) = sum_g w_g * mean_g(i)             (= mean_I - mean_U for A vs B)
 #   s(i) = sqrt( sum_g(w_g^2 / n_g) * pooled within-group SS / (n - K) )
 #                                            (= Eq. 2 for A vs B)
 #
-# s0 minimises the coefficient of variation of d(i) across s(i) windows; the
-# null distribution comes from permuting the sample labels of the groups in
-# the contrast; a protein is called when |d(i) - dE(i)| exceeds delta, and the
-# FDR of a delta is the number of permuted d beyond the resulting cutoffs
-# over the number of proteins called.
+# Steps (sam_contrast):
+#   1. s0 minimises the coefficient of variation of d(i) across windows of
+#      s(i), so that the spread of d does not depend on s.
+#   2. The sample labels of the groups in the contrast are permuted; the mean
+#      of the sorted permuted d gives the expected order statistics dE(i).
+#   3. A protein is called when |d(i) - dE(i)| exceeds delta.
+#   4. FDR(delta) = permuted d beyond the resulting cutoffs (the estimated
+#      false calls) / proteins called.
+#
+# Differences from limma to keep in mind when comparing results:
+#   - the variance is pooled over the groups in the contrast only, not over
+#     every group of the design;
+#   - s0 is one constant added to every s(i); there is no empirical Bayes
+#     shrinkage of the variances;
+#   - significance comes from label permutations, so it is limited by the
+#     number of distinct labellings when replicates are few.
 
 #' Numerator r and scatter s of the relative difference, for many labellings
+#'
+#' Matrix products evaluate all labellings at once. Missing values are
+#' handled per protein: n_g, the group means and the within-group SS use the
+#' observed values only.
 #'
 #' @param x0 Row-centred matrix (proteins x samples) with NA replaced by 0.
 #' @param x0sq `x0^2`.
@@ -1276,11 +1402,14 @@ sam_stat_components <- function(x0, x0sq, obs, labs, w) {
 
 #' Exchangeability factor s0 (Tusher et al. 2001)
 #'
-#' For each candidate s0 (percentiles of s), d = r / (s + s0) is split into
-#' 100 windows of s, the MAD of d is taken per window, and the candidate with
-#' the smallest coefficient of variation of those MADs wins. With fewer than
-#' 500 proteins the windows are too thin, so the 5th percentile of s is used
-#' (the same fallback as samr).
+#' Candidates are 0 and the 5 %, 10 %, ..., 100 % quantiles of s. For each,
+#' d = r / (s + s0) is split into 100 quantile windows of s and the MAD of d
+#' is taken per window; the candidate with the smallest coefficient of
+#' variation of those MADs wins, i.e. the one that makes the spread of d
+#' least dependent on s. With fewer than 500 proteins the windows are too
+#' thin, so the 5th percentile of s is used (the same fallback as samr).
+#' Proteins with non-finite r or s, or s = 0, are ignored; 0 is returned if
+#' none remain.
 sam_estimate_s0 <- function(r, s, s0_perc = seq(0, 1, by = 0.05)) {
   keep <- is.finite(r) & is.finite(s) & s > 0
   r <- r[keep]
@@ -1309,7 +1438,9 @@ sam_estimate_s0 <- function(r, s, s0_perc = seq(0, 1, by = 0.05)) {
 #' Sample labellings for the SAM null distribution
 #'
 #' Every distinct split is enumerated when a two-group contrast has no more
-#' of them than `n_perm`; otherwise `n_perm` random permutations are drawn.
+#' of them than `n_perm` (the observed labelling is one of them); otherwise
+#' `n_perm` random permutations are drawn independently, so repeats and the
+#' observed labelling can occur.
 #'
 #' With `block`, labels are only shuffled among samples of the same block, so
 #' every labelling keeps the observed number of samples of each group in each
@@ -1387,6 +1518,11 @@ sam_labellings <- function(lab, n_perm, block = NULL) {
 #' @param max_grid Maximum number of delta values the FDR is evaluated at.
 #' @return List: `table` (one row per protein), `delta_table` (delta, cutoffs,
 #'   called, falsely called, FDR) and `summary` (one row describing the run).
+#'   In `table`: `logFC` = r, `SE` = s (without s0), `d`, `d_expected` = dE,
+#'   `P.Value` (pooled permutation p-value), `q.value` (lowest FDR at which
+#'   the protein is called), `sam_delta` (largest delta at which it is still
+#'   called) and `sam_called`. Proteins that cannot be tested (a group with
+#'   no observed value, or no residual df) have NA statistics.
 sam_contrast <- function(
   x,
   groups,
@@ -1418,8 +1554,9 @@ sam_contrast <- function(
   cols <- which(groups %in% names(w))
   lab <- groups[cols]
   xc <- x[, cols, drop = FALSE]
-  # Centring leaves a zero-sum contrast and the within-group SS unchanged and
-  # keeps sum(x^2) - sum(x)^2 / n numerically stable at log2 intensities.
+  # Row-centring changes neither a zero-sum contrast nor the within-group SS,
+  # and keeps sum(x^2) - sum(x)^2 / n numerically stable at log2 intensities.
+  # NAs are then set to 0 and tracked in `obs`.
   xc <- xc - rowMeans(xc, na.rm = TRUE)
   obs <- (!is.na(xc)) * 1
   xc[is.na(xc)] <- 0
@@ -1428,6 +1565,8 @@ sam_contrast <- function(
   observed <- sam_stat_components(xc, xsq, obs, matrix(lab, ncol = 1), w)
   r <- unname(drop(observed$r))
   s <- unname(drop(observed$s))
+  # s0: fixed by the caller, a given quantile of the positive s, or estimated.
+  # Computed once on the observed labelling and reused for every permutation.
   if (is.null(s0)) {
     s_pos <- s[is.finite(s) & s > 0]
     s0 <- if (!is.null(s0_perc) && length(s_pos) > 0) {
@@ -1447,16 +1586,17 @@ sam_contrast <- function(
   blocked <- !is.null(block) && length(unique(block[cols])) > 1
   labs <- sam_labellings(lab, n_perm, if (blocked) block[cols])
   if (blocked && attr(labs, "n_distinct") < 2) {
-    # Block confounded with group: only the observed labelling is balanced.
+    # Block confounded with group: only the observed labelling is balanced,
+    # so fall back to unrestricted permutations.
     blocked <- FALSE
     labs <- sam_labellings(lab, n_perm)
   }
   xt <- xc[tested, , drop = FALSE]
   xt_sq <- xsq[tested, , drop = FALSE]
   obs_t <- obs[tested, , drop = FALSE]
-  # A permutation can leave a protein with missing values untestable, so each
-  # permutation's order statistics are interpolated back to p values (exact
-  # when nothing is missing).
+  # Sorted d of one labelling. A permutation can leave a protein with missing
+  # values untestable, so its order statistics are interpolated back to
+  # length p (exact when nothing is missing).
   order_stats <- function(v) {
     v <- sort(v)
     if (length(v) == p) {
@@ -1473,6 +1613,7 @@ sam_contrast <- function(
   }
   n_lab <- ncol(labs)
   d_perm <- matrix(NA_real_, nrow = p, ncol = n_lab)
+  # Labellings are processed in chunks of about 2e6 cells to bound memory.
   chunk <- max(1L, floor(2e6 / p))
   for (start in seq(1L, n_lab, by = chunk)) {
     jj <- start:min(n_lab, start + chunk - 1L)
@@ -1493,21 +1634,30 @@ sam_contrast <- function(
 
   ord <- order(d[tested])
   d_sorted <- d[tested][ord]
+  # dE(i): mean over labellings of the i-th smallest permuted d.
   d_exp <- rowMeans(d_perm)
 
-  # Permutation p-value, pooled over proteins (two-sided on |d|).
+  # Two-sided permutation p-value against a null pooled over all proteins and
+  # labellings: #{|d*| >= |d(i)|} / (p * labellings), with a floor of one
+  # count. Pooling assumes d has the same null distribution for every protein.
+  # The (1 - 1e-10) factor makes floating-point ties count as >=.
   abs_null <- sort(abs(d_perm))
   n_ge <- length(abs_null) -
     findInterval(abs(d_sorted) * (1 - 1e-10), abs_null, left.open = TRUE)
   p_value <- pmax(n_ge, 1) / length(abs_null)
 
+  # pi0, the share of true nulls, as in samr: observed d inside the
+  # interquartile range of the permuted d, over the 50 % expected there under
+  # the null; capped at 1.
   null_q <- stats::quantile(d_perm, c(0.25, 0.75))
   pi0 <- min(1, sum(d_sorted > null_q[1] & d_sorted < null_q[2]) / (0.5 * p))
 
   # ── Delta: largest threshold at which each protein is still called ───────
-  # Moving away from the origin (dE = 0), the first protein whose distance
-  # from the d = dE line exceeds delta is called together with every protein
-  # beyond it, hence the running maximum.
+  # On each side of dE = 0, moving outwards, SAM calls the first protein
+  # whose distance from the d = dE line exceeds delta and every protein
+  # beyond it. A protein's own threshold is therefore the running maximum of
+  # that distance from the centre out to it. The two sides are handled
+  # separately, so the cutoffs on d need not be symmetric.
   dist <- d_sorted - d_exp
   up <- d_exp >= 0
   delta_i <- numeric(p)
@@ -1518,9 +1668,11 @@ sam_contrast <- function(
     delta_i[!up] <- rev(cummax(rev(-dist[!up])))
   }
 
+  # Deltas at which the FDR is evaluated: every distinct delta_i.
   grid <- sort(unique(delta_i[delta_i >= 0]))
   if (length(grid) > max_grid) {
-    # Keep every delta among the strongest calls, thin out the rest.
+    # Above max_grid values: keep the largest max_grid / 4 deltas (the
+    # strongest calls) in full and thin the rest evenly.
     n_top <- max_grid %/% 4
     n_rest <- length(grid) - n_top
     grid <- grid[unique(c(
@@ -1544,6 +1696,9 @@ sam_contrast <- function(
   cut_lo <- ifelse(n_lo > 0, d_sorted[pmax(n_lo, 1)], -Inf)
   n_called <- n_up + n_lo
 
+  # False calls per labelling and delta: permuted d at or beyond the cutoffs.
+  # Their expectation is the mean over labellings ("tusher") or pi0 times the
+  # median ("samr"); FDR = expected false calls / proteins called, capped at 1.
   false_calls <- matrix(
     unlist(lapply(seq_len(n_used), function(b) {
       (p - findInterval(cut_up, d_perm[, b], left.open = TRUE)) +
@@ -1558,11 +1713,15 @@ sam_contrast <- function(
   }
   fdr_grid <- ifelse(n_called > 0, pmin(1, n_false / n_called), NA_real_)
 
-  # q-value: lowest FDR over all deltas at which the protein is called.
+  # q-value: lowest FDR over all deltas at which the protein is called
+  # (delta <= delta_i).
   q_grid <- cummin(ifelse(is.na(fdr_grid), Inf, fdr_grid))
   k <- findInterval(delta_i, grid)
   q_value <- ifelse(k >= 1, pmin(1, q_grid[pmax(k, 1)]), 1)
 
+  # Automatic: the smallest delta whose FDR is within the target, i.e. the
+  # most calls at that FDR. Manual: the given delta; its FDR is reported but
+  # not controlled.
   if (is.null(delta)) {
     hit <- which(q_grid <= fdr)
     sel <- if (length(hit) > 0) hit[1] else NA_integer_
@@ -1627,7 +1786,9 @@ sam_contrast <- function(
 #' @param contrast_matrix Conditions x contrasts, from `build_contrast_matrix()`.
 #' @param s0_mode `"auto"` (minimise the CV of d), `"percentile"` (the
 #'   `s0_perc` quantile of s) or `"zero"` (ordinary t statistic).
-#' @param seed Seed for the label permutations; `NULL` leaves the RNG alone.
+#' @param seed Seed for the label permutations, set once before the first
+#'   contrast (the global RNG state is not restored); `NULL` leaves the RNG
+#'   alone.
 #' @param ... Passed to `sam_contrast()` (`n_perm`, `block`, `fdr_method`,
 #'   `fdr`, `delta`).
 #' @return List of `results` (long table, one row per protein and contrast,
@@ -1757,7 +1918,7 @@ sam_scatter_plot <- function(lr) {
     )
 }
 
-# compiled version of helper functions
+# Byte-compiled copies of the helpers called by the server.
 compute_cv_mtx_fast <- compiler::cmpfun(compute_cv_mtx)
 groupwise_imputation_fast <- compiler::cmpfun(groupwise_imputation)
 extract_power_stats_fast <- compiler::cmpfun(extract_power_stats)
@@ -1789,9 +1950,8 @@ extract_uniprot_lookup_id <- function(protein_ids) {
 
 #' Format the parameters of a limma run as a block for the session log
 #'
-#' The app's session log (downloaded via "Download Log History") captures
-#' every `message()`, so emitting this block once per successful run makes the
-#' analysis reproducible from the log alone.
+#' The session log ("Download Log History") captures every `message()`, so
+#' emitting this block once per successful run documents the run's settings.
 #'
 #' @param p Named list of run parameters; `NULL` entries are shown as "n/a" and
 #'   vectors are collapsed with ", ".
@@ -1891,11 +2051,10 @@ format_limma_metadata_log <- function(meta, excluded = character(0)) {
 
 # ── clusterProfiler GO enrichment (per-contrast enrichGO) helpers ───────────
 
-# Complete set of Bioconductor OrgDb (org.*) annotation packages that can be
-# used with clusterProfiler::enrichGO(). Each row carries the NCBI taxon ID
-# (also used to select the STRING organism), the OrgDb package name, and a
-# human-readable label shown in the organism dropdown. Extend this table to
-# support additional organisms.
+# Bioconductor OrgDb (org.*) annotation packages offered for
+# clusterProfiler::enrichGO(). Per row: NCBI taxon ID (also selects the STRING
+# organism), OrgDb package, and the label shown in the organism dropdown.
+# Extend this table to support more organisms.
 pwrquant_orgdb_organisms <- data.frame(
   taxon = c(
     "9606",
@@ -1982,8 +2141,8 @@ ensure_orgdb <- function(taxon_id) {
   if (is.na(taxon_id) || !nzchar(taxon_id)) {
     taxon_id <- "9606"
   }
-  # Single-bracket lookup: `[[` on a named vector errors on unknown names
-  # before the informative message below could be raised.
+  # `[` rather than `[[`: an unknown name gives NA instead of an error, so
+  # the informative message below is raised.
   pkg <- unname(pwrquant_orgdb_lookup[taxon_id])
   if (is.na(pkg)) {
     stop(
@@ -2001,8 +2160,8 @@ ensure_orgdb <- function(taxon_id) {
   if (!requireNamespace(pkg, quietly = TRUE)) {
     ok <- tryCatch(
       {
-        # Install from the dated snapshot in proteOmni.lock (set by
-        # bootstrap.R) so the OrgDb version is pinned like everything else.
+        # Install from the dated snapshot in proteOmni.lock (set by bootstrap.R)
+        # when configured, so the OrgDb version is pinned like everything else.
         repos <- getOption("proteOmni.repos")
         if (is.null(repos)) {
           BiocManager::install(pkg, update = FALSE, ask = FALSE)
@@ -2094,19 +2253,16 @@ run_per_contrast_enrichment <- function(
 
 # ── STRINGdb interaction network helpers ────────────────────────────────────
 
-# STRING database version used throughout this module; kept as a single
-# constant so the species-coverage check and the actual STRINGdb$new() call
-# always agree on which version's species list / downloads to use.
+# STRING database version; one constant so the species-coverage check and
+# STRINGdb$new() always use the same version.
 STRING_DB_VERSION <- "12.0"
 
-# In-memory, app-wide (not per-session) cache for STRING's official species
-# list. This is static reference data shared across every user session, so
-# re-downloading it for every network build (or every Shiny session) would
-# be wasteful; it's fetched once per R process and reused thereafter.
+# App-wide (not per-session) cache of STRING's species list: static reference
+# data, fetched once per R process.
 .string_species_cache <- new.env(parent = emptyenv())
 
-# Downloads (and caches) STRING's species list for a given database version.
-# Columns are: taxon_id, STRING_type, STRING_name_compact, official_name_NCBI,
+# Downloads (and caches) STRING's species list for a database version.
+# Columns: taxon_id, STRING_type, STRING_name_compact, official_name_NCBI,
 # domain. Throws on failure so callers can decide how to degrade.
 fetch_string_species_table <- function(version = STRING_DB_VERSION) {
   cache_key <- paste0("v", version)
@@ -2132,17 +2288,14 @@ fetch_string_species_table <- function(version = STRING_DB_VERSION) {
   tbl
 }
 
-# Checks whether a taxon ID is covered by the STRING database for the given
-# version, and (if not) tries to suggest related organisms that ARE covered,
-# by looking up the taxon's scientific name via the UniProt taxonomy API and
-# grep-matching its genus against STRING's species list. Returns:
-#   - NULL if the check itself could not be performed (e.g. offline) — callers
-#     should fall back to attempting the real STRINGdb call in that case,
-#     rather than blocking the user on a secondary network failure.
+# Checks whether a taxon ID is covered by this STRING version. If not, looks
+# up the taxon's scientific name (UniProt taxonomy API) and suggests covered
+# organisms of the same genus. Returns:
+#   - NULL if the check could not be performed (e.g. offline); callers should
+#     then try the real STRINGdb call rather than block the user.
 #   - list(valid = TRUE) if the taxon is covered.
-#   - list(valid = FALSE, taxon_species=, org_name=, suggestions=) otherwise,
-#     where `suggestions` is a data.frame of candidate rows from the species
-#     list (or NULL if none were found).
+#   - list(valid = FALSE, taxon_species=, org_name=, suggestions=) otherwise;
+#     `suggestions` is a data.frame of candidate species rows, or NULL.
 validate_string_species <- function(
   taxon_species,
   version = STRING_DB_VERSION
@@ -2241,12 +2394,10 @@ format_unsupported_species_error <- function(
   )
 }
 
-# Builds (or returns a cached) STRINGdb instance for a given species/score
-# threshold. STRINGdb$new() downloads and caches metadata files to
-# input_directory the first time it's called for a given (version, species,
-# score_threshold) combination, so we point it at tempdir() to avoid polluting
-# the working directory, and let the caller cache the returned object across
-# reactive invocations.
+# Builds a STRINGdb instance for a species and score threshold. STRINGdb$new()
+# downloads its metadata files to input_directory on first use of a (version,
+# species, score_threshold) combination; tempdir() keeps them out of the
+# working directory. The caller caches the returned object.
 build_string_db <- function(
   species,
   score_threshold,
@@ -2260,11 +2411,9 @@ build_string_db <- function(
   )
 }
 
-# Maps a data.frame with a lookup-ID column onto STRING identifiers via
-# STRINGdb$map(). Returns a list with the mapped data.frame (including a
-# STRING_id column) and a character vector of original protein IDs that
-# failed to map, so the caller can surface a coverage diagnostic like the
-# UniProt GO background fetch does.
+# Maps a data.frame with a lookup-ID column to STRING identifiers via
+# STRINGdb$map(). Returns the mapped data.frame (with a STRING_id column) and
+# the protein IDs that failed to map, for a coverage diagnostic.
 map_proteins_to_string <- function(
   string_db,
   protein_df,
@@ -2288,10 +2437,8 @@ map_proteins_to_string <- function(
   )
 }
 
-# Returns a color vector (same length/order as status_vec) so increased /
-# decreased proteins are visually distinguishable on the network plot via
-# STRINGdb's payload/halo mechanism, mirroring the "Regulation" flagging
-# already used for ORA results.
+# Halo colours for the STRING network plot, one per element of status_vec:
+# red = Increased, blue = Decreased, grey = anything else.
 string_halo_colors <- function(status_vec) {
   dplyr::case_when(
     status_vec == "Increased" ~ "#d62728",
@@ -2304,15 +2451,18 @@ string_halo_colors <- function(status_vec) {
 
 #' Hierarchical row clustering for the z-score heatmap
 #'
-#' NAs are replaced by 0 before computing distances. On a row-scaled matrix 0
-#' is that protein's own mean, so a missing sample contributes no apparent
-#' regulation - this mirrors the clustering callback the heatmap already used.
-#' Cluster labels are renumbered in dendrogram order, so cluster 1 is the top
-#' slice of the drawn heatmap and the table reads in the same order as the plot.
+#' Euclidean distance and complete linkage (the `dist()` / `hclust()`
+#' defaults), cut into k clusters. NAs are replaced by 0 before computing
+#' distances: on a row-scaled matrix 0 is the protein's own mean, so a missing
+#' sample contributes no apparent regulation. Cluster labels are renumbered in
+#' dendrogram order, so cluster 1 is the top slice of the drawn heatmap and
+#' the table reads in the same order as the plot. Exploratory: the clusters
+#' are not tested for significance.
 #'
 #' @param mat_z Proteins x samples z-scored matrix.
 #' @param k Requested number of clusters; clamped to [2, nrow - 1].
-#' @return list(hc = hclust, k = integer, cluster = named factor).
+#' @return list(hc = hclust, k = integer, cluster = named factor); NULL with
+#'   fewer than 3 proteins.
 cluster_heatmap_rows <- function(mat_z, k = 4L) {
   mat_z <- as.matrix(mat_z)
   n <- nrow(mat_z)
@@ -2412,9 +2562,8 @@ brewer_max_n <- c(
   Spectral = 11
 )
 
-# Returns a color vector of length n for the selected palette (ggsci, viridis,
-# or RColorBrewer), extending via colorRampPalette when the base palette has
-# fewer colors than requested.
+# n colours from the selected palette (ggsci, viridis or RColorBrewer),
+# interpolated with colorRampPalette when the palette has fewer than n.
 get_palette_colors <- function(pal_name, n) {
   n <- max(n, 1L)
 
@@ -4071,7 +4220,7 @@ PwrQuant_server <- function(id) {
 
     ns <- session$ns
 
-    # Placeholder for spinner IDs
+    # IDs of the spinner overlays
     spin_ids <- c(
       "sp_meta",
       "sp_sparse",
@@ -4094,9 +4243,9 @@ PwrQuant_server <- function(id) {
       "sp_cluster_profile",
       "sp_cluster_ora"
     )
-    # `except` exists because a spinner is only ever lowered by the output it
-    # covers. Changing the sample selection does not re-render the metadata
-    # table, so raising sp_meta then would leave that overlay up for good.
+    # A spinner is lowered only by the output it covers. `except` skips
+    # overlays whose output will not re-render (e.g. sp_meta on a sample
+    # selection change), which would otherwise stay up for good.
     show_spinners <- function(except = character(0)) {
       lapply(setdiff(spin_ids, except), function(s) shinyjs::show(id = s))
     }
@@ -4107,9 +4256,9 @@ PwrQuant_server <- function(id) {
     }
 
     # ── Matrix Ingestion ─────────────────────────────────────────────────────
-    # `raw_matrix_full()` is the matrix exactly as uploaded. Everything
-    # downstream consumes `raw_matrix()`, which is this matrix minus the samples
-    # the user removed in the Metadata tab.
+    # `raw_matrix_full()` is the uploaded matrix (first column = protein IDs,
+    # all other columns = samples). Everything downstream uses `raw_matrix()`:
+    # the same matrix minus the samples removed in the Metadata tab.
     raw_matrix_full <- reactive({
       req(input$matrix_file)
       df <- data.table::fread(
@@ -4118,13 +4267,13 @@ PwrQuant_server <- function(id) {
         quote = ""
       )
 
-      # Drop rows where the first column (representing IDs) is NA
+      # Drop rows without a protein ID.
       df <- df[!is.na(df[[1]]), ]
 
-      # Robustly force the first column as rownames (resolving potential duplicates).
-      # quote = "" above disables fread's quote handling, so IDs from files that
-      # wrap fields in double quotes (e.g. "A0A0C2EJP6") retain the literal quote
-      # characters; strip any such stray leading/trailing quotes before use.
+      # IDs become row names. Duplicated IDs are kept as separate rows and
+      # disambiguated by make.unique() (suffixes .1, .2, ...); they are not
+      # aggregated. quote = "" above disables fread's quote handling, so
+      # literal leading/trailing double quotes are stripped from the IDs.
       df_clean <- df %>%
         dplyr::mutate(dplyr::across(
           1,
@@ -4134,26 +4283,24 @@ PwrQuant_server <- function(id) {
         tibble::column_to_rownames(colnames(df_clean)[1]) %>%
         as.matrix()
 
-      # Ensure all numeric
+      # Coerce to numeric; cells that are not numbers become NA (missing).
       mode(mtx) <- "numeric"
       return(mtx)
     })
 
-    # Spinner overlays are driven by explicit events rather than from inside a
-    # data reactive: a reactive's first evaluation can be triggered by any
-    # consumer, which made the overlays appear (and stay) at unpredictable times.
-    # priority: must run before the output observers it covers, otherwise an
-    # overlay is raised after the render that would have lowered it.
+    # Spinners are raised by explicit events, not from inside a data reactive
+    # (whose first evaluation can be triggered by any consumer, at
+    # unpredictable times). High priority: an overlay must be raised before
+    # the render that lowers it.
     observeEvent(input$matrix_file, show_spinners(), priority = 1000)
 
     # ── Sample removal ───────────────────────────────────────────────────────
-    # The selectize lives in the static UI (not a renderUI). A dynamically
-    # created input registers its value only after the UI round-trip, which
-    # invalidated `raw_matrix()` a second time and re-ran the whole QC pipeline
-    # on every upload - the apparent freeze while loading a matrix.
-    # Held in a reactiveVal that is only written when the *set* changes, so a
-    # selectize round-trip reporting the same (or an empty) selection cannot
-    # invalidate `raw_matrix()` and re-run every QC plot for nothing.
+    # The selectize is in the static UI, not a renderUI: a dynamically created
+    # input registers its value only after a UI round-trip, which would
+    # invalidate `raw_matrix()` again and re-run all QC on every upload.
+    # The selection is held in a reactiveVal written only when the *set*
+    # changes, so a round-trip reporting the same selection invalidates
+    # nothing.
     excluded_samples_rv <- reactiveVal(character(0))
     observeEvent(input$exclude_samples, ignoreNULL = FALSE, {
       sel <- as.character(input$exclude_samples)
@@ -4187,10 +4334,10 @@ PwrQuant_server <- function(id) {
     raw_matrix <- reactive({
       mtx <- raw_matrix_full()
       keep <- !(colnames(mtx) %in% excluded_samples())
-      # Fully qualified: the app attaches jsonlite, whose validate() masks
-      # shiny's and rejects the NULL that need() returns on success. A bare
-      # validate() here throws a hard error, and an unhandled error inside an
-      # observer tears down the session - i.e. the app appears to freeze.
+      # shiny::validate, fully qualified: the app attaches jsonlite, whose
+      # validate() masks shiny's and rejects the NULL that need() returns on
+      # success. That hard error, unhandled in an observer, would tear down
+      # the session.
       shiny::validate(shiny::need(
         sum(keep) >= 2,
         "At least two samples must be kept. Deselect some samples in the Metadata tab."
@@ -4199,10 +4346,16 @@ PwrQuant_server <- function(id) {
     })
 
     # ── Log2 input matrix ────────────────────────────────────────────────────
-    # Single entry point for the log2 decision. Every downstream consumer
-    # (QC plots, limma pipeline, exports, heatmap) takes this reactive rather
-    # than calling log2() itself, so a pre-logged upload is never transformed
-    # twice - which would compress every fold change toward zero.
+    # Single entry point for the log2 decision: every consumer (QC plots,
+    # limma / SAM pipeline, exports, heatmap) takes this reactive, so a
+    # pre-logged upload is never transformed twice (which would compress every
+    # fold change toward zero).
+    # Raw intensities are transformed as log2(x + 1). The pseudo-count keeps
+    # zeros finite: a raw 0 becomes the value 0, not NA, so it counts as an
+    # observed (very low) abundance in the valid-value filter, imputation and
+    # the tests. Only TMM treats it as a non-detect. Upload zeros as NA/empty
+    # cells if they mean "not detected". Matrices flagged as already log2 are
+    # used as they are.
     already_log2 <- reactive(isTRUE(input$already_log2))
 
     log2_input <- reactive({
@@ -4210,9 +4363,9 @@ PwrQuant_server <- function(id) {
       if (already_log2()) mtx else log2(mtx + 1)
     })
 
-    # Heuristic sanity check on the checkbox. Raw MS intensities are typically
-    # >> 100; log2 values essentially never exceed ~40. Mismatches are only
-    # flagged, never auto-corrected - the user knows their data.
+    # Heuristic check of the checkbox: a maximum above 100 looks like raw
+    # intensities, one below 40 like log2 data. Mismatches are flagged, never
+    # auto-corrected.
     observeEvent(
       list(raw_matrix_full(), input$already_log2),
       {
@@ -4245,9 +4398,9 @@ PwrQuant_server <- function(id) {
       ignoreInit = FALSE
     )
 
-    # Replicates per condition among the retained samples. limma needs >= 2 per
-    # group to estimate within-group variance at all, so removal that drops a
-    # condition to a single sample (or wipes it out) has to be surfaced.
+    # Replicates per condition among the retained samples. A condition needs
+    # >= 2 to contribute to the within-group variance, so sample removal that
+    # leaves a condition with one sample (or none) is surfaced.
     condition_replicates <- reactive({
       meta <- meta_edit_df()
       req(nrow(meta) > 0)
@@ -4322,8 +4475,8 @@ PwrQuant_server <- function(id) {
       )
     })
 
-    # Same check as a transient notification, so the warning is seen even when
-    # the user is not looking at the Metadata tab when they change the selection.
+    # Same check as a transient notification, so the warning is seen from
+    # any tab.
     observeEvent(excluded_samples(), ignoreInit = TRUE, {
       thin <- thin_conditions()
       emptied <- emptied_conditions()
@@ -4414,13 +4567,11 @@ PwrQuant_server <- function(id) {
       req(df)
       df[!(df$Sample %in% excluded_samples()), , drop = FALSE]
     })
-    # Cache for the resolved OrgDb annotation object, keyed on the taxon ID, so
-    # re-running enrichment doesn't re-resolve/re-load the org.*.eg.db package
-    # unless the organism actually changed.
+    # Cached OrgDb object, keyed on the taxon ID: reloaded only when the
+    # organism changes.
     go_background_cache <- reactiveVal(NULL)
-    # Cache for the STRINGdb instance, keyed on (species, score_threshold), so
-    # switching contrasts/scope doesn't re-instantiate (and re-download) STRING
-    # metadata unless the organism or score threshold actually changed.
+    # Cached STRINGdb instance, keyed on (species, score_threshold): rebuilt
+    # (and its metadata re-downloaded) only when either changes.
     string_db_cache <- reactiveVal(NULL)
 
     observeEvent(metadata_base(), {
@@ -4526,6 +4677,9 @@ PwrQuant_server <- function(id) {
       meta <- meta_edit_df()
       group_labels <- meta$Condition[match(colnames(raw), meta$Sample)]
 
+      # CV on the linear scale (log2 input back-transformed; includes the +1
+      # pseudo-count for raw uploads), before any filtering, imputation or
+      # normalization.
       log2_matrix <- log2_input()
       cv <- compute_cv_mtx_fast(2^log2_matrix, group_labels) |>
         rownames_to_column("protein") |>
@@ -4542,7 +4696,8 @@ PwrQuant_server <- function(id) {
       group_labels <- meta$Condition[match(colnames(raw), meta$Sample)]
       log2_matrix <- log2_input()
 
-      # For each condition, compute per-protein mean and variance
+      # Per condition: each protein's mean and variance of the log2 values
+      # (NAs dropped; variance is NA with fewer than 2 values).
       mv_list <- lapply(unique(group_labels), function(g) {
         g_cols <- which(group_labels == g)
         g_mat <- log2_matrix[, g_cols, drop = FALSE]
@@ -4559,15 +4714,27 @@ PwrQuant_server <- function(id) {
     })
 
     # ── Master Analytical Engine ─────────────────────────────────────────────
+    # Order of operations on the log2 matrix; each step feeds the next:
+    #   1. groupwise valid-value filter
+    #   2. imputation (limma robust mode, or SAM with imputation) + downshift
+    #   3. ComBat batch correction (more than one batch)
+    #   4. between-sample normalization
+    #   5. design and contrasts
+    #   6. limma (lmFit -> eBayes -> BH) or SAM (permutation FDR)
+    #   7. conditional MDD (limma only)
+    #   8. significance status
+    # Imputation comes before batch correction and normalization: imputed
+    # values are drawn on the un-normalized scale, then corrected and
+    # normalized like observed ones.
     limma_results_ev <- eventReactive(input$run_limma, {
       req(raw_matrix(), meta_edit_df(), input$contrast_pairs)
       # "limma" when the selector is absent (e.g. inputs set programmatically).
       stat_method <- input$stat_method %||% "limma"
       stat_label <- if (stat_method == "sam") "SAM" else "limma"
 
-      # Resolve the contrasts up front. Condition names are free text, so the
-      # groups of a contrast are taken from its weights from here on, never
-      # recovered by matching names inside the contrast label.
+      # Resolve the contrasts up front. Condition names are free text, so from
+      # here on a contrast's groups are read from its weights, never recovered
+      # by matching names inside its label.
       contrast_matrix <- tryCatch(
         build_contrast_matrix(
           input$contrast_pairs,
@@ -4588,8 +4755,9 @@ PwrQuant_server <- function(id) {
       )
       req(contrast_matrix)
 
-      # Refuse to fit a contrast whose groups have no replication left; the
-      # residual df would be zero and every statistic downstream meaningless.
+      # Refuse a contrast involving a condition with fewer than 2 replicates:
+      # that condition contributes nothing to the variance estimate, and with
+      # no replication at all the residual df would be zero.
       thin <- thin_conditions()
       if (nrow(thin) > 0) {
         thin_used <- intersect(
@@ -4631,7 +4799,10 @@ PwrQuant_server <- function(id) {
           log2_matrix <- log2_input()
           n_proteins_input <- nrow(log2_matrix)
 
-          # 1b. Groupwise missing value filter
+          # 1b. Valid-value filter: a protein is kept only if EVERY condition
+          # has at least min_valid_pct % observed values. All conditions of
+          # the analysed samples count, including those in no selected
+          # contrast. 0 disables the filter.
           min_pct <- input$min_valid_pct
           if (!is.null(min_pct) && min_pct > 0) {
             keep_protein <- rep(TRUE, nrow(log2_matrix))
@@ -4645,14 +4816,15 @@ PwrQuant_server <- function(id) {
             log2_matrix <- log2_matrix[keep_protein, , drop = FALSE]
           }
 
-          # 2. Imputation Selection
+          # 2. Imputation (see groupwise_imputation for the methods)
           reg_method <- ifelse(
             identical(input$limma_method, "robust"),
             "robust",
             "ls"
           )
-          # limma imputes in robust mode only; SAM has no regression method, so
-          # imputation is its own choice there.
+          # limma: imputation only in robust mode; least squares is fitted on
+          # the observed values. SAM has no regression method, so imputation
+          # is its own choice there (default: none).
           sam_imputation <- input$sam_imputation %||% "none"
           do_impute <- if (stat_method == "sam") {
             sam_imputation != "none"
@@ -4660,9 +4832,10 @@ PwrQuant_server <- function(id) {
             reg_method == "robust"
           }
 
-          # Groupwise all-NA mask, only meaningful when imputation fills those
-          # cells. Without imputation limma and SAM both work on the observed
-          # values, so there is nothing "imputation-driven" to flag.
+          # Mask of "protein has no observed value in this condition", taken
+          # before imputation and used in step 8 to flag imputation-driven
+          # results. NULL without imputation: limma and SAM then work on the
+          # observed values, so there is nothing to flag.
           group_na_mask <- NULL
           if (do_impute) {
             rn <- rownames(log2_matrix)
@@ -4706,26 +4879,36 @@ PwrQuant_server <- function(id) {
                 imp_labels[imp_method]
               )
             )
-            imputed_matrix <- groupwise_imputation_fast(
-              log2_matrix,
-              group_labels,
-              method = imp_method
-            )
+            # Imputation and downshift share one fixed seed (123), so every
+            # random fill (MinProb draws, downshift draws) is reproducible
+            # for the same matrix, sample order and settings. The session's
+            # RNG state is restored afterwards.
+            with_local_seed(123L, {
+              imputed_matrix <- groupwise_imputation_fast(
+                log2_matrix,
+                group_labels,
+                method = imp_method
+              )
 
-            # Apply downshift for fully missing regions
-            global_min <- min(imputed_matrix, na.rm = TRUE)
-            set.seed(123)
-            imputed_matrix_shifted <- imputed_matrix
-            for (i in seq_len(nrow(imputed_matrix_shifted))) {
-              na_idx <- which(is.na(imputed_matrix_shifted[i, ]))
-              if (length(na_idx) > 0) {
-                imputed_matrix_shifted[i, na_idx] <- rnorm(
-                  length(na_idx),
-                  mean = global_min - 1,
-                  sd = 0.3
-                )
+              # Downshift for the cells imputation left NA (protein
+              # unobserved in a whole condition; with bpca, in every
+              # sample): draws from a normal with mean (global min - 1) and
+              # SD 0.3 in log2 units, the global min being that of the
+              # imputed matrix. Contrasts resting on such cells are flagged
+              # imputation-driven in step 8.
+              global_min <- min(imputed_matrix, na.rm = TRUE)
+              imputed_matrix_shifted <- imputed_matrix
+              for (i in seq_len(nrow(imputed_matrix_shifted))) {
+                na_idx <- which(is.na(imputed_matrix_shifted[i, ]))
+                if (length(na_idx) > 0) {
+                  imputed_matrix_shifted[i, na_idx] <- rnorm(
+                    length(na_idx),
+                    mean = global_min - 1,
+                    sd = 0.3
+                  )
+                }
               }
-            }
+            })
           } else {
             incProgress(
               0.2,
@@ -4734,7 +4917,15 @@ PwrQuant_server <- function(id) {
             imputed_matrix_shifted <- log2_matrix
           }
 
-          # 3. Batch Correction
+          # 3. Batch correction: parametric empirical Bayes ComBat on the
+          # Batch column, only with more than one batch.
+          # mod = NULL: condition is not given as a covariate, so ComBat does
+          # not protect condition differences. If conditions are unevenly
+          # spread over batches, part of the biological effect can be removed
+          # with the batch effect.
+          # The design in step 5 has no batch term, so the residual df of the
+          # tests do not account for the batch parameters estimated here.
+          # On error the uncorrected matrix is used, with a warning.
           n_batches <- length(unique(batch_labels))
           combat_failed <- FALSE
           if (n_batches > 1) {
@@ -4772,7 +4963,17 @@ PwrQuant_server <- function(id) {
           }
           mtx_batch_correct <- as.data.frame(batch_obj)
 
-          # 4. Normalization
+          # 4. Between-sample normalization of the (imputed, batch-corrected)
+          # log2 matrix, via limma::normalizeBetweenArrays:
+          #   "quantile" - identical distribution in every sample;
+          #   "scale"    - equal sample medians (limma::normalizeMedianValues):
+          #                each sample is DIVIDED by its median relative to
+          #                the geometric mean of the medians. On log2 values
+          #                this rescales the log intensities; it is not an
+          #                additive median shift;
+          #   "none"     - matrix unchanged;
+          #   otherwise  - cyclic loess (also the fallback for unknown values).
+          # TMM: see tmm_normalize_log2().
           incProgress(0.5, detail = "Normalizing Arrays")
           norm_meth <- input$norm_method
           if (norm_meth == "quantile") {
@@ -4831,7 +5032,9 @@ PwrQuant_server <- function(id) {
               as.data.frame()
           }
 
-          # 5. Model Matrix & Contrasts
+          # 5. Design and contrasts. Cell-means model ~ 0 + condition: one
+          # coefficient (mean log2 abundance) per condition, no batch or other
+          # covariate. Contrasts are weights over those coefficients.
           incProgress(0.65, detail = "Building Linear Models")
           design_groups <- factor(group_labels)
           design <- model.matrix(~ 0 + design_groups)
@@ -4840,6 +5043,8 @@ PwrQuant_server <- function(id) {
           contrast_matrix <- contrast_matrix[colnames(design), , drop = FALSE]
           clean_contrasts <- colnames(contrast_matrix)
 
+          # Significance thresholds. Invalid inputs fall back to FDR 0.05 and
+          # |log2FC| 0 (no effect-size cutoff).
           sig_fdr <- input$sig_fdr %||% 0.05
           if (!is.numeric(sig_fdr) || is.na(sig_fdr) || sig_fdr <= 0) {
             sig_fdr <- 0.05
@@ -4855,7 +5060,11 @@ PwrQuant_server <- function(id) {
           sam_fit <- NULL
           sam_params <- NULL
           if (stat_method == "sam") {
-            # 6. SAM: relative difference d(i) and permutation FDR per contrast
+            # 6. SAM on the normalized matrix: relative difference d(i) and
+            # permutation FDR per contrast (see run_sam / sam_contrast).
+            # Inputs below their lower bound fall back to the default:
+            # permutations 1000 (minimum 10, capped at 5000), s0 percentile
+            # 5 % (entered in percent), manual delta 1, seed 6143.
             incProgress(0.7, detail = "SAM: permuting sample labels")
             num_or <- function(x, default, lower) {
               if (is.numeric(x) && length(x) == 1 && !is.na(x) && x >= lower) {
@@ -4874,7 +5083,9 @@ PwrQuant_server <- function(id) {
                 num_or(input$sam_delta, 1, 0)
               },
               seed = round(num_or(input$sam_seed, 6143, 1)),
-              # NULL = unrestricted permutations.
+              # Permute within batches when there is more than one batch,
+              # unless switched off; NULL = unrestricted permutations. The
+              # matrix itself was already batch-corrected in step 3.
               block = if (!isFALSE(input$sam_block_batch) && n_batches > 1) {
                 as.character(batch_labels)
               }
@@ -4915,7 +5126,8 @@ PwrQuant_server <- function(id) {
                 duration = 12
               )
             }
-            # Few distinct label splits make the null distribution coarse.
+            # Fewer than 50 usable labellings: the null distribution, and with
+            # it the p-values and FDR, is coarse.
             coarse <- sam_fit$summary[
               sam_fit$summary$n_perm < 50,
               ,
@@ -4934,14 +5146,23 @@ PwrQuant_server <- function(id) {
             }
             power_stats <- sam_fit$results
           } else {
-            # 6. limma Model & eBayes
+            # 6. limma. One linear model per protein: least squares on the
+            # observed values ("ls"), or robust M-estimation, which
+            # down-weights outlying samples ("robust", on the imputed matrix).
+            # eBayes then moderates each protein's variance towards a common
+            # prior; with trend = TRUE the prior follows mean abundance
+            # (limma-trend). eBayes' own robust option is not used. p-values
+            # are BH-adjusted within each contrast (extract_power_stats).
             fit_model <- limma::lmFit(limma_mtx, design, method = reg_method)
             contrast_fit <- limma::contrasts.fit(fit_model, contrast_matrix)
 
             use_trend <- as.logical(input$trend_param)
 
             if (use_trend) {
-              # Exclude unestimatable proteins (NA sigma/Amean) to prevent eBayes trend calculation crashes
+              # eBayes(trend = TRUE) fails on NA sigma or Amean (e.g. no
+              # residual df left after missing values). Those proteins are
+              # dropped here and are absent from the results; their number
+              # goes to the run log as n_trend_excluded.
               valid_idx <- which(
                 !is.na(contrast_fit$sigma) & !is.na(contrast_fit$Amean)
               )
@@ -4951,7 +5172,8 @@ PwrQuant_server <- function(id) {
 
             contrast_fit <- limma::eBayes(contrast_fit, trend = use_trend)
 
-            # 7. Conditional sensitivity (diagnostic; see extract_power_stats)
+            # 7. Conditional MDD at 80 % power: a descriptive diagnostic, not
+            # a filter (see extract_power_stats).
             incProgress(0.8, detail = "Calculating conditional MDD")
             power_stats <- extract_power_stats_fast(
               contrast_fit,
@@ -4960,12 +5182,13 @@ PwrQuant_server <- function(id) {
             )
           }
 
-          # 8. Results Mapping
+          # 8. Significance status
           incProgress(0.9, detail = "Isolating significance mappings")
           limma_results <- power_stats %>%
             left_join(contrast_group_table(contrast_matrix), by = "comparison")
-          # The FDR criterion of each method; the effect-size cutoff and the
-          # imputation rule below are shared.
+          # FDR criterion per method. limma: BH-adjusted p <= sig_fdr. SAM: its
+          # own call (q-value <= sig_fdr, or the manual delta). The
+          # effect-size cutoff and the imputation rule below are shared.
           limma_results$fdr_pass <- if (stat_method == "sam") {
             limma_results$sam_called
           } else {
@@ -4973,8 +5196,11 @@ PwrQuant_server <- function(id) {
           }
 
           if (!is.null(group_na_mask)) {
-            # Proteins x contrasts: TRUE when any group entering the contrast
-            # (non-zero weight) was entirely missing for that protein.
+            # Imputation-driven, proteins x contrasts: TRUE when any condition
+            # with non-zero weight in the contrast had no observed value for
+            # the protein, i.e. one side of the effect is entirely imputed.
+            # Such results keep their statistics but are set to
+            # "Not significant" below.
             driven <- (group_na_mask[,
               rownames(contrast_matrix),
               drop = FALSE
@@ -4992,10 +5218,12 @@ PwrQuant_server <- function(id) {
 
           limma_results <- limma_results %>%
             dplyr::mutate(
-              # Significance = FDR criterion + an explicit, user-set effect-size
-              # cutoff. The conditional MDD is deliberately excluded: gating on it
-              # would impose a second, undisclosed threshold on the same moderated
-              # t statistic rather than adding information.
+              # Increased / Decreased = FDR criterion AND |logFC| >= sig_lfc AND
+              # not imputation-driven. The |logFC| cutoff filters on the point
+              # estimate after testing against zero; it is not a test against
+              # the cutoff (cf. limma::treat). The conditional MDD is
+              # deliberately left out: gating on it would add a second,
+              # undisclosed threshold on the same moderated t statistic.
               status = case_when(
                 imputation_driven %in% TRUE ~ "Not significant",
                 logFC > 0 & fdr_pass & abs(logFC) >= sig_lfc ~
@@ -5013,9 +5241,8 @@ PwrQuant_server <- function(id) {
 
           incProgress(1.0, detail = "Complete.")
 
-          # Record the run's parameters and sample metadata assignment in the
-          # session log (captured by the app-level message handler and included
-          # in "Download Log History").
+          # Write the run's parameters and sample metadata to the session log
+          # (included in "Download Log History").
           grp_n <- table(group_labels)
           message(paste(
             c(
@@ -5179,12 +5406,11 @@ PwrQuant_server <- function(id) {
     })
     outputOptions(output, "stat_method_run", suspendWhenHidden = FALSE)
 
-    # `limma_results_ev()` is lazy: on its own it only runs once a visible
-    # output asks for it, so a press made while no result tab is showing would
-    # go unlogged (and be merged with the next press). Evaluating it here makes
-    # every "Start limma" press run - and log - exactly once. Errors are caught
-    # because an unhandled error in an observer tears down the session; the
-    # reactive caches them, so the outputs still display the same failure.
+    # `limma_results_ev()` is lazy and would run only once a visible output
+    # asks for it. Evaluating it here makes every press of the run button run,
+    # and log, exactly once. Errors are caught because an unhandled error in
+    # an observer tears down the session; the reactive caches them, so the
+    # outputs still show the same failure.
     observeEvent(input$run_limma, {
       tryCatch(
         limma_results_ev(),
@@ -5211,15 +5437,18 @@ PwrQuant_server <- function(id) {
 
     # ── Prospective MDD simulation ─────────────────────────────────────────
 
-    # Intensity-dependent dropout measured once per limma run, then replayed
-    # onto every simulated matrix.
+    # Abundance-dependent dropout, fitted once per run on the filtered log2
+    # matrix (before imputation) and replayed onto every simulated matrix.
     missingness_model <- reactive({
       res <- limma_results_ev()
       req(res$log2_mat)
       estimate_missingness_model(as.matrix(res$log2_mat))
     })
 
-    # Shared arguments for both the single-design run and the replicate sweep.
+    # Arguments shared by the single-design run and the replicate sweep. The
+    # simulation reuses the run's FDR level, trend setting, imputation method
+    # and KNN k. min_valid, the values a simulated protein keeps per group, is
+    # min_valid_pct of the smallest group, rounded up, and at least 2.
     mdd_common_args <- function(res) {
       mm <- if (isTRUE(input$mdd_missing)) missingness_model() else NULL
       if (isTRUE(input$mdd_missing) && is.null(mm)) {
@@ -5329,9 +5558,9 @@ PwrQuant_server <- function(id) {
       ))
 
       args <- mdd_common_args(res)
-      # The sweep only needs the crossing point, not the whole curve, so it
-      # bisects over a wide bracket instead of scanning a grid. That keeps the
-      # cost near-constant per replicate count even with missingness enabled.
+      # The sweep needs only the crossing point, not the curve, so it bisects
+      # over the bracket log2FC 0.05-3 (8 iterations) instead of scanning a
+      # grid: a fixed number of evaluations per replicate count.
       bisect_iter <- 8L
       lfc_grid <- c(0.05, 3.0)
       n_steps <- length(n_grid) *
@@ -5895,6 +6124,9 @@ PwrQuant_server <- function(id) {
     })
 
     # ── PCA & PLS-DA Helper Functions ──────────────────────────────────────
+    # PCA of the samples on proteins without any missing value (complete
+    # cases), each protein centred and scaled to unit variance. Ellipses:
+    # 95 % data ellipses per condition (multivariate t), descriptive only.
     build_pca_plot <- function(mat, meta, cond_cols, disp_names, title) {
       complete_rows <- complete.cases(mat)
       mat_clean <- mat[complete_rows, , drop = FALSE]
@@ -5940,6 +6172,9 @@ PwrQuant_server <- function(id) {
         )
     }
 
+    # PLS-DA (mixOmics, 2 components) on complete-case proteins. Supervised:
+    # the components are chosen to separate the conditions, so the separation
+    # shown is optimistic. No cross-validation or permutation test is run.
     build_plsda_plot <- function(mat, meta, cond_cols, disp_names, title) {
       complete_rows <- complete.cases(mat)
       mat_clean <- mat[complete_rows, , drop = FALSE]
@@ -6473,6 +6708,9 @@ PwrQuant_server <- function(id) {
         function() {
           merged <- adv_corr_data()
 
+          # Spearman rho between the two contrasts' logFC, per class (at
+          # least 3 proteins). The classes come from the significance calls,
+          # so rho within a class is descriptive, not a test.
           rho_classes <- c("Concordant", "Inverse", "Mismatch")
           rho_ann <- do.call(
             rbind,
@@ -6496,10 +6734,8 @@ PwrQuant_server <- function(id) {
             })
           )
 
-          # Position ρ labels using data-relative coordinates so they always sit
-          # INSIDE the panel (the previous Inf/vjust stacking clipped labels).
-          # Anchor at the top-left, left-aligned, stepping down by a fixed
-          # fraction of the y-range for each successive class.
+          # ρ labels in data coordinates so they stay inside the panel:
+          # top-left, left-aligned, one fixed fraction of the y-range apart.
           if (!is.null(rho_ann) && nrow(rho_ann) > 0) {
             x_rng <- range(merged$logFC_x, na.rm = TRUE)
             y_rng <- range(merged$logFC_y, na.rm = TRUE)
@@ -7409,7 +7645,7 @@ PwrQuant_server <- function(id) {
             )
         })
 
-        # 5-9. limma-dependent plots
+        # 5-11. Plots that need a limma / SAM run
         tryCatch(
           {
             res <- limma_results_ev()
@@ -7686,7 +7922,7 @@ PwrQuant_server <- function(id) {
               h = 10
             )
 
-            # 9. Power plot
+            # 9. SAM plot (SAM run) or power plot (limma run)
             if (identical(res$stat_method, "sam")) {
               safe_save(
                 "sam_plot.png",
@@ -7838,9 +8074,7 @@ PwrQuant_server <- function(id) {
                     })
                   )
 
-                  # Position \u03c1 labels using data-relative coordinates so they
-                  # always sit INSIDE the panel (the previous Inf/vjust stacking
-                  # clipped labels), matching the on-screen p_corr plot.
+                  # ρ labels in data coordinates, as in the on-screen plot.
                   if (!is.null(rho_ann_dl) && nrow(rho_ann_dl) > 0) {
                     x_rng_dl <- range(merged$logFC_x, na.rm = TRUE)
                     y_rng_dl <- range(merged$logFC_y, na.rm = TRUE)
@@ -7939,7 +8173,7 @@ PwrQuant_server <- function(id) {
           }
         )
 
-        # 10. GO enrichment plots (enrichGO per contrast): dotplot + Manhattan
+        # 12. GO enrichment plots (enrichGO per contrast): dotplot + Manhattan
         tryCatch(
           {
             res <- ora_results_ev()
@@ -8207,9 +8441,9 @@ PwrQuant_server <- function(id) {
           }
         )
 
-        # GO enrichment of selected clusters. This one is only in the zip if
-        # the user has actually run it; the eventReactive stays unevaluated
-        # otherwise and the tryCatch swallows the resulting silent error.
+        # GO enrichment of selected clusters: in the zip only if it was run.
+        # Otherwise the eventReactive is unevaluated and the tryCatch absorbs
+        # its silent error.
         tryCatch(
           {
             cl_ora <- cluster_ora_top()
@@ -8289,9 +8523,8 @@ PwrQuant_server <- function(id) {
           }
         )
 
-        # Prospective MDD simulation plots. These only exist once the user has
-        # run the (slow) simulations, so a missing result is expected rather
-        # than an error worth surfacing.
+        # Prospective MDD simulation plots: present only once the (slow)
+        # simulations were run, so a missing result is expected, not an error.
         tryCatch(
           {
             sim <- mdd_sim_ev()
@@ -8365,6 +8598,9 @@ PwrQuant_server <- function(id) {
       } else {
         req(raw_matrix())
         mat <- log2_input()
+        # Top-N most variable proteins: variance of the log2 input values
+        # across all samples (NAs dropped), before imputation, batch
+        # correction or normalization.
         top_n <- input$heatmap_top_n %||% 50
         top_n <- min(top_n, nrow(mat))
         row_vars <- apply(mat, 1, var, na.rm = TRUE)
@@ -8372,6 +8608,8 @@ PwrQuant_server <- function(id) {
         mat <- mat[top_idx, , drop = FALSE]
       }
 
+      # Row z-score: each protein centred and scaled by its SD over the
+      # samples shown. Zero-variance proteins (NaN) are set to 0.
       mat_z <- t(scale(t(mat)))
       mat_z[is.nan(mat_z)] <- 0
 
