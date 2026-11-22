@@ -71,9 +71,13 @@ PwrQuantDocs_body_ui <- function(id) {
             tags$h3("What PwrQuant does"),
             tags$p(
               "PwrQuant takes a protein abundance matrix, fits a linear model ",
-              "with ",
-              tags$code("limma"),
-              ", and reports differentially ",
+"with ",
+tags$code("limma"),
+" (or, as an alternative, runs the permutation-based ",
+tags$b("SAM"),
+" procedure \u2014 see the ",
+tags$b("SAM"),
+" tab), and reports differentially ",
               "abundant proteins together with an honest assessment of how ",
               "small an effect the experiment could actually have detected. ",
               "It then layers on functional interpretation (GO over-",
@@ -203,14 +207,23 @@ PwrQuantDocs_body_ui <- function(id) {
                 "."
               ),
               tags$li(
-                tags$b("Press Start limma."),
-                " Everything downstream ",
-                "(enrichment, networks, power) depends on this run."
+                tags$b("Choose the statistics"),
+" (",
+tags$b("limma"),
+" or ",
+tags$b("SAM"),
+") in the sidebar; the controls specific to the chosen method ",
+"appear below the selector."
+),
+tags$li(
+tags$b("Press Start analysis."),
+" Everything downstream ",
+"(enrichment, networks, power) depends on this run."
               ),
               tags$li(
                 tags$b("Press Run MDD simulation"),
-                " to learn what effect size ",
-                "your design can resolve."
+" to learn what effect size ",
+"your design can resolve (limma runs only)."
               )
             ),
 
@@ -235,24 +248,24 @@ PwrQuantDocs_body_ui <- function(id) {
                 ),
                 c(
                   "Differential Abundance",
-                  "MA, volcano, top hits, p-value histograms",
-                  "limma"
+                  "MA, volcano, top hits, p-value histograms; after a SAM run also the SAM plot and its summary",
+"limma / SAM"
                 ),
-                c("Correlation", "Agreement between two contrasts", "limma"),
+                c("Correlation", "Agreement between two contrasts", "limma / SAM"),
                 c(
                   "Power Statistics",
-                  "Prospective MDD, replicate sweep, conditional sensitivity",
-                  "limma (+ MDD run)"
+                  "limma: prospective MDD, replicate sweep, conditional sensitivity. SAM: d(i) vs s(i) and the &Delta; table",
+"limma (+ MDD run) / SAM"
                 ),
                 c(
                   "Enrichment",
                   "GO over-representation per contrast and direction",
-                  "limma + ORA"
+"limma / SAM + ORA"
                 ),
                 c(
                   "Interaction Network",
                   "STRING protein&ndash;protein network",
-                  "limma + STRING"
+"limma / SAM + STRING"
                 ),
                 c(
                   "Selected Proteins",
@@ -260,6 +273,11 @@ PwrQuantDocs_body_ui <- function(id) {
                   "Upload"
                 ),
                 c("UpSet", "Detection overlap between conditions", "Upload"),
+c(
+"Statistics Results Table",
+"Full per-protein results of the run; the columns follow the method (limma or SAM)",
+"limma / SAM"
+),
                 c(
                   "Z-Score Heatmap",
                   "Clustered abundance heatmap, cluster membership table, per-cluster profiles and cluster GO enrichment",
@@ -276,12 +294,23 @@ PwrQuantDocs_body_ui <- function(id) {
           div(
             class = "pq-doc",
             tags$h3("Pipeline order"),
-            tags$p("Pressing ", tags$b("Start limma"), " runs, in this order:"),
+            tags$p("Pressing ", tags$b("Start analysis"), " runs, in this order:"),
             pq_eq(
               "log2(x + 1)*  \u2192  min-valid filter  \u2192  imputation (robust mode only)",
               tags$br(),
               "  \u2192  ComBat  \u2192  normalizeBetweenArrays / TMM  \u2192  lmFit  \u2192  contrasts.fit  \u2192  eBayes"
-            ),
+),
+tags$p(
+"With ",
+tags$b("Statistics = SAM"),
+" the steps up to and including normalization are the same; the ",
+"last three are replaced by the SAM statistic and its label ",
+"permutations, and imputation is governed by SAM's own ",
+tags$b("Missing values"),
+" control instead of the regression method. See the ",
+tags$i("SAM"),
+" tab."
+),
             tags$p(
               tags$small(
                 "* Skipped when ",
@@ -859,6 +888,245 @@ PwrQuantDocs_body_ui <- function(id) {
           )
         ),
 
+        # ── 3b. SAM ─────────────────────────────────────────────────────────
+        tabPanel(
+          "SAM",
+          div(
+            class = "pq-doc",
+            tags$h3("SAM as an alternative to limma"),
+            tags$p(
+              "Setting ",
+              tags$b("Statistics"),
+              " to ",
+              tags$b("SAM"),
+              " replaces the linear model and empirical Bayes step with the ",
+              "Significance Analysis of Microarrays of Tusher, Tibshirani & ",
+              "Chu (2001). Filtering, batch correction and normalization are ",
+              "unchanged. limma derives its p-values from a parametric model ",
+              "of the variances; SAM makes no distributional assumption and ",
+              "estimates the false discovery rate directly from permutations ",
+              "of the sample labels."
+            ),
+            pq_note(
+              "SAM is implemented inside the module rather than through the ",
+              tags$code("samr"),
+              " package, so that it accepts the same contrasts (including ",
+              "typed ones such as ",
+              tags$code("(A+B)/2-C"),
+              ") and the same matrix, missing values included, as limma."
+            ),
+
+            tags$h3("The relative difference"),
+            pq_eq("d(i)  =  r(i)  /  ( s(i) + s\u2080 )"),
+            tags$ul(
+              tags$li(
+                tags$code("r(i)"),
+                " \u2014 the contrast of the group means, i.e. the log2 fold ",
+                "change (identical to limma's ",
+                tags$code("logFC"),
+                ")."
+              ),
+              tags$li(
+                tags$code("s(i)"),
+                " \u2014 the \u201Cgene-specific scatter\u201D: the standard error of ",
+                "r(i) from the pooled within-group variance of the groups in ",
+                "the contrast. Reported as ",
+                tags$code("SE"),
+                "."
+              ),
+              tags$li(
+                tags$code("s\u2080"),
+                " \u2014 a small positive constant. Without it, proteins whose ",
+                "variance is small by chance get huge scores. By default it is ",
+                "the percentile of s(i) that minimises the coefficient of ",
+                "variation of d(i) across 100 windows of s(i); with fewer than ",
+                "500 testable proteins the 5th percentile is used."
+              )
+            ),
+            tags$p(
+              "With missing values and no imputation, each protein uses the ",
+              "values it has. A protein is tested when every group of the ",
+              "contrast has at least one value and at least one residual ",
+              "degree of freedom is left; otherwise its statistics are ",
+              tags$code("NA"),
+              "."
+            ),
+
+            tags$h3("Permutations, \u0394 and the FDR"),
+            tags$ol(
+              tags$li(
+                "The labels of the samples in the contrast are permuted and ",
+                "d is recomputed for every protein, each time."
+              ),
+              tags$li(
+                "Within each permutation the d values are sorted; the average ",
+                "of the i-th largest across permutations is the ",
+                tags$b("expected relative difference"),
+                " dE(i)."
+              ),
+              tags$li(
+                "Proteins are called when their observed d(i) lies further ",
+                "than a threshold ",
+                tags$b("\u0394"),
+                " from the d = dE line (the ",
+                tags$i("SAM plot"),
+                "). The smallest called positive d and the least negative ",
+                "called d become horizontal cutoffs."
+              ),
+              tags$li(
+                "The number of ",
+                tags$b("falsely called"),
+                " proteins is how many permuted d values exceed those ",
+                "cutoffs, summarised over permutations. Divided by the number ",
+                "called, it is the estimated FDR of that \u0394."
+              )
+            ),
+            tags$p(
+              "The ",
+              tags$code("q.value"),
+              " of a protein is the lowest FDR over all \u0394 at which it is ",
+              "called, so calling on ",
+              tags$code("q.value \u2264 FDR"),
+              " is the same as choosing the smallest \u0394 whose FDR meets the ",
+              "target. ",
+              tags$code("P.Value"),
+              " is a permutation p-value pooled over proteins."
+            ),
+
+            tags$h3("Sidebar controls"),
+            pq_table(
+              c("Control", "What it does", "Guidance"),
+              list(
+                c(
+                  "Missing values",
+                  "No imputation, or one of the four imputation methods",
+                  "Start without imputation. Proteins absent from a whole group are then not tested; if you impute, they are flagged <code>imputation_driven</code> and never called"
+                ),
+                c(
+                  "Permutations",
+                  "Number of label permutations (default 1000)",
+                  "When a two-group contrast has fewer distinct splits than this, all of them are enumerated: 20 for 3 vs 3, 70 for 4 vs 4, 252 for 5 vs 5"
+                ),
+                c(
+                  "Balanced permutations (within Batch)",
+                  "Labels are swapped only between samples of the same batch",
+                  "Leave on when batches cross the conditions. See below"
+                ),
+                c(
+                  "Fudge factor s\u2080",
+                  "Automatic, a fixed percentile of s(i), or zero",
+                  "Zero gives the ordinary t-statistic. Check the d(i) vs s(i) plot: the spread of d should not depend on s"
+                ),
+                c(
+                  "FDR estimator",
+                  "&pi;<sub>0</sub> &times; median false calls, or mean false calls",
+                  "The mean without &pi;<sub>0</sub> is the 2001 paper. Prefer the default with few replicates (see caveats)"
+                ),
+                c(
+                  "Threshold &Delta;",
+                  "From the sidebar Significance FDR, or manual",
+                  "Use the &Delta; table on the Power Statistics tab to pick a manual value"
+                ),
+                c(
+                  "Permutation seed",
+                  "Seed of the random permutations",
+                  "Irrelevant when all splits are enumerated"
+                )
+              )
+            ),
+
+            tags$h3("Balanced permutations and the Batch column"),
+            tags$p(
+              "Unrestricted permutations treat all samples as exchangeable. ",
+              "If the samples come from several batches they are not: a ",
+              "permuted group that happens to hold mostly one batch shows a ",
+              "\u201Cdifference\u201D that is only the batch effect, which widens the ",
+              "null distribution and costs power. Tusher et al. met this with ",
+              "two cell lines and used only the 36 of 70 permutations in ",
+              "which each group kept two samples of each cell line."
+            ),
+            tags$p(
+              "With ",
+              tags$b("Balanced permutations (within Batch)"),
+              " ticked and more than one value in the ",
+              tags$code("Batch"),
+              " column, labels are permuted within each batch only, so every ",
+              "permuted group has exactly the batch composition of the real ",
+              "one. The observed d(i) does not change; only the null does."
+            ),
+            pq_warn(
+              tags$b("When it cannot be done."),
+              " If batch and condition are confounded (each batch holds a ",
+              "single condition) no within-batch permutation exists, and if ",
+              "all samples of a contrast share one batch there is nothing to ",
+              "balance. The module then uses unrestricted permutations for ",
+              "that contrast and says so in a notification, the summary table ",
+              "and the session log. Balancing also reduces the number of ",
+              "distinct permutations, e.g. from 20 to 9 for 3 vs 3 with a ",
+              "2 + 1 batch split per group."
+            ),
+
+            tags$h3("Outputs after a SAM run"),
+            pq_table(
+              c("Where", "What"),
+              list(
+                c(
+                  "Differential Abundance",
+                  "The SAM plot (observed vs expected d with the &Delta; band) and a per-contrast summary: s<sub>0</sub>, &pi;<sub>0</sub>, permutations used, &Delta;, cutoffs, proteins called, falsely called and FDR. The volcano plot shows the permutation p-value, because q-values are heavily tied and often exactly zero"
+                ),
+                c(
+                  "Power Statistics",
+                  "d(i) against s(i), and the &Delta; table. The MDD analyses are built on limma's <code>eBayes</code> fit and are not available"
+                ),
+                c(
+                  "Statistics Results Table",
+                  "<code>d</code>, <code>d_expected</code>, <code>SE</code>, <code>s0</code>, <code>P.Value</code>, <code>q.value</code>, <code>sam_delta</code> in place of limma's <code>t</code>, <code>B</code>, <code>adj.P.Val</code> and MDD columns"
+                )
+              )
+            ),
+            tags$p(
+              "Significance is the SAM call plus the same ",
+              tags$b("Minimum |log\u2082FC|"),
+              " cutoff as for limma. The FDR estimate refers to the SAM call ",
+              "before that cutoff."
+            ),
+
+            tags$h3("Caveats"),
+            tags$ul(
+              tags$li(
+                tags$b("Few replicates give a coarse null."),
+                " The module warns when a contrast has fewer than 50 ",
+                "permutations."
+              ),
+              tags$li(
+                tags$b("The original estimator needs many permutations."),
+                " When all splits are enumerated, the true labelling and its ",
+                "mirror image are among them and count every called protein ",
+                "as false. The mean-based FDR can therefore not fall below ",
+                "2 / (number of splits): 10% for 3 vs 3."
+              ),
+              tags$li(
+                tags$b("SAM and limma are not calibrated alike."),
+                " The default estimator multiplies by \u03C0\u2080, the estimated ",
+                "proportion of unchanged proteins, which BH does not. When ",
+                "many proteins change, SAM calls more of them than limma at ",
+                "the same nominal FDR."
+              ),
+              tags$li(
+                tags$b("Not supported:"),
+                " paired designs."
+              )
+            ),
+            tags$p(
+              tags$small(
+                "Tusher VG, Tibshirani R, Chu G (2001). Significance analysis ",
+                "of microarrays applied to the ionizing radiation response. ",
+                "PNAS 98(9): 5116\u20135121."
+              )
+            )
+          )
+        ),
+
         # ── 4. Sensitivity & power ──────────────────────────────────────────
         tabPanel(
           "Sensitivity & power",
@@ -1391,8 +1659,8 @@ PwrQuantDocs_body_ui <- function(id) {
               c("Button", "Produces"),
               list(
                 c(
-                  "Download limma results",
-                  "<code>limma_results_DATE.tsv</code> &mdash; full table including logFC, adj.P.Val, status, Sigma, alpha_eff, df_total and Conditional_MDD_Log2FC"
+                  "Download Statistics Results",
+"<code>limma_results_DATE.tsv</code> &mdash; full table including logFC, adj.P.Val, status, Sigma, alpha_eff, df_total and Conditional_MDD_Log2FC. After a SAM run: <code>sam_results_DATE.tsv</code> with logFC, d, d_expected, SE (= s(i)), s0, P.Value, q.value, sam_delta, sam_called and status"
                 ),
                 c(
                   "Download ORA table",
@@ -1593,7 +1861,7 @@ PwrQuantDocs_body_ui <- function(id) {
                 ),
                 c(
                   "<code>Best_Contrast</code>, <code>Best_logFC</code>, <code>Best_adj_P</code>, <code>Status</code>",
-                  "Only present once limma has been run: the contrast with the <i>smallest</i> adjusted p-value for that protein, and its call"
+                  "Only present once limma or SAM has been run: the contrast with the <i>smallest</i> adjusted p-value (SAM: q-value, reported in the same <code>Best_adj_P</code> column) for that protein, and its call"
                 )
               )
             ),
