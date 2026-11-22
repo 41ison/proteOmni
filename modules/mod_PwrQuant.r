@@ -1221,6 +1221,542 @@ contrast_group_table <- function(contrast_matrix) {
   )
 }
 
+# ── SAM: Significance Analysis of Microarrays (Tusher et al. 2001) ──────────
+#
+# Written here instead of calling the `samr` package: samr only accepts fixed
+# response types (no arbitrary contrast weights), KNN-imputes every missing
+# value on its own, and returns formatted character tables per delta. The
+# algorithm below follows the paper, generalised so that it runs on the same
+# contrast matrix and the same (possibly NA-containing) matrix as limma:
+#
+#   d(i) = r(i) / (s(i) + s0)                                        [Eq. 1]
+#   r(i) = sum_g w_g * mean_g(i)             (= mean_I - mean_U for A vs B)
+#   s(i) = sqrt( sum_g(w_g^2 / n_g) * pooled within-group SS / (n - K) )
+#                                            (= Eq. 2 for A vs B)
+#
+# s0 minimises the coefficient of variation of d(i) across s(i) windows; the
+# null distribution comes from permuting the sample labels of the groups in
+# the contrast; a protein is called when |d(i) - dE(i)| exceeds delta, and the
+# FDR of a delta is the number of permuted d beyond the resulting cutoffs
+# over the number of proteins called.
+
+#' Numerator r and scatter s of the relative difference, for many labellings
+#'
+#' @param x0 Row-centred matrix (proteins x samples) with NA replaced by 0.
+#' @param x0sq `x0^2`.
+#' @param obs 1 where a value was observed, 0 where it was missing.
+#' @param labs Character matrix, samples x labellings, of group labels.
+#' @param w Named non-zero contrast weights (names = group labels).
+#' @return List of `r` and `s`, proteins x labellings; NA where a group has no
+#'   observed value or no residual degree of freedom is left.
+sam_stat_components <- function(x0, x0sq, obs, labs, w) {
+  num <- 0
+  ss <- 0
+  inv_n <- 0
+  n_tot <- 0
+  ok <- TRUE
+  for (g in names(w)) {
+    ind <- (labs == g) * 1
+    n_g <- obs %*% ind
+    sum_g <- x0 %*% ind
+    mean_g <- sum_g / n_g
+    num <- num + w[[g]] * mean_g
+    ss <- ss + (x0sq %*% ind - sum_g * mean_g)
+    inv_n <- inv_n + w[[g]]^2 / n_g
+    n_tot <- n_tot + n_g
+    ok <- ok & n_g >= 1
+  }
+  df <- n_tot - length(w)
+  s <- sqrt(inv_n * pmax(ss, 0) / df)
+  bad <- !ok | df < 1
+  num[bad] <- NA_real_
+  s[bad] <- NA_real_
+  list(r = num, s = s)
+}
+
+#' Exchangeability factor s0 (Tusher et al. 2001)
+#'
+#' For each candidate s0 (percentiles of s), d = r / (s + s0) is split into
+#' 100 windows of s, the MAD of d is taken per window, and the candidate with
+#' the smallest coefficient of variation of those MADs wins. With fewer than
+#' 500 proteins the windows are too thin, so the 5th percentile of s is used
+#' (the same fallback as samr).
+sam_estimate_s0 <- function(r, s, s0_perc = seq(0, 1, by = 0.05)) {
+  keep <- is.finite(r) & is.finite(s) & s > 0
+  r <- r[keep]
+  s <- s[keep]
+  if (length(s) == 0) {
+    return(0)
+  }
+  if (length(s) < 500) {
+    return(unname(stats::quantile(s, 0.05)))
+  }
+  breaks <- unique(stats::quantile(s, seq(0, 1, length.out = 101)))
+  window <- cut(s, breaks, labels = FALSE, include.lowest = TRUE)
+  candidates <- unname(stats::quantile(s, s0_perc))
+  candidates[s0_perc == 0] <- 0
+  cv <- vapply(
+    candidates,
+    function(s0) {
+      mads <- tapply(r / (s + s0), window, stats::mad)
+      stats::sd(mads) / mean(mads)
+    },
+    numeric(1)
+  )
+  candidates[which.min(cv)]
+}
+
+#' Sample labellings for the SAM null distribution
+#'
+#' Every distinct split is enumerated when a two-group contrast has no more
+#' of them than `n_perm`; otherwise `n_perm` random permutations are drawn.
+#'
+#' With `block`, labels are only shuffled among samples of the same block, so
+#' every labelling keeps the observed number of samples of each group in each
+#' block. These are the "balanced" permutations of Tusher et al. (2001), who
+#' kept two samples of each cell line in each permuted group.
+#'
+#' @param lab Group label of each sample.
+#' @param n_perm Number of labellings wanted.
+#' @param block Optional block (e.g. batch) of each sample.
+#' @return Character matrix, samples x labellings, with attributes `complete`
+#'   and `n_distinct` (number of distinct labellings that exist).
+sam_labellings <- function(lab, n_perm, block = NULL) {
+  m <- length(lab)
+  grp <- unique(lab)
+  block <- if (is.null(block)) rep("1", m) else as.character(block)
+  block[is.na(block)] <- "NA"
+  strata <- unname(split(seq_len(m), block))
+  n_distinct <- exp(sum(vapply(
+    strata,
+    function(ix) lfactorial(length(ix)) - sum(lfactorial(table(lab[ix]))),
+    numeric(1)
+  )))
+  if (length(grp) == 2 && n_distinct <= n_perm) {
+    # Per block: every choice of which samples carry the first label.
+    splits <- lapply(strata, function(ix) {
+      k <- sum(lab[ix] == grp[1])
+      choice <- utils::combn(length(ix), k)
+      matrix(ix[choice], nrow = k, ncol = ncol(choice))
+    })
+    pick <- expand.grid(lapply(splits, function(sp) seq_len(ncol(sp))))
+    labs <- matrix(grp[2], nrow = m, ncol = nrow(pick))
+    for (j in seq_len(nrow(pick))) {
+      first <- unlist(Map(function(sp, col) sp[, col], splits, pick[j, ]))
+      labs[first, j] <- grp[1]
+    }
+    complete <- TRUE
+  } else {
+    labs <- vapply(
+      seq_len(n_perm),
+      function(i) {
+        out <- lab
+        for (ix in strata) {
+          out[ix] <- lab[ix][sample.int(length(ix))]
+        }
+        out
+      },
+      character(m)
+    )
+    labs <- matrix(labs, nrow = m)
+    complete <- FALSE
+  }
+  attr(labs, "complete") <- complete
+  attr(labs, "n_distinct") <- n_distinct
+  labs
+}
+
+#' SAM for one contrast
+#'
+#' @param x Numeric matrix, proteins x samples, log2 scale; NAs allowed.
+#' @param groups Group label of each column of `x`.
+#' @param weights Named contrast weights over the groups (must sum to zero).
+#'   Only samples of groups with a non-zero weight are used and permuted.
+#' @param n_perm Number of label permutations.
+#' @param block Optional block (e.g. batch) of each column of `x`. Labels are
+#'   then permuted within blocks only. Ignored, with `blocked = FALSE` in the
+#'   summary, when the samples of the contrast share one block or when block
+#'   and group are confounded so that no within-block permutation exists.
+#' @param s0 Fixed exchangeability factor; `NULL` estimates it (see
+#'   `sam_estimate_s0()`), or takes the `s0_perc` quantile of s when given.
+#' @param fdr_method `"samr"`: pi0 x median number of falsely called proteins
+#'   (the estimator of the later SAM software). `"tusher"`: mean number of
+#'   falsely called proteins, no pi0, exactly as in the 2001 paper.
+#' @param fdr Target FDR used to pick delta when `delta` is `NULL`.
+#' @param delta Manual threshold on |d - dE|; overrides `fdr`.
+#' @param max_grid Maximum number of delta values the FDR is evaluated at.
+#' @return List: `table` (one row per protein), `delta_table` (delta, cutoffs,
+#'   called, falsely called, FDR) and `summary` (one row describing the run).
+sam_contrast <- function(
+  x,
+  groups,
+  weights,
+  n_perm = 1000,
+  block = NULL,
+  s0 = NULL,
+  s0_perc = NULL,
+  fdr_method = c("samr", "tusher"),
+  fdr = 0.05,
+  delta = NULL,
+  max_grid = 2000
+) {
+  fdr_method <- match.arg(fdr_method)
+  x <- as.matrix(x)
+  groups <- as.character(groups)
+  w <- weights[weights != 0]
+  if (length(w) < 2 || abs(sum(w)) > 1e-8) {
+    stop(
+      "SAM needs a contrast between groups (weights summing to zero).",
+      call. = FALSE
+    )
+  }
+  ids <- rownames(x)
+  if (is.null(ids)) {
+    ids <- as.character(seq_len(nrow(x)))
+  }
+
+  cols <- which(groups %in% names(w))
+  lab <- groups[cols]
+  xc <- x[, cols, drop = FALSE]
+  # Centring leaves a zero-sum contrast and the within-group SS unchanged and
+  # keeps sum(x^2) - sum(x)^2 / n numerically stable at log2 intensities.
+  xc <- xc - rowMeans(xc, na.rm = TRUE)
+  obs <- (!is.na(xc)) * 1
+  xc[is.na(xc)] <- 0
+  xsq <- xc^2
+
+  observed <- sam_stat_components(xc, xsq, obs, matrix(lab, ncol = 1), w)
+  r <- unname(drop(observed$r))
+  s <- unname(drop(observed$s))
+  if (is.null(s0)) {
+    s_pos <- s[is.finite(s) & s > 0]
+    s0 <- if (!is.null(s0_perc) && length(s_pos) > 0) {
+      unname(stats::quantile(s_pos, s0_perc))
+    } else {
+      sam_estimate_s0(r, s)
+    }
+  }
+  d <- r / (s + s0)
+  tested <- is.finite(d)
+  p <- sum(tested)
+  if (p < 2) {
+    stop("SAM: fewer than two proteins could be tested.", call. = FALSE)
+  }
+
+  # ── Null distribution: order statistics of d under permuted labels ───────
+  blocked <- !is.null(block) && length(unique(block[cols])) > 1
+  labs <- sam_labellings(lab, n_perm, if (blocked) block[cols])
+  if (blocked && attr(labs, "n_distinct") < 2) {
+    # Block confounded with group: only the observed labelling is balanced.
+    blocked <- FALSE
+    labs <- sam_labellings(lab, n_perm)
+  }
+  xt <- xc[tested, , drop = FALSE]
+  xt_sq <- xsq[tested, , drop = FALSE]
+  obs_t <- obs[tested, , drop = FALSE]
+  # A permutation can leave a protein with missing values untestable, so each
+  # permutation's order statistics are interpolated back to p values (exact
+  # when nothing is missing).
+  order_stats <- function(v) {
+    v <- sort(v)
+    if (length(v) == p) {
+      v
+    } else if (length(v) >= 2) {
+      stats::approx(
+        seq(0, 1, length.out = length(v)),
+        v,
+        xout = seq(0, 1, length.out = p)
+      )$y
+    } else {
+      rep(NA_real_, p)
+    }
+  }
+  n_lab <- ncol(labs)
+  d_perm <- matrix(NA_real_, nrow = p, ncol = n_lab)
+  chunk <- max(1L, floor(2e6 / p))
+  for (start in seq(1L, n_lab, by = chunk)) {
+    jj <- start:min(n_lab, start + chunk - 1L)
+    perm <- sam_stat_components(xt, xt_sq, obs_t, labs[, jj, drop = FALSE], w)
+    dp <- perm$r / (perm$s + s0)
+    dp[!is.finite(dp)] <- NA_real_
+    d_perm[, jj] <- vapply(
+      seq_along(jj),
+      function(k) order_stats(dp[, k]),
+      numeric(p)
+    )
+  }
+  d_perm <- d_perm[, !is.na(d_perm[1, ]), drop = FALSE]
+  n_used <- ncol(d_perm)
+  if (n_used < 2) {
+    stop("SAM: too few usable permutations.", call. = FALSE)
+  }
+
+  ord <- order(d[tested])
+  d_sorted <- d[tested][ord]
+  d_exp <- rowMeans(d_perm)
+
+  # Permutation p-value, pooled over proteins (two-sided on |d|).
+  abs_null <- sort(abs(d_perm))
+  n_ge <- length(abs_null) -
+    findInterval(abs(d_sorted) * (1 - 1e-10), abs_null, left.open = TRUE)
+  p_value <- pmax(n_ge, 1) / length(abs_null)
+
+  null_q <- stats::quantile(d_perm, c(0.25, 0.75))
+  pi0 <- min(1, sum(d_sorted > null_q[1] & d_sorted < null_q[2]) / (0.5 * p))
+
+  # ── Delta: largest threshold at which each protein is still called ───────
+  # Moving away from the origin (dE = 0), the first protein whose distance
+  # from the d = dE line exceeds delta is called together with every protein
+  # beyond it, hence the running maximum.
+  dist <- d_sorted - d_exp
+  up <- d_exp >= 0
+  delta_i <- numeric(p)
+  if (any(up)) {
+    delta_i[up] <- cummax(dist[up])
+  }
+  if (any(!up)) {
+    delta_i[!up] <- rev(cummax(rev(-dist[!up])))
+  }
+
+  grid <- sort(unique(delta_i[delta_i >= 0]))
+  if (length(grid) > max_grid) {
+    # Keep every delta among the strongest calls, thin out the rest.
+    n_top <- max_grid %/% 4
+    n_rest <- length(grid) - n_top
+    grid <- grid[unique(c(
+      round(seq(1, n_rest, length.out = max_grid - n_top)),
+      (n_rest + 1):length(grid)
+    ))]
+  }
+  if (!is.null(delta)) {
+    grid <- sort(unique(c(grid, delta)))
+  }
+  if (length(grid) == 0) {
+    grid <- 0
+  }
+
+  delta_up <- delta_i[up]
+  delta_lo <- rev(delta_i[!up])
+  n_up <- length(delta_up) - findInterval(grid, delta_up, left.open = TRUE)
+  n_lo <- length(delta_lo) - findInterval(grid, delta_lo, left.open = TRUE)
+  # Horizontal cutoffs: smallest d called up, least negative d called down.
+  cut_up <- ifelse(n_up > 0, d_sorted[pmin(p - n_up + 1, p)], Inf)
+  cut_lo <- ifelse(n_lo > 0, d_sorted[pmax(n_lo, 1)], -Inf)
+  n_called <- n_up + n_lo
+
+  false_calls <- matrix(
+    unlist(lapply(seq_len(n_used), function(b) {
+      (p - findInterval(cut_up, d_perm[, b], left.open = TRUE)) +
+        findInterval(cut_lo, d_perm[, b])
+    })),
+    nrow = length(grid)
+  )
+  n_false <- if (fdr_method == "tusher") {
+    rowMeans(false_calls)
+  } else {
+    pi0 * apply(false_calls, 1, stats::median)
+  }
+  fdr_grid <- ifelse(n_called > 0, pmin(1, n_false / n_called), NA_real_)
+
+  # q-value: lowest FDR over all deltas at which the protein is called.
+  q_grid <- cummin(ifelse(is.na(fdr_grid), Inf, fdr_grid))
+  k <- findInterval(delta_i, grid)
+  q_value <- ifelse(k >= 1, pmin(1, q_grid[pmax(k, 1)]), 1)
+
+  if (is.null(delta)) {
+    hit <- which(q_grid <= fdr)
+    sel <- if (length(hit) > 0) hit[1] else NA_integer_
+    called <- q_value <= fdr
+  } else {
+    sel <- match(delta, grid)
+    called <- delta_i >= delta
+  }
+
+  unsort <- function(v) {
+    out <- rep(NA, length(d))
+    out[which(tested)[ord]] <- v
+    out
+  }
+  delta_table <- data.frame(
+    delta = grid,
+    cut_up = cut_up,
+    cut_down = cut_lo,
+    n_called = n_called,
+    n_false = n_false,
+    FDR = fdr_grid
+  )
+  list(
+    table = data.frame(
+      Protein = ids,
+      logFC = r,
+      AveExpr = unname(rowMeans(x, na.rm = TRUE)),
+      d = d,
+      d_expected = unsort(d_exp),
+      SE = s,
+      s0 = s0,
+      P.Value = unsort(p_value),
+      q.value = unsort(q_value),
+      sam_delta = unsort(delta_i),
+      sam_called = unsort(called),
+      stringsAsFactors = FALSE
+    ),
+    delta_table = delta_table,
+    summary = data.frame(
+      s0 = s0,
+      pi0 = pi0,
+      n_tested = p,
+      n_perm = n_used,
+      complete_enumeration = isTRUE(attr(labs, "complete")),
+      n_distinct_labellings = attr(labs, "n_distinct"),
+      blocked = blocked,
+      fdr_method = fdr_method,
+      delta = if (is.na(sel)) NA_real_ else grid[sel],
+      cut_up = if (is.na(sel)) NA_real_ else cut_up[sel],
+      cut_down = if (is.na(sel)) NA_real_ else cut_lo[sel],
+      n_called = if (is.na(sel)) 0 else n_called[sel],
+      n_false = if (is.na(sel)) NA_real_ else n_false[sel],
+      FDR = if (is.na(sel)) NA_real_ else fdr_grid[sel]
+    )
+  )
+}
+
+#' SAM for every column of a contrast matrix
+#'
+#' @param mat Proteins x samples matrix (log2), as passed to `lmFit()`.
+#' @param group_labels Condition of each column of `mat`.
+#' @param contrast_matrix Conditions x contrasts, from `build_contrast_matrix()`.
+#' @param s0_mode `"auto"` (minimise the CV of d), `"percentile"` (the
+#'   `s0_perc` quantile of s) or `"zero"` (ordinary t statistic).
+#' @param seed Seed for the label permutations; `NULL` leaves the RNG alone.
+#' @param ... Passed to `sam_contrast()` (`n_perm`, `block`, `fdr_method`,
+#'   `fdr`, `delta`).
+#' @return List of `results` (long table, one row per protein and contrast,
+#'   in the layout of the limma results), `summary` and `delta_table`.
+run_sam <- function(
+  mat,
+  group_labels,
+  contrast_matrix,
+  s0_mode = c("auto", "percentile", "zero"),
+  s0_perc = 0.05,
+  seed = NULL,
+  ...
+) {
+  s0_mode <- match.arg(s0_mode)
+  if (!is.null(seed)) {
+    set.seed(seed)
+  }
+  fits <- lapply(colnames(contrast_matrix), function(cf) {
+    fit <- sam_contrast(
+      mat,
+      group_labels,
+      contrast_matrix[, cf],
+      s0 = if (s0_mode == "zero") 0 else NULL,
+      s0_perc = if (s0_mode == "percentile") s0_perc else NULL,
+      ...
+    )
+    lapply(fit, function(part) cbind(part, comparison = cf))
+  })
+  bind <- function(part) {
+    out <- do.call(rbind, lapply(fits, `[[`, part))
+    rownames(out) <- NULL
+    out
+  }
+  list(
+    results = tibble::as_tibble(bind("table")),
+    summary = bind("summary"),
+    delta_table = bind("delta_table")
+  )
+}
+
+#' Columns whose role differs between the limma and the SAM result tables
+#'
+#' Downstream tables and plots ask this instead of hard-coding limma names.
+stat_result_columns <- function(lr) {
+  if ("q.value" %in% names(lr)) {
+    list(
+      method = "sam",
+      label = "SAM",
+      score = "d",
+      fdr = "q.value",
+      volcano_y = "P.Value",
+      volcano_lab = "(permutation p-value)"
+    )
+  } else {
+    list(
+      method = "limma",
+      label = "limma",
+      score = "t",
+      fdr = "adj.P.Val",
+      volcano_y = "adj.P.Val",
+      volcano_lab = "(adj. p-value)"
+    )
+  }
+}
+
+sam_status_colors <- c(
+  "Decreased" = "steelblue",
+  "Not significant" = "grey60",
+  "Increased" = "firebrick"
+)
+
+#' SAM plot: observed vs expected relative difference, with the delta band
+sam_qq_plot <- function(lr, sam_summary) {
+  lr <- lr[!is.na(lr$d) & !is.na(lr$d_expected), , drop = FALSE]
+  band <- sam_summary[is.finite(sam_summary$delta), , drop = FALSE]
+  band <- rbind(
+    data.frame(comparison = band$comparison, intercept = band$delta),
+    data.frame(comparison = band$comparison, intercept = -band$delta)
+  )
+  ggplot(lr, aes(x = d_expected, y = d)) +
+    geom_point(aes(color = status), alpha = 0.4) +
+    geom_abline(slope = 1, intercept = 0) +
+    geom_abline(
+      data = band,
+      aes(slope = 1, intercept = intercept),
+      linetype = "dashed",
+      color = "grey40"
+    ) +
+    scale_color_manual(values = sam_status_colors) +
+    guides(color = guide_legend(override.aes = list(alpha = 1, size = 3))) +
+    facet_wrap(~comparison, scales = "free", ncol = 2) +
+    theme_bw() +
+    labs(
+      x = "Expected relative difference dE(i)",
+      y = "Observed relative difference d(i)"
+    ) +
+    theme(
+      text = element_text(size = 16),
+      strip.text = element_text(face = "bold"),
+      strip.background = element_blank(),
+      legend.position = "bottom",
+      legend.title = element_blank(),
+      axis.title = element_text(face = "bold", color = "black"),
+      axis.text = element_text(face = "bold", color = "black")
+    )
+}
+
+#' Relative difference d(i) against the gene-specific scatter s(i)
+sam_scatter_plot <- function(lr) {
+  lr <- lr[!is.na(lr$d), , drop = FALSE]
+  ggplot(lr, aes(x = SE, y = d)) +
+    geom_point(aes(color = status), alpha = 0.4) +
+    geom_hline(yintercept = 0, color = "grey40") +
+    scale_color_manual(values = sam_status_colors) +
+    guides(color = guide_legend(override.aes = list(alpha = 1, size = 3))) +
+    facet_wrap(~comparison, scales = "free", ncol = 2) +
+    theme_bw() +
+    labs(x = "Gene-specific scatter s(i)", y = "Relative difference d(i)") +
+    theme(
+      text = element_text(size = 16),
+      strip.text = element_text(face = "bold"),
+      strip.background = element_blank(),
+      legend.position = "bottom",
+      legend.title = element_blank(),
+      axis.title = element_text(face = "bold", color = "black"),
+      axis.text = element_text(face = "bold", color = "black")
+    )
+}
+
 # compiled version of helper functions
 compute_cv_mtx_fast <- compiler::cmpfun(compute_cv_mtx)
 groupwise_imputation_fast <- compiler::cmpfun(groupwise_imputation)
@@ -1260,7 +1796,7 @@ extract_uniprot_lookup_id <- function(protein_ids) {
 #' @param p Named list of run parameters; `NULL` entries are shown as "n/a" and
 #'   vectors are collapsed with ", ".
 #' @return Character vector of log lines.
-format_limma_params_log <- function(p) {
+format_limma_params_log <- function(p, method = "limma") {
   fmt <- function(x) {
     if (is.null(x) || length(x) == 0) {
       return("n/a")
@@ -1286,6 +1822,15 @@ format_limma_params_log <- function(p) {
     ebayes_trend = "eBayes trend",
     n_trend_excluded = "Proteins excluded (unestimable, trend fit)",
     p_adjust = "P-value adjustment",
+    sam_permutations = "SAM permutations (requested)",
+    sam_permutations_used = "SAM permutations used per contrast",
+    sam_permutation_scheme = "SAM permutation scheme per contrast",
+    sam_s0_mode = "SAM s0 selection",
+    sam_s0 = "SAM s0 per contrast",
+    sam_pi0 = "SAM pi0 per contrast",
+    sam_fdr_method = "SAM FDR estimator",
+    sam_delta = "SAM delta per contrast",
+    sam_seed = "SAM permutation seed",
     sig_fdr = "Significance FDR",
     sig_lfc = "Minimum |log2FC|",
     mdd_target_power = "Conditional MDD target power",
@@ -1293,15 +1838,16 @@ format_limma_params_log <- function(p) {
   )
   keys <- intersect(names(labels), names(p))
   width <- max(nchar(labels[keys]))
+  header <- sprintf("=== PwrQuant %s parameters ===", method)
   c(
-    "=== PwrQuant limma parameters ===",
+    header,
     sprintf(
       "  %-*s : %s",
       width,
       labels[keys],
       vapply(p[keys], fmt, character(1))
     ),
-    "================================="
+    strrep("=", nchar(header))
   )
 }
 
@@ -1973,7 +2519,16 @@ PwrQuant_sidebar_ui <- function(id) {
       tags$hr(style = "border-color:#2d3741;margin:4px 0;"),
       tags$div(
         style = "padding:12px 16px 4px;color:#adb5bd;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:1px;",
-        "Limma Analysis"
+        "Differential Analysis"
+      ),
+      selectInput(
+        ns("stat_method"),
+        "Statistics",
+        choices = c(
+          "limma \u2014 moderated t (empirical Bayes)" = "limma",
+          "SAM \u2014 permutation FDR (Tusher 2001)" = "sam"
+        ),
+        selected = "limma"
       ),
       selectInput(
         ns("norm_method"),
@@ -1987,31 +2542,133 @@ PwrQuant_sidebar_ui <- function(id) {
         ),
         selected = "cyclicloess"
       ),
-      selectInput(
-        ns("limma_method"),
-        "Limma Regression Method",
-        choices = c("ls", "robust"),
-        selected = "ls"
-      ),
+      # ── limma-specific controls ──
       conditionalPanel(
-        condition = sprintf("input['%s'] == 'robust'", ns("limma_method")),
+        condition = sprintf("input['%s'] == 'limma'", ns("stat_method")),
         selectInput(
-          ns("imputation_method"),
-          "Imputation Method (robust mode only)",
+          ns("limma_method"),
+          "Limma Regression Method",
+          choices = c("ls", "robust"),
+          selected = "ls"
+        ),
+        conditionalPanel(
+          condition = sprintf("input['%s'] == 'robust'", ns("limma_method")),
+          selectInput(
+            ns("imputation_method"),
+            "Imputation Method (robust mode only)",
+            choices = c(
+              "MinProb — fastest, MNAR-aware" = "minprob",
+              "KNN — fast, MAR-appropriate" = "knn",
+              "missForest — accurate, slower" = "missforest",
+              "Bayesian PCA — global latent-factor model" = "bpca"
+            ),
+            selected = "minprob"
+          )
+        ),
+        selectInput(
+          ns("trend_param"),
+          "eBayes Trend",
+          choices = c("TRUE", "FALSE"),
+          selected = "TRUE"
+        )
+      ),
+      # ── SAM-specific controls ──
+      conditionalPanel(
+        condition = sprintf("input['%s'] == 'sam'", ns("stat_method")),
+        selectInput(
+          ns("sam_imputation"),
+          "Missing values",
           choices = c(
+            "No imputation — use observed values" = "none",
             "MinProb — fastest, MNAR-aware" = "minprob",
             "KNN — fast, MAR-appropriate" = "knn",
             "missForest — accurate, slower" = "missforest",
             "Bayesian PCA — global latent-factor model" = "bpca"
           ),
-          selected = "minprob"
+          selected = "none"
+        ),
+        numericInput(
+          ns("sam_nperm"),
+          "Permutations",
+          value = 1000,
+          min = 50,
+          max = 5000,
+          step = 50
+        ),
+        tags$p(
+          style = "padding:0 16px;color:#adb5bd;font-size:11px;",
+          "Sample labels of the two groups are permuted. When a contrast has ",
+          "fewer distinct splits than this (e.g. 20 for 3 vs 3), all of them ",
+          "are used instead."
+        ),
+        checkboxInput(
+          ns("sam_block_batch"),
+          "Balanced permutations (within Batch)",
+          value = TRUE
+        ),
+        tags$p(
+          style = "padding:0 16px;color:#adb5bd;font-size:11px;",
+          "With more than one batch, labels are only swapped between samples ",
+          "of the same batch, so every permuted group keeps its batch ",
+          "composition. Ignored for a contrast whose groups are confounded ",
+          "with batch."
+        ),
+        selectInput(
+          ns("sam_s0_mode"),
+          "Fudge factor s\u2080",
+          choices = c(
+            "Automatic \u2014 minimise CV of d(i)" = "auto",
+            "Percentile of s(i)" = "percentile",
+            "Zero \u2014 ordinary t-statistic" = "zero"
+          ),
+          selected = "auto"
+        ),
+        conditionalPanel(
+          condition = sprintf("input['%s'] == 'percentile'", ns("sam_s0_mode")),
+          numericInput(
+            ns("sam_s0_perc"),
+            "s\u2080 percentile of s(i) (%)",
+            value = 5,
+            min = 0,
+            max = 100,
+            step = 5
+          )
+        ),
+        selectInput(
+          ns("sam_fdr_method"),
+          "FDR estimator",
+          choices = c(
+            "\u03C0\u2080 \u00D7 median false calls (SAM software)" = "samr",
+            "Mean false calls (Tusher 2001, original)" = "tusher"
+          ),
+          selected = "samr"
+        ),
+        selectInput(
+          ns("sam_delta_mode"),
+          "Threshold \u0394",
+          choices = c(
+            "From the significance FDR below" = "fdr",
+            "Manual \u0394" = "manual"
+          ),
+          selected = "fdr"
+        ),
+        conditionalPanel(
+          condition = sprintf("input['%s'] == 'manual'", ns("sam_delta_mode")),
+          numericInput(
+            ns("sam_delta"),
+            "\u0394 (distance from d = dE)",
+            value = 1,
+            min = 0,
+            step = 0.1
+          )
+        ),
+        numericInput(
+          ns("sam_seed"),
+          "Permutation seed",
+          value = 6143,
+          min = 1,
+          step = 1
         )
-      ),
-      selectInput(
-        ns("trend_param"),
-        "eBayes Trend",
-        choices = c("TRUE", "FALSE"),
-        selected = "TRUE"
       ),
       numericInput(
         ns("min_valid_pct"),
@@ -2023,7 +2680,7 @@ PwrQuant_sidebar_ui <- function(id) {
       ),
       numericInput(
         ns("sig_fdr"),
-        "Significance FDR (BH adj. p-value)",
+        "Significance FDR (limma: BH adj. p-value; SAM: q-value)",
         value = 0.05,
         min = 0.001,
         max = 0.5,
@@ -2039,110 +2696,117 @@ PwrQuant_sidebar_ui <- function(id) {
       ),
       tags$p(
         style = "padding:0 16px;color:#adb5bd;font-size:11px;",
-        "Significance is called on the BH-adjusted p-value plus this explicit ",
-        "effect-size cutoff. The per-protein minimum detectable difference is ",
-        "reported as a diagnostic only \u2014 it is not used as a filter."
+        "Significance is called on the FDR criterion (limma: BH-adjusted ",
+        "p-value; SAM: q-value, or the manual \u0394) plus this explicit ",
+        "effect-size cutoff. With limma, the per-protein minimum detectable ",
+        "difference is reported as a diagnostic only \u2014 it is not used as a ",
+        "filter."
       ),
       uiOutput(ns("contrasts_ui")),
       tags$div(
         style = "padding:0 8px;text-align:center;",
         actionButton(
           ns("run_limma"),
-          "Start limma",
+          "Start analysis",
           class = "btn-primary",
           style = "width:80%;font-weight:bold;margin-top:10px;margin-bottom:10px;"
         )
       ),
-      tags$hr(style = "border-color:#2d3741;margin:4px 0;"),
-      tags$div(
-        style = "padding:12px 16px 4px;color:#adb5bd;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:1px;",
-        "Prospective MDD (simulation)"
-      ),
-      tags$p(
-        style = "padding:0 16px;color:#adb5bd;font-size:11px;",
-        "Simulates fresh datasets from the fitted empirical Bayes priors with ",
-        "known spiked-in effects, then measures power at the same FDR ",
-        "criterion. Runs on demand \u2014 it is the slow part of this module."
-      ),
-      numericInput(
-        ns("mdd_pi1"),
-        "Assumed proportion differential (\u03C0\u2081)",
-        value = 0.10,
-        min = 0.001,
-        max = 0.9,
-        step = 0.05
-      ),
-      numericInput(
-        ns("mdd_target_power"),
-        "Target power",
-        value = 0.80,
-        min = 0.5,
-        max = 0.99,
-        step = 0.05
-      ),
-      numericInput(
-        ns("mdd_lfc_max"),
-        "Max log\u2082FC tested",
-        value = 2,
-        min = 0.5,
-        max = 6,
-        step = 0.5
-      ),
-      numericInput(
-        ns("mdd_lfc_step"),
-        "log\u2082FC grid step",
-        value = 0.2,
-        min = 0.05,
-        max = 1,
-        step = 0.05
-      ),
-      numericInput(
-        ns("mdd_nsim"),
-        "Simulations per grid point",
-        value = 5,
-        min = 1,
-        max = 50,
-        step = 1
-      ),
-      numericInput(
-        ns("mdd_seed"),
-        "Random seed",
-        value = 4817,
-        min = 1,
-        step = 1
-      ),
-      checkboxInput(
-        ns("mdd_missing"),
-        "Include missingness + imputation",
-        value = TRUE
-      ),
-      tags$p(
-        style = "padding:0 16px;color:#adb5bd;font-size:11px;",
-        "Knocks values out of each simulated matrix using the intensity-",
-        "dependent dropout measured on your data, then runs the same ",
-        "imputation as the main pipeline. Slower, but closer to reality."
-      ),
-      tags$div(
-        style = "padding:0 8px;text-align:center;",
-        actionButton(
-          ns("run_mdd"),
-          "Run MDD simulation",
-          class = "btn-primary",
-          style = "width:80%;font-weight:bold;margin-top:10px;margin-bottom:10px;"
-        )
-      ),
-      textInput(
-        ns("mdd_n_grid"),
-        "Replicates per group to sweep",
-        value = "3,4,5,6,8,10,12,15"
-      ),
-      tags$div(
-        style = "padding:0 8px;text-align:center;",
-        actionButton(
-          ns("run_mdd_design"),
-          "Run replicate sweep",
-          class = "btn-primary",
-          style = "width:80%;font-weight:bold;margin-top:4px;margin-bottom:10px;"
+      # The prospective MDD simulates from limma's eBayes priors, so its
+      # controls are only offered with limma.
+      conditionalPanel(
+        condition = sprintf("input['%s'] == 'limma'", ns("stat_method")),
+        tags$hr(style = "border-color:#2d3741;margin:4px 0;"),
+        tags$div(
+          style = "padding:12px 16px 4px;color:#adb5bd;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:1px;",
+          "Prospective MDD (simulation)"
+        ),
+        tags$p(
+          style = "padding:0 16px;color:#adb5bd;font-size:11px;",
+          "Simulates fresh datasets from the fitted empirical Bayes priors with ",
+          "known spiked-in effects, then measures power at the same FDR ",
+          "criterion. Runs on demand \u2014 it is the slow part of this module."
+        ),
+        numericInput(
+          ns("mdd_pi1"),
+          "Assumed proportion differential (\u03C0\u2081)",
+          value = 0.10,
+          min = 0.001,
+          max = 0.9,
+          step = 0.05
+        ),
+        numericInput(
+          ns("mdd_target_power"),
+          "Target power",
+          value = 0.80,
+          min = 0.5,
+          max = 0.99,
+          step = 0.05
+        ),
+        numericInput(
+          ns("mdd_lfc_max"),
+          "Max log\u2082FC tested",
+          value = 2,
+          min = 0.5,
+          max = 6,
+          step = 0.5
+        ),
+        numericInput(
+          ns("mdd_lfc_step"),
+          "log\u2082FC grid step",
+          value = 0.2,
+          min = 0.05,
+          max = 1,
+          step = 0.05
+        ),
+        numericInput(
+          ns("mdd_nsim"),
+          "Simulations per grid point",
+          value = 5,
+          min = 1,
+          max = 50,
+          step = 1
+        ),
+        numericInput(
+          ns("mdd_seed"),
+          "Random seed",
+          value = 4817,
+          min = 1,
+          step = 1
+        ),
+        checkboxInput(
+          ns("mdd_missing"),
+          "Include missingness + imputation",
+          value = TRUE
+        ),
+        tags$p(
+          style = "padding:0 16px;color:#adb5bd;font-size:11px;",
+          "Knocks values out of each simulated matrix using the intensity-",
+          "dependent dropout measured on your data, then runs the same ",
+          "imputation as the main pipeline. Slower, but closer to reality."
+        ),
+        tags$div(
+          style = "padding:0 8px;text-align:center;",
+          actionButton(
+            ns("run_mdd"),
+            "Run MDD simulation",
+            class = "btn-primary",
+            style = "width:80%;font-weight:bold;margin-top:10px;margin-bottom:10px;"
+          )
+        ),
+        textInput(
+          ns("mdd_n_grid"),
+          "Replicates per group to sweep",
+          value = "3,4,5,6,8,10,12,15"
+        ),
+        tags$div(
+          style = "padding:0 8px;text-align:center;",
+          actionButton(
+            ns("run_mdd_design"),
+            "Run replicate sweep",
+            class = "btn-primary",
+            style = "width:80%;font-weight:bold;margin-top:4px;margin-bottom:10px;"
+          )
         )
       ),
       tags$hr(style = "border-color:#2d3741;margin:4px 0;"),
@@ -2152,7 +2816,7 @@ PwrQuant_sidebar_ui <- function(id) {
           style = "margin-bottom:8px;",
           downloadButton(
             ns("download_limma"),
-            "⬇ Download Limma Results",
+            "⬇ Download Statistics Results",
             class = "dl-btn",
             style = "width:100%;text-align:left;"
           )
@@ -2406,6 +3070,30 @@ PwrQuant_body_ui <- function(id) {
     ),
     tabPanel(
       "Differential Abundance",
+      # Shown only after a SAM run (see output$stat_method_run).
+      conditionalPanel(
+        condition = sprintf("output['%s'] == 'sam'", ns("stat_method_run")),
+        fluidRow(
+          box(
+            title = "SAM plot \u2014 observed vs expected relative difference",
+            status = "primary",
+            solidHeader = TRUE,
+            width = 12,
+            tags$p(
+              style = "color:#6c757d;font-size:12px;margin-bottom:8px;",
+              "Each point is a protein: its relative difference d(i) against ",
+              "the value expected from the label permutations, dE(i). ",
+              "Proteins further than \u0394 from the solid d = dE line (dashed ",
+              "lines) are called. Proteins outside the band can still be ",
+              "grey when they fail the |log\u2082FC| cutoff or rest on a fully ",
+              "imputed group."
+            ),
+            div(class = "plot-wrap", uiOutput(ns("sam_plot_ui"))),
+            tags$hr(),
+            DT::dataTableOutput(ns("sam_summary_table"))
+          )
+        )
+      ),
       fluidRow(
         box(
           title = "Bland-Altman (MA) plots",
@@ -2532,95 +3220,128 @@ PwrQuant_body_ui <- function(id) {
     ),
     tabPanel(
       "Power Statistics",
-      fluidRow(
-        box(
-          title = "Prospective MDD \u2014 simulated power curve",
-          status = "primary",
-          solidHeader = TRUE,
-          width = 12,
-          tags$p(
-            style = "color:#6c757d;font-size:12px;margin-bottom:8px;",
-            "Fresh datasets are simulated from the empirical Bayes prior ",
-            tags$code(
-              "\u03C3\u00B2 ~ d\u2080s\u2080\u00B2/\u03C7\u00B2(d\u2080)"
+      # SAM run: the MDD machinery below is built on limma's eBayes fit, so
+      # the SAM diagnostics take its place.
+      conditionalPanel(
+        condition = sprintf("output['%s'] == 'sam'", ns("stat_method_run")),
+        fluidRow(
+          box(
+            title = "SAM diagnostics",
+            status = "primary",
+            solidHeader = TRUE,
+            width = 12,
+            tags$p(
+              style = "color:#6c757d;font-size:12px;margin-bottom:8px;",
+              "The minimum detectable difference (prospective simulation and ",
+              "conditional MDD) is derived from limma's empirical Bayes ",
+              "variance model and is not available for a SAM run. Shown ",
+              "instead: the relative difference d(i) against the ",
+              "gene-specific scatter s(i) \u2014 with a well-chosen s\u2080 the ",
+              "spread of d(i) should not depend on s(i) \u2014 and the FDR ",
+              "estimated at each threshold \u0394."
             ),
-            ", known fold changes are spiked in, and the real design and ",
-            "contrasts are run through lmFit \u2192 eBayes \u2192 BH. The MDD is the ",
-            "fold change at which the pipeline reaches the target power. ",
-            "Press ",
-            tags$b("Run MDD simulation"),
-            " in the sidebar."
-          ),
-          div(
-            class = "plot-wrap",
-            tags$div(
-              class = "spinner-overlay",
-              id = ns("sp_mdd"),
-              icon("spinner", class = "fa-spin")
+            div(class = "plot-wrap", uiOutput(ns("sam_scatter_plot_ui"))),
+            tags$hr(),
+            tags$h5(
+              style = "font-weight:700;color:#1B4965;margin-bottom:6px;",
+              "\u0394 table"
             ),
-            plotOutput(ns("mdd_curve_plot"), height = 480)
-          ),
-          tags$hr(),
-          DT::dataTableOutput(ns("mdd_summary_table"))
+            DT::dataTableOutput(ns("sam_delta_table"))
+          )
         )
       ),
-      fluidRow(
-        box(
-          title = "Experimental design \u2014 MDD vs replicates per group",
-          status = "primary",
-          solidHeader = TRUE,
-          width = 12,
-          tags$p(
-            style = "color:#6c757d;font-size:12px;margin-bottom:8px;",
-            "Reruns the simulation on balanced designs of increasing size, ",
-            "holding the estimated variance prior fixed. Use it to judge how ",
-            "many replicates a target fold change would need. The prior was ",
-            "estimated at the residual df of the current design, so the ",
-            "small-n end is somewhat optimistic. Press ",
-            tags$b("Run replicate sweep"),
-            " in the sidebar."
-          ),
-          div(
-            class = "plot-wrap",
-            tags$div(
-              class = "spinner-overlay",
-              id = ns("sp_mdd_design"),
-              icon("spinner", class = "fa-spin")
+      conditionalPanel(
+        condition = sprintf("output['%s'] != 'sam'", ns("stat_method_run")),
+        fluidRow(
+          box(
+            title = "Prospective MDD \u2014 simulated power curve",
+            status = "primary",
+            solidHeader = TRUE,
+            width = 12,
+            tags$p(
+              style = "color:#6c757d;font-size:12px;margin-bottom:8px;",
+              "Fresh datasets are simulated from the empirical Bayes prior ",
+              tags$code(
+                "\u03C3\u00B2 ~ d\u2080s\u2080\u00B2/\u03C7\u00B2(d\u2080)"
+              ),
+              ", known fold changes are spiked in, and the real design and ",
+              "contrasts are run through lmFit \u2192 eBayes \u2192 BH. The MDD is the ",
+              "fold change at which the pipeline reaches the target power. ",
+              "Press ",
+              tags$b("Run MDD simulation"),
+              " in the sidebar."
             ),
-            plotOutput(ns("mdd_design_plot"), height = 480)
-          ),
-          tags$hr(),
-          DT::dataTableOutput(ns("mdd_design_table"))
-        )
-      ),
-      fluidRow(
-        box(
-          title = "Conditional sensitivity (diagnostic only)",
-          status = "warning",
-          solidHeader = TRUE,
-          width = 12,
-          tags$p(
-            style = "color:#6c757d;font-size:12px;margin-bottom:8px;",
-            "Per-protein minimum detectable difference at the moderated ",
-            "degrees of freedom (",
-            tags$code("df.residual + df.prior"),
-            ") and the per-test alpha implied by the BH criterion ",
-            "(",
-            tags$code("FDR \u00D7 R / m"),
-            "). This is conditional on the ",
-            "observed variances, so it describes sensitivity after the fact ",
-            "and is ",
-            tags$b("not"),
-            " used to call significance."
-          ),
-          div(
-            class = "plot-wrap",
-            tags$div(
-              class = "spinner-overlay",
-              id = ns("sp_pwr"),
-              icon("spinner", class = "fa-spin")
+            div(
+              class = "plot-wrap",
+              tags$div(
+                class = "spinner-overlay",
+                id = ns("sp_mdd"),
+                icon("spinner", class = "fa-spin")
+              ),
+              plotOutput(ns("mdd_curve_plot"), height = 480)
             ),
-            plotOutput(ns("limma_power_plot"), height = 600)
+            tags$hr(),
+            DT::dataTableOutput(ns("mdd_summary_table"))
+          )
+        ),
+        fluidRow(
+          box(
+            title = "Experimental design \u2014 MDD vs replicates per group",
+            status = "primary",
+            solidHeader = TRUE,
+            width = 12,
+            tags$p(
+              style = "color:#6c757d;font-size:12px;margin-bottom:8px;",
+              "Reruns the simulation on balanced designs of increasing size, ",
+              "holding the estimated variance prior fixed. Use it to judge how ",
+              "many replicates a target fold change would need. The prior was ",
+              "estimated at the residual df of the current design, so the ",
+              "small-n end is somewhat optimistic. Press ",
+              tags$b("Run replicate sweep"),
+              " in the sidebar."
+            ),
+            div(
+              class = "plot-wrap",
+              tags$div(
+                class = "spinner-overlay",
+                id = ns("sp_mdd_design"),
+                icon("spinner", class = "fa-spin")
+              ),
+              plotOutput(ns("mdd_design_plot"), height = 480)
+            ),
+            tags$hr(),
+            DT::dataTableOutput(ns("mdd_design_table"))
+          )
+        ),
+        fluidRow(
+          box(
+            title = "Conditional sensitivity (diagnostic only)",
+            status = "warning",
+            solidHeader = TRUE,
+            width = 12,
+            tags$p(
+              style = "color:#6c757d;font-size:12px;margin-bottom:8px;",
+              "Per-protein minimum detectable difference at the moderated ",
+              "degrees of freedom (",
+              tags$code("df.residual + df.prior"),
+              ") and the per-test alpha implied by the BH criterion ",
+              "(",
+              tags$code("FDR \u00D7 R / m"),
+              "). This is conditional on the ",
+              "observed variances, so it describes sensitivity after the fact ",
+              "and is ",
+              tags$b("not"),
+              " used to call significance."
+            ),
+            div(
+              class = "plot-wrap",
+              tags$div(
+                class = "spinner-overlay",
+                id = ns("sp_pwr"),
+                icon("spinner", class = "fa-spin")
+              ),
+              plotOutput(ns("limma_power_plot"), height = 600)
+            )
           )
         )
       )
@@ -2954,10 +3675,10 @@ PwrQuant_body_ui <- function(id) {
       )
     ),
     tabPanel(
-      "limma Results Table",
+      "Statistics Results Table",
       fluidRow(
         box(
-          title = "Differential abundance — full limma results",
+          title = "Differential abundance — full limma / SAM results",
           status = "primary",
           solidHeader = TRUE,
           width = 12,
@@ -3258,6 +3979,8 @@ PwrQuant_server <- function(id) {
     output$barmir_plot_ui <- make_pq_plot_ui("barmir_plot")
     output$pval_histogram_ui <- make_pq_plot_ui("pval_histogram")
     output$adv_corr_plot_ui <- make_pq_plot_ui("adv_corr_plot")
+    output$sam_plot_ui <- make_pq_plot_ui("sam_plot")
+    output$sam_scatter_plot_ui <- make_pq_plot_ui("sam_scatter_plot")
 
     # Populate Selected Proteins selectize from raw matrix row names
     observe({
@@ -3838,6 +4561,9 @@ PwrQuant_server <- function(id) {
     # ── Master Analytical Engine ─────────────────────────────────────────────
     limma_results_ev <- eventReactive(input$run_limma, {
       req(raw_matrix(), meta_edit_df(), input$contrast_pairs)
+      # "limma" when the selector is absent (e.g. inputs set programmatically).
+      stat_method <- input$stat_method %||% "limma"
+      stat_label <- if (stat_method == "sam") "SAM" else "limma"
 
       # Resolve the contrasts up front. Condition names are free text, so the
       # groups of a contrast are taken from its weights from here on, never
@@ -3851,9 +4577,9 @@ PwrQuant_server <- function(id) {
           )]))
         ),
         error = function(e) {
-          message("PwrQuant limma not run: ", conditionMessage(e))
+          message("PwrQuant ", stat_label, " not run: ", conditionMessage(e))
           showNotification(
-            paste("Cannot run limma:", conditionMessage(e)),
+            paste0("Cannot run ", stat_label, ": ", conditionMessage(e)),
             type = "error",
             duration = 15
           )
@@ -3882,9 +4608,9 @@ PwrQuant_server <- function(id) {
               collapse = ", "
             )
           )
-          message("PwrQuant limma not run: ", thin_msg)
+          message("PwrQuant ", stat_label, " not run: ", thin_msg)
           showNotification(
-            paste("Cannot run limma:", thin_msg),
+            paste0("Cannot run ", stat_label, ": ", thin_msg),
             type = "error",
             duration = 15
           )
@@ -3892,376 +4618,566 @@ PwrQuant_server <- function(id) {
         }
       }
 
-      withProgress(message = "Executing limma pipeline...", value = 0, {
-        incProgress(0.1, detail = "Parsing matrix and metadata")
-        # 1. Parse Data & Metadata
-        raw <- raw_matrix()
-        meta <- meta_edit_df()
-        group_labels <- meta$Condition[match(colnames(raw), meta$Sample)]
-        batch_labels <- meta$Batch[match(colnames(raw), meta$Sample)]
-        log2_matrix <- log2_input()
-        n_proteins_input <- nrow(log2_matrix)
+      withProgress(
+        message = sprintf("Executing %s pipeline...", stat_label),
+        value = 0,
+        {
+          incProgress(0.1, detail = "Parsing matrix and metadata")
+          # 1. Parse Data & Metadata
+          raw <- raw_matrix()
+          meta <- meta_edit_df()
+          group_labels <- meta$Condition[match(colnames(raw), meta$Sample)]
+          batch_labels <- meta$Batch[match(colnames(raw), meta$Sample)]
+          log2_matrix <- log2_input()
+          n_proteins_input <- nrow(log2_matrix)
 
-        # 1b. Groupwise missing value filter
-        min_pct <- input$min_valid_pct
-        if (!is.null(min_pct) && min_pct > 0) {
-          keep_protein <- rep(TRUE, nrow(log2_matrix))
-          for (g in unique(group_labels)) {
-            g_cols <- which(group_labels == g)
-            valid_prop <- rowMeans(!is.na(log2_matrix[, g_cols, drop = FALSE]))
-            keep_protein <- keep_protein & (valid_prop >= min_pct / 100)
-          }
-          log2_matrix <- log2_matrix[keep_protein, , drop = FALSE]
-        }
-
-        # 2. Imputation Selection
-        reg_method <- ifelse(input$limma_method == "robust", "robust", "ls")
-
-        # Groupwise all-NA mask, only meaningful when imputation fills those
-        # cells. In least-squares mode limma handles NAs directly, so there is
-        # nothing "imputation-driven" to flag.
-        group_na_mask <- NULL
-        if (reg_method == "robust") {
-          rn <- rownames(log2_matrix)
-          if (is.null(rn)) {
-            rn <- as.character(seq_len(nrow(log2_matrix)))
-          }
-          # Proteins x conditions. A matrix rather than a data frame, so a
-          # condition name can never collide with an identifier column.
-          group_na_mask <- vapply(
-            unique(group_labels),
-            function(g) {
+          # 1b. Groupwise missing value filter
+          min_pct <- input$min_valid_pct
+          if (!is.null(min_pct) && min_pct > 0) {
+            keep_protein <- rep(TRUE, nrow(log2_matrix))
+            for (g in unique(group_labels)) {
               g_cols <- which(group_labels == g)
-              rowSums(!is.na(log2_matrix[, g_cols, drop = FALSE])) == 0
-            },
-            logical(nrow(log2_matrix))
-          )
-          group_na_mask <- matrix(
-            group_na_mask,
-            nrow = nrow(log2_matrix),
-            dimnames = list(rn, unique(group_labels))
-          )
-        }
-
-        if (reg_method == "robust") {
-          imp_method <- input$imputation_method %||% "minprob"
-          imp_labels <- c(
-            knn = "KNN imputation",
-            minprob = "MinProb imputation",
-            missforest = "missForest imputation",
-            bpca = "Bayesian PCA imputation (global)"
-          )
-          incProgress(
-            0.15,
-            detail = paste0(
-              "Robust regression: performing ",
-              imp_labels[imp_method]
-            )
-          )
-          imputed_matrix <- groupwise_imputation_fast(
-            log2_matrix,
-            group_labels,
-            method = imp_method
-          )
-
-          # Apply downshift for fully missing regions
-          global_min <- min(imputed_matrix, na.rm = TRUE)
-          set.seed(123)
-          imputed_matrix_shifted <- imputed_matrix
-          for (i in seq_len(nrow(imputed_matrix_shifted))) {
-            na_idx <- which(is.na(imputed_matrix_shifted[i, ]))
-            if (length(na_idx) > 0) {
-              imputed_matrix_shifted[i, na_idx] <- rnorm(
-                length(na_idx),
-                mean = global_min - 1,
-                sd = 0.3
+              valid_prop <- rowMeans(
+                !is.na(log2_matrix[, g_cols, drop = FALSE])
               )
+              keep_protein <- keep_protein & (valid_prop >= min_pct / 100)
             }
+            log2_matrix <- log2_matrix[keep_protein, , drop = FALSE]
           }
-        } else {
-          incProgress(
-            0.2,
-            detail = "Skipping imputation (running pure LS mode)"
-          )
-          imputed_matrix_shifted <- log2_matrix
-        }
 
-        # 3. Batch Correction
-        n_batches <- length(unique(batch_labels))
-        combat_failed <- FALSE
-        if (n_batches > 1) {
-          incProgress(0.35, detail = "Calculating ComBat batch correction")
-          batch_obj <- tryCatch(
-            {
-              sva::ComBat(
-                dat = imputed_matrix_shifted,
-                batch = as.character(batch_labels),
-                mod = NULL,
-                par.prior = TRUE,
-                prior.plots = FALSE
-              )
-            },
-            error = function(e) {
-              combat_failed <<- TRUE
-              warning(
-                "ComBat failed or invalid NA structure: bypassing ComBat correction: ",
-                e$message
-              )
-              return(imputed_matrix_shifted)
+          # 2. Imputation Selection
+          reg_method <- ifelse(
+            identical(input$limma_method, "robust"),
+            "robust",
+            "ls"
+          )
+          # limma imputes in robust mode only; SAM has no regression method, so
+          # imputation is its own choice there.
+          sam_imputation <- input$sam_imputation %||% "none"
+          do_impute <- if (stat_method == "sam") {
+            sam_imputation != "none"
+          } else {
+            reg_method == "robust"
+          }
+
+          # Groupwise all-NA mask, only meaningful when imputation fills those
+          # cells. Without imputation limma and SAM both work on the observed
+          # values, so there is nothing "imputation-driven" to flag.
+          group_na_mask <- NULL
+          if (do_impute) {
+            rn <- rownames(log2_matrix)
+            if (is.null(rn)) {
+              rn <- as.character(seq_len(nrow(log2_matrix)))
             }
-          )
-        } else {
-          incProgress(0.35, detail = "Single batch detected — skipping ComBat")
-          showNotification(
-            "Only 1 batch detected: ComBat batch correction was skipped.",
-            type = "warning",
-            duration = 8
-          )
-          batch_obj <- imputed_matrix_shifted
-        }
-        mtx_batch_correct <- as.data.frame(batch_obj)
+            # Proteins x conditions. A matrix rather than a data frame, so a
+            # condition name can never collide with an identifier column.
+            group_na_mask <- vapply(
+              unique(group_labels),
+              function(g) {
+                g_cols <- which(group_labels == g)
+                rowSums(!is.na(log2_matrix[, g_cols, drop = FALSE])) == 0
+              },
+              logical(nrow(log2_matrix))
+            )
+            group_na_mask <- matrix(
+              group_na_mask,
+              nrow = nrow(log2_matrix),
+              dimnames = list(rn, unique(group_labels))
+            )
+          }
 
-        # 4. Normalization
-        incProgress(0.5, detail = "Normalizing Arrays")
-        norm_meth <- input$norm_method
-        if (norm_meth == "quantile") {
-          limma_mtx <- limma::normalizeBetweenArrays(
-            as.matrix(mtx_batch_correct),
-            method = "quantile"
-          ) %>%
-            as.data.frame()
-        } else if (norm_meth == "scale") {
-          limma_mtx <- limma::normalizeBetweenArrays(
-            as.matrix(mtx_batch_correct),
-            method = "scale"
-          ) %>%
-            as.data.frame()
-        } else if (norm_meth == "none") {
-          limma_mtx <- limma::normalizeBetweenArrays(
-            as.matrix(mtx_batch_correct),
-            method = "none"
-          ) %>%
-            as.data.frame()
-        } else if (norm_meth == "TMM") {
-          incProgress(0, detail = "TMM: pairwise complete-case scaling factors")
-          tmm_mtx <- withCallingHandlers(
-            tmm_normalize_log2(as.matrix(mtx_batch_correct)),
-            warning = function(w) {
+          if (do_impute) {
+            imp_method <- if (stat_method == "sam") {
+              sam_imputation
+            } else {
+              input$imputation_method %||% "minprob"
+            }
+            imp_labels <- c(
+              knn = "KNN imputation",
+              minprob = "MinProb imputation",
+              missforest = "missForest imputation",
+              bpca = "Bayesian PCA imputation (global)"
+            )
+            incProgress(
+              0.15,
+              detail = paste0(
+                if (stat_method == "sam") "SAM" else "Robust regression",
+                ": performing ",
+                imp_labels[imp_method]
+              )
+            )
+            imputed_matrix <- groupwise_imputation_fast(
+              log2_matrix,
+              group_labels,
+              method = imp_method
+            )
+
+            # Apply downshift for fully missing regions
+            global_min <- min(imputed_matrix, na.rm = TRUE)
+            set.seed(123)
+            imputed_matrix_shifted <- imputed_matrix
+            for (i in seq_len(nrow(imputed_matrix_shifted))) {
+              na_idx <- which(is.na(imputed_matrix_shifted[i, ]))
+              if (length(na_idx) > 0) {
+                imputed_matrix_shifted[i, na_idx] <- rnorm(
+                  length(na_idx),
+                  mean = global_min - 1,
+                  sd = 0.3
+                )
+              }
+            }
+          } else {
+            incProgress(
+              0.2,
+              detail = "Skipping imputation (using observed values only)"
+            )
+            imputed_matrix_shifted <- log2_matrix
+          }
+
+          # 3. Batch Correction
+          n_batches <- length(unique(batch_labels))
+          combat_failed <- FALSE
+          if (n_batches > 1) {
+            incProgress(0.35, detail = "Calculating ComBat batch correction")
+            batch_obj <- tryCatch(
+              {
+                sva::ComBat(
+                  dat = imputed_matrix_shifted,
+                  batch = as.character(batch_labels),
+                  mod = NULL,
+                  par.prior = TRUE,
+                  prior.plots = FALSE
+                )
+              },
+              error = function(e) {
+                combat_failed <<- TRUE
+                warning(
+                  "ComBat failed or invalid NA structure: bypassing ComBat correction: ",
+                  e$message
+                )
+                return(imputed_matrix_shifted)
+              }
+            )
+          } else {
+            incProgress(
+              0.35,
+              detail = "Single batch detected — skipping ComBat"
+            )
+            showNotification(
+              "Only 1 batch detected: ComBat batch correction was skipped.",
+              type = "warning",
+              duration = 8
+            )
+            batch_obj <- imputed_matrix_shifted
+          }
+          mtx_batch_correct <- as.data.frame(batch_obj)
+
+          # 4. Normalization
+          incProgress(0.5, detail = "Normalizing Arrays")
+          norm_meth <- input$norm_method
+          if (norm_meth == "quantile") {
+            limma_mtx <- limma::normalizeBetweenArrays(
+              as.matrix(mtx_batch_correct),
+              method = "quantile"
+            ) %>%
+              as.data.frame()
+          } else if (norm_meth == "scale") {
+            limma_mtx <- limma::normalizeBetweenArrays(
+              as.matrix(mtx_batch_correct),
+              method = "scale"
+            ) %>%
+              as.data.frame()
+          } else if (norm_meth == "none") {
+            limma_mtx <- limma::normalizeBetweenArrays(
+              as.matrix(mtx_batch_correct),
+              method = "none"
+            ) %>%
+              as.data.frame()
+          } else if (norm_meth == "TMM") {
+            incProgress(
+              0,
+              detail = "TMM: pairwise complete-case scaling factors"
+            )
+            tmm_mtx <- withCallingHandlers(
+              tmm_normalize_log2(as.matrix(mtx_batch_correct)),
+              warning = function(w) {
+                showNotification(
+                  conditionMessage(w),
+                  type = "warning",
+                  duration = 12
+                )
+                invokeRestart("muffleWarning")
+              }
+            )
+            tmm_info <- attr(tmm_mtx, "tmm")
+            showNotification(
+              sprintf(
+                "TMM: reference sample '%s'; scaling factors %.2f–%.2f; shared detected proteins per sample %d–%d.",
+                tmm_info$sample[tmm_info$is_reference],
+                min(tmm_info$scale_factor),
+                max(tmm_info$scale_factor),
+                min(tmm_info$n_shared[!tmm_info$is_reference]),
+                max(tmm_info$n_shared[!tmm_info$is_reference])
+              ),
+              type = "message",
+              duration = 12
+            )
+            limma_mtx <- as.data.frame(tmm_mtx)
+          } else {
+            limma_mtx <- limma::normalizeBetweenArrays(
+              as.matrix(mtx_batch_correct),
+              method = "cyclicloess"
+            ) %>%
+              as.data.frame()
+          }
+
+          # 5. Model Matrix & Contrasts
+          incProgress(0.65, detail = "Building Linear Models")
+          design_groups <- factor(group_labels)
+          design <- model.matrix(~ 0 + design_groups)
+          colnames(design) <- levels(design_groups)
+
+          contrast_matrix <- contrast_matrix[colnames(design), , drop = FALSE]
+          clean_contrasts <- colnames(contrast_matrix)
+
+          sig_fdr <- input$sig_fdr %||% 0.05
+          if (!is.numeric(sig_fdr) || is.na(sig_fdr) || sig_fdr <= 0) {
+            sig_fdr <- 0.05
+          }
+          sig_lfc <- input$sig_lfc %||% 0
+          if (!is.numeric(sig_lfc) || is.na(sig_lfc) || sig_lfc < 0) {
+            sig_lfc <- 0
+          }
+
+          use_trend <- NA
+          n_trend_excluded <- 0L
+          contrast_fit <- NULL
+          sam_fit <- NULL
+          sam_params <- NULL
+          if (stat_method == "sam") {
+            # 6. SAM: relative difference d(i) and permutation FDR per contrast
+            incProgress(0.7, detail = "SAM: permuting sample labels")
+            num_or <- function(x, default, lower) {
+              if (is.numeric(x) && length(x) == 1 && !is.na(x) && x >= lower) {
+                x
+              } else {
+                default
+              }
+            }
+            sam_params <- list(
+              n_perm = min(5000, round(num_or(input$sam_nperm, 1000, 10))),
+              s0_mode = input$sam_s0_mode %||% "auto",
+              s0_perc = min(1, num_or(input$sam_s0_perc, 5, 0) / 100),
+              fdr_method = input$sam_fdr_method %||% "samr",
+              # NULL = pick delta from the target FDR.
+              delta = if (identical(input$sam_delta_mode, "manual")) {
+                num_or(input$sam_delta, 1, 0)
+              },
+              seed = round(num_or(input$sam_seed, 6143, 1)),
+              # NULL = unrestricted permutations.
+              block = if (!isFALSE(input$sam_block_batch) && n_batches > 1) {
+                as.character(batch_labels)
+              }
+            )
+            sam_fit <- tryCatch(
+              run_sam(
+                as.matrix(limma_mtx),
+                group_labels,
+                contrast_matrix,
+                s0_mode = sam_params$s0_mode,
+                s0_perc = sam_params$s0_perc,
+                seed = sam_params$seed,
+                n_perm = sam_params$n_perm,
+                block = sam_params$block,
+                fdr_method = sam_params$fdr_method,
+                fdr = sig_fdr,
+                delta = sam_params$delta
+              ),
+              error = function(e) {
+                message("PwrQuant SAM not run: ", conditionMessage(e))
+                showNotification(
+                  paste("Cannot run SAM:", conditionMessage(e)),
+                  type = "error",
+                  duration = 15
+                )
+                NULL
+              }
+            )
+            req(sam_fit)
+            unblocked <- sam_fit$summary$comparison[!sam_fit$summary$blocked]
+            if (!is.null(sam_params$block) && length(unblocked) > 0) {
               showNotification(
-                conditionMessage(w),
+                sprintf(
+                  "SAM: balanced permutations were not possible for %s (its samples share one batch, or batch is confounded with condition); unrestricted permutations were used.",
+                  paste(unblocked, collapse = ", ")
+                ),
                 type = "warning",
                 duration = 12
               )
-              invokeRestart("muffleWarning")
+            }
+            # Few distinct label splits make the null distribution coarse.
+            coarse <- sam_fit$summary[
+              sam_fit$summary$n_perm < 50,
+              ,
+              drop = FALSE
+            ]
+            if (nrow(coarse) > 0) {
+              showNotification(
+                sprintf(
+                  "SAM: only %s distinct label permutations exist for %s. FDR and p-values are coarse with so few replicates.",
+                  paste(unique(coarse$n_perm), collapse = "/"),
+                  paste(coarse$comparison, collapse = ", ")
+                ),
+                type = "warning",
+                duration = 12
+              )
+            }
+            power_stats <- sam_fit$results
+          } else {
+            # 6. limma Model & eBayes
+            fit_model <- limma::lmFit(limma_mtx, design, method = reg_method)
+            contrast_fit <- limma::contrasts.fit(fit_model, contrast_matrix)
+
+            use_trend <- as.logical(input$trend_param)
+
+            if (use_trend) {
+              # Exclude unestimatable proteins (NA sigma/Amean) to prevent eBayes trend calculation crashes
+              valid_idx <- which(
+                !is.na(contrast_fit$sigma) & !is.na(contrast_fit$Amean)
+              )
+              n_trend_excluded <- nrow(contrast_fit) - length(valid_idx)
+              contrast_fit <- contrast_fit[valid_idx, ]
+            }
+
+            contrast_fit <- limma::eBayes(contrast_fit, trend = use_trend)
+
+            # 7. Conditional sensitivity (diagnostic; see extract_power_stats)
+            incProgress(0.8, detail = "Calculating conditional MDD")
+            power_stats <- extract_power_stats_fast(
+              contrast_fit,
+              fdr = sig_fdr,
+              target_power = 0.80
+            )
+          }
+
+          # 8. Results Mapping
+          incProgress(0.9, detail = "Isolating significance mappings")
+          limma_results <- power_stats %>%
+            left_join(contrast_group_table(contrast_matrix), by = "comparison")
+          # The FDR criterion of each method; the effect-size cutoff and the
+          # imputation rule below are shared.
+          limma_results$fdr_pass <- if (stat_method == "sam") {
+            limma_results$sam_called
+          } else {
+            limma_results$adj.P.Val <= sig_fdr
+          }
+
+          if (!is.null(group_na_mask)) {
+            # Proteins x contrasts: TRUE when any group entering the contrast
+            # (non-zero weight) was entirely missing for that protein.
+            driven <- (group_na_mask[,
+              rownames(contrast_matrix),
+              drop = FALSE
+            ] %*%
+              (contrast_matrix != 0)) >
+              0
+            limma_results$imputation_driven <- driven[cbind(
+              match(limma_results$Protein, rownames(driven)),
+              match(limma_results$comparison, colnames(driven))
+            )]
+          } else {
+            # No imputation was performed: nothing can be imputation-driven.
+            limma_results$imputation_driven <- FALSE
+          }
+
+          limma_results <- limma_results %>%
+            dplyr::mutate(
+              # Significance = FDR criterion + an explicit, user-set effect-size
+              # cutoff. The conditional MDD is deliberately excluded: gating on it
+              # would impose a second, undisclosed threshold on the same moderated
+              # t statistic rather than adding information.
+              status = case_when(
+                imputation_driven %in% TRUE ~ "Not significant",
+                logFC > 0 & fdr_pass & abs(logFC) >= sig_lfc ~
+                  "Increased",
+                logFC < 0 & fdr_pass & abs(logFC) >= sig_lfc ~
+                  "Decreased",
+                TRUE ~ "Not significant"
+              ),
+              status = factor(
+                status,
+                levels = c("Decreased", "Not significant", "Increased")
+              )
+            ) %>%
+            dplyr::select(-fdr_pass)
+
+          incProgress(1.0, detail = "Complete.")
+
+          # Record the run's parameters and sample metadata assignment in the
+          # session log (captured by the app-level message handler and included
+          # in "Download Log History").
+          grp_n <- table(group_labels)
+          message(paste(
+            c(
+              format_limma_params_log(
+                method = stat_label,
+                p = c(
+                  list(
+                    input_file = input$matrix_file$name,
+                    already_log2 = already_log2(),
+                    n_samples = ncol(log2_matrix),
+                    samples_per_group = paste0(
+                      names(grp_n),
+                      " = ",
+                      as.integer(grp_n)
+                    ),
+                    n_proteins_input = n_proteins_input,
+                    min_valid_pct = input$min_valid_pct %||% 0,
+                    n_proteins_filtered = nrow(log2_matrix),
+                    regression_method = if (stat_method == "sam") {
+                      "n/a (SAM)"
+                    } else {
+                      reg_method
+                    },
+                    imputation = if (do_impute) {
+                      paste0(imp_labels[[imp_method]], " (groupwise)")
+                    } else if (stat_method == "sam") {
+                      "none (SAM on observed values)"
+                    } else {
+                      "none (NAs handled by lmFit)"
+                    },
+                    knn_k = if (do_impute) {
+                      attr(imputed_matrix, "knn_k")
+                    },
+                    downshift = if (do_impute) {
+                      sprintf(
+                        "rnorm(mean = global min - 1 = %.3f, sd = 0.3), seed 123",
+                        global_min - 1
+                      )
+                    },
+                    batch_correction = if (n_batches <= 1) {
+                      "none (single batch)"
+                    } else if (combat_failed) {
+                      sprintf(
+                        "ComBat failed and was bypassed (%d batches)",
+                        n_batches
+                      )
+                    } else {
+                      sprintf(
+                        "sva::ComBat, parametric prior, mod = NULL (%d batches)",
+                        n_batches
+                      )
+                    },
+                    normalization = norm_meth,
+                    design = paste0(
+                      "~ 0 + condition [",
+                      paste(colnames(design), collapse = ", "),
+                      "]"
+                    ),
+                    contrasts = clean_contrasts
+                  ),
+                  if (stat_method == "sam") {
+                    list(
+                      sam_permutations = sam_params$n_perm,
+                      sam_permutations_used = paste0(
+                        sam_fit$summary$n_perm,
+                        ifelse(
+                          sam_fit$summary$complete_enumeration,
+                          " (complete enumeration)",
+                          " (random)"
+                        )
+                      ),
+                      sam_permutation_scheme = ifelse(
+                        sam_fit$summary$blocked,
+                        "balanced within batch",
+                        "unrestricted"
+                      ),
+                      sam_s0_mode = if (sam_params$s0_mode == "percentile") {
+                        sprintf("percentile (%g%%)", 100 * sam_params$s0_perc)
+                      } else {
+                        sam_params$s0_mode
+                      },
+                      sam_s0 = signif(sam_fit$summary$s0, 4),
+                      sam_pi0 = signif(sam_fit$summary$pi0, 4),
+                      sam_fdr_method = if (sam_params$fdr_method == "tusher") {
+                        "mean false calls (Tusher 2001)"
+                      } else {
+                        "pi0 x median false calls"
+                      },
+                      sam_delta = paste0(
+                        signif(sam_fit$summary$delta, 4),
+                        if (is.null(sam_params$delta)) {
+                          " (from target FDR)"
+                        } else {
+                          " (manual)"
+                        }
+                      ),
+                      sam_seed = sam_params$seed
+                    )
+                  } else {
+                    list(
+                      ebayes_trend = use_trend,
+                      n_trend_excluded = n_trend_excluded,
+                      p_adjust = "BH",
+                      mdd_target_power = 0.80
+                    )
+                  },
+                  list(
+                    sig_fdr = sig_fdr,
+                    sig_lfc = sig_lfc,
+                    limma_version = as.character(utils::packageVersion("limma"))
+                  )
+                )
+              ),
+              format_limma_metadata_log(
+                meta[match(colnames(raw), meta$Sample), , drop = FALSE],
+                intersect(excluded_samples(), colnames(raw_matrix_full()))
+              )
+            ),
+            collapse = "\n"
+          ))
+
+          list(
+            log2_mat = log2_matrix,
+            batch_mat = mtx_batch_correct,
+            norm_mat = limma_mtx,
+            limma_results = limma_results,
+            # "limma" or "sam": which statistics produced `limma_results`.
+            stat_method = stat_method,
+            # SAM only: per-contrast run summary and delta table.
+            sam = if (stat_method == "sam") {
+              sam_fit[c("summary", "delta_table")]
+            },
+            # Retained so the prospective MDD simulation can reuse the exact
+            # design, contrasts and eBayes priors of this run. NULL for SAM.
+            contrast_fit = contrast_fit,
+            design = design,
+            contrast_matrix = contrast_matrix,
+            group_labels = group_labels,
+            trend = use_trend,
+            sig_fdr = sig_fdr,
+            sig_lfc = sig_lfc,
+            min_valid_pct = input$min_valid_pct %||% 0,
+            # NULL when nothing was imputed (limma least squares, SAM "none").
+            impute_method = if (do_impute) imp_method else NULL,
+            # k selected on the real matrix, reused by the simulation.
+            knn_k = if (do_impute) {
+              attr(imputed_matrix, "knn_k")
+            } else {
+              NULL
             }
           )
-          tmm_info <- attr(tmm_mtx, "tmm")
-          showNotification(
-            sprintf(
-              "TMM: reference sample '%s'; scaling factors %.2f–%.2f; shared detected proteins per sample %d–%d.",
-              tmm_info$sample[tmm_info$is_reference],
-              min(tmm_info$scale_factor),
-              max(tmm_info$scale_factor),
-              min(tmm_info$n_shared[!tmm_info$is_reference]),
-              max(tmm_info$n_shared[!tmm_info$is_reference])
-            ),
-            type = "message",
-            duration = 12
-          )
-          limma_mtx <- as.data.frame(tmm_mtx)
-        } else {
-          limma_mtx <- limma::normalizeBetweenArrays(
-            as.matrix(mtx_batch_correct),
-            method = "cyclicloess"
-          ) %>%
-            as.data.frame()
         }
-
-        # 5. Model Matrix & Contrasts
-        incProgress(0.65, detail = "Building Linear Models")
-        design_groups <- factor(group_labels)
-        design <- model.matrix(~ 0 + design_groups)
-        colnames(design) <- levels(design_groups)
-
-        contrast_matrix <- contrast_matrix[colnames(design), , drop = FALSE]
-        clean_contrasts <- colnames(contrast_matrix)
-
-        # 6. limma Model & eBayes
-        fit_model <- limma::lmFit(limma_mtx, design, method = reg_method)
-        contrast_fit <- limma::contrasts.fit(fit_model, contrast_matrix)
-
-        use_trend <- as.logical(input$trend_param)
-
-        n_trend_excluded <- 0L
-        if (use_trend) {
-          # Exclude unestimatable proteins (NA sigma/Amean) to prevent eBayes trend calculation crashes
-          valid_idx <- which(
-            !is.na(contrast_fit$sigma) & !is.na(contrast_fit$Amean)
-          )
-          n_trend_excluded <- nrow(contrast_fit) - length(valid_idx)
-          contrast_fit <- contrast_fit[valid_idx, ]
-        }
-
-        contrast_fit <- limma::eBayes(contrast_fit, trend = use_trend)
-
-        # 7. Conditional sensitivity (diagnostic; see extract_power_stats)
-        incProgress(0.8, detail = "Calculating conditional MDD")
-        sig_fdr <- input$sig_fdr %||% 0.05
-        if (!is.numeric(sig_fdr) || is.na(sig_fdr) || sig_fdr <= 0) {
-          sig_fdr <- 0.05
-        }
-        sig_lfc <- input$sig_lfc %||% 0
-        if (!is.numeric(sig_lfc) || is.na(sig_lfc) || sig_lfc < 0) {
-          sig_lfc <- 0
-        }
-        power_stats <- extract_power_stats_fast(
-          contrast_fit,
-          fdr = sig_fdr,
-          target_power = 0.80
-        )
-
-        # 8. Results Mapping
-        incProgress(0.9, detail = "Isolating significance mappings")
-        limma_results <- power_stats %>%
-          left_join(contrast_group_table(contrast_matrix), by = "comparison")
-
-        if (!is.null(group_na_mask)) {
-          # Proteins x contrasts: TRUE when any group entering the contrast
-          # (non-zero weight) was entirely missing for that protein.
-          driven <- (group_na_mask[,
-            rownames(contrast_matrix),
-            drop = FALSE
-          ] %*%
-            (contrast_matrix != 0)) >
-            0
-          limma_results$imputation_driven <- driven[cbind(
-            match(limma_results$Protein, rownames(driven)),
-            match(limma_results$comparison, colnames(driven))
-          )]
-        } else {
-          # No imputation was performed: nothing can be imputation-driven.
-          limma_results$imputation_driven <- FALSE
-        }
-
-        limma_results <- limma_results %>%
-          dplyr::mutate(
-            # Significance = FDR criterion + an explicit, user-set effect-size
-            # cutoff. The conditional MDD is deliberately excluded: gating on it
-            # would impose a second, undisclosed threshold on the same moderated
-            # t statistic rather than adding information.
-            status = case_when(
-              imputation_driven %in% TRUE ~ "Not significant",
-              logFC > 0 & adj.P.Val <= sig_fdr & abs(logFC) >= sig_lfc ~
-                "Increased",
-              logFC < 0 & adj.P.Val <= sig_fdr & abs(logFC) >= sig_lfc ~
-                "Decreased",
-              TRUE ~ "Not significant"
-            ),
-            status = factor(
-              status,
-              levels = c("Decreased", "Not significant", "Increased")
-            )
-          )
-
-        incProgress(1.0, detail = "Complete.")
-
-        # Record the run's parameters and sample metadata assignment in the
-        # session log (captured by the app-level message handler and included
-        # in "Download Log History").
-        grp_n <- table(group_labels)
-        message(paste(
-          c(
-            format_limma_params_log(list(
-              input_file = input$matrix_file$name,
-              already_log2 = already_log2(),
-              n_samples = ncol(log2_matrix),
-              samples_per_group = paste0(
-                names(grp_n),
-                " = ",
-                as.integer(grp_n)
-              ),
-              n_proteins_input = n_proteins_input,
-              min_valid_pct = input$min_valid_pct %||% 0,
-              n_proteins_filtered = nrow(log2_matrix),
-              regression_method = reg_method,
-              imputation = if (reg_method == "robust") {
-                paste0(imp_labels[[imp_method]], " (groupwise)")
-              } else {
-                "none (NAs handled by lmFit)"
-              },
-              knn_k = if (reg_method == "robust") attr(imputed_matrix, "knn_k"),
-              downshift = if (reg_method == "robust") {
-                sprintf(
-                  "rnorm(mean = global min - 1 = %.3f, sd = 0.3), seed 123",
-                  global_min - 1
-                )
-              },
-              batch_correction = if (n_batches <= 1) {
-                "none (single batch)"
-              } else if (combat_failed) {
-                sprintf(
-                  "ComBat failed and was bypassed (%d batches)",
-                  n_batches
-                )
-              } else {
-                sprintf(
-                  "sva::ComBat, parametric prior, mod = NULL (%d batches)",
-                  n_batches
-                )
-              },
-              normalization = norm_meth,
-              design = paste0(
-                "~ 0 + condition [",
-                paste(colnames(design), collapse = ", "),
-                "]"
-              ),
-              contrasts = clean_contrasts,
-              ebayes_trend = use_trend,
-              n_trend_excluded = n_trend_excluded,
-              p_adjust = "BH",
-              sig_fdr = sig_fdr,
-              sig_lfc = sig_lfc,
-              mdd_target_power = 0.80,
-              limma_version = as.character(utils::packageVersion("limma"))
-            )),
-            format_limma_metadata_log(
-              meta[match(colnames(raw), meta$Sample), , drop = FALSE],
-              intersect(excluded_samples(), colnames(raw_matrix_full()))
-            )
-          ),
-          collapse = "\n"
-        ))
-
-        list(
-          log2_mat = log2_matrix,
-          batch_mat = mtx_batch_correct,
-          norm_mat = limma_mtx,
-          limma_results = limma_results,
-          # Retained so the prospective MDD simulation can reuse the exact
-          # design, contrasts and eBayes priors of this run.
-          contrast_fit = contrast_fit,
-          design = design,
-          contrast_matrix = contrast_matrix,
-          group_labels = group_labels,
-          trend = use_trend,
-          sig_fdr = sig_fdr,
-          sig_lfc = sig_lfc,
-          min_valid_pct = input$min_valid_pct %||% 0,
-          # NULL in least-squares mode, where limma handles NAs directly.
-          impute_method = if (reg_method == "robust") {
-            input$imputation_method %||% "minprob"
-          } else {
-            NULL
-          },
-          # k selected on the real matrix, reused by the simulation.
-          knn_k = if (reg_method == "robust") {
-            attr(imputed_matrix, "knn_k")
-          } else {
-            NULL
-          }
-        )
-      })
+      )
     })
+
+    # Which statistics produced the current results; drives the SAM / limma
+    # conditional panels of the body. Not suspended, because the panels that
+    # read it are the ones it hides.
+    output$stat_method_run <- reactive({
+      limma_results_ev()$stat_method
+    })
+    outputOptions(output, "stat_method_run", suspendWhenHidden = FALSE)
 
     # `limma_results_ev()` is lazy: on its own it only runs once a visible
     # output asks for it, so a press made while no result tab is showing would
@@ -4281,7 +5197,9 @@ PwrQuant_server <- function(id) {
               is.null(input$matrix_file) || length(input$contrast_pairs) == 0
             ) {
               message(
-                "PwrQuant limma not run: matrix, metadata or contrasts missing."
+                "PwrQuant ",
+                if (identical(input$stat_method, "sam")) "SAM" else "limma",
+                " not run: matrix, metadata or contrasts missing."
               )
             }
           } else {
@@ -4339,6 +5257,14 @@ PwrQuant_server <- function(id) {
 
     mdd_sim_ev <- eventReactive(input$run_mdd, {
       res <- limma_results_ev()
+      if (identical(res$stat_method, "sam")) {
+        showNotification(
+          "The MDD simulation draws from limma's eBayes priors and is not available for a SAM run. Re-run the analysis with limma to use it.",
+          type = "warning",
+          duration = 12
+        )
+        req(FALSE)
+      }
       req(res$contrast_fit, res$design, res$contrast_matrix)
 
       args <- mdd_common_args(res)
@@ -4380,6 +5306,14 @@ PwrQuant_server <- function(id) {
     # ── Replicate sweep for experimental design ────────────────────────────
     mdd_design_ev <- eventReactive(input$run_mdd_design, {
       res <- limma_results_ev()
+      if (identical(res$stat_method, "sam")) {
+        showNotification(
+          "The MDD simulation draws from limma's eBayes priors and is not available for a SAM run. Re-run the analysis with limma to use it.",
+          type = "warning",
+          duration = 12
+        )
+        req(FALSE)
+      }
       req(res$contrast_fit, res$design, res$contrast_matrix)
 
       n_grid <- suppressWarnings(as.integer(trimws(strsplit(
@@ -5222,13 +6156,22 @@ PwrQuant_server <- function(id) {
             dplyr::filter(status != "Not significant") |>
             dplyr::count(comparison, status)
 
-          ggplot(lr, aes(x = logFC, y = -log10(adj.P.Val), color = status)) +
+          # limma: BH-adjusted p-value. SAM: permutation p-value, because its
+          # q-values are heavily tied and often exactly zero.
+          sc <- stat_result_columns(lr)
+          ggplot(
+            lr,
+            aes(x = logFC, y = -log10(.data[[sc$volcano_y]]), color = status)
+          ) +
             geom_point(alpha = 0.3) +
-            geom_hline(
-              yintercept = -log10(0.05),
-              linetype = "dashed",
-              color = "grey40"
-            ) +
+            # The 0.05 guide refers to the adjusted p-value only.
+            (if (sc$method == "limma") {
+              geom_hline(
+                yintercept = -log10(0.05),
+                linetype = "dashed",
+                color = "grey40"
+              )
+            }) +
             geom_vline(
               xintercept = c(-1, 1),
               linetype = "dotted",
@@ -5268,7 +6211,7 @@ PwrQuant_server <- function(id) {
             theme_bw() +
             labs(
               x = "log<sub>2</sub>FC",
-              y = "-log<sub>10</sub>(adj. p-value)"
+              y = paste0("-log<sub>10</sub>", sc$volcano_lab)
             ) +
             theme(
               text = element_text(size = 16),
@@ -5895,6 +6838,8 @@ PwrQuant_server <- function(id) {
       rh(
         function() {
           pw <- limma_results_ev()$limma_results
+          # eBayes posterior SD exists for limma runs only.
+          req("Sigma" %in% names(pw))
           ggplot(pw, aes(x = Sigma, y = abs(logFC))) +
             geom_point(aes(color = status), alpha = 0.3) +
             labs(
@@ -6186,7 +7131,12 @@ PwrQuant_server <- function(id) {
     # ── Downloads ────────────────────────────────────────────────────────────
     output$download_limma <- downloadHandler(
       filename = function() {
-        paste0("limma_results_", Sys.Date(), ".tsv")
+        paste0(
+          limma_results_ev()$stat_method %||% "limma",
+          "_results_",
+          Sys.Date(),
+          ".tsv"
+        )
       },
       content = function(file) {
         data.table::fwrite(
@@ -6599,16 +7549,23 @@ PwrQuant_server <- function(id) {
                 count_ann_vol <- lr_vol |>
                   dplyr::filter(status != "Not significant") |>
                   dplyr::count(comparison, status)
+                sc <- stat_result_columns(lr_vol)
                 ggplot(
                   lr_vol,
-                  aes(x = logFC, y = -log10(adj.P.Val), color = status)
+                  aes(
+                    x = logFC,
+                    y = -log10(.data[[sc$volcano_y]]),
+                    color = status
+                  )
                 ) +
                   geom_point(alpha = 0.3) +
-                  geom_hline(
-                    yintercept = -log10(0.05),
-                    linetype = "dashed",
-                    color = "grey40"
-                  ) +
+                  (if (sc$method == "limma") {
+                    geom_hline(
+                      yintercept = -log10(0.05),
+                      linetype = "dashed",
+                      color = "grey40"
+                    )
+                  }) +
                   geom_vline(
                     xintercept = c(-1, 1),
                     linetype = "dotted",
@@ -6650,7 +7607,7 @@ PwrQuant_server <- function(id) {
                   theme_bw() +
                   labs(
                     x = "log\u2082FC",
-                    y = "-log\u2081\u2080(adj. p-value)"
+                    y = paste0("-log\u2081\u2080", sc$volcano_lab)
                   ) +
                   theme(
                     text = element_text(size = 16),
@@ -6730,35 +7687,53 @@ PwrQuant_server <- function(id) {
             )
 
             # 9. Power plot
-            safe_save("power_plot.png", function() {
-              ggplot(lr, aes(x = Sigma, y = abs(logFC))) +
-                geom_point(aes(color = status), alpha = 0.3) +
-                guides(
-                  color = guide_legend(override.aes = list(alpha = 1, size = 3))
-                ) +
-                labs(
-                  x = "eBayes posterior SD (√s2.post)",
-                  y = "Observed |log₂FC|",
-                  color = "Significance call"
-                ) +
-                scale_color_brewer(palette = "Dark2") +
-                facet_wrap(~comparison, scales = "free", ncol = 2) +
-                theme_bw() +
-                theme(
-                  text = element_text(size = 16),
-                  legend.position = "bottom",
-                  legend.title = element_text(
-                    face = "bold",
-                    color = "black",
-                    hjust = 0.5
-                  ),
-                  legend.title.position = "top",
-                  axis.title = element_text(face = "bold", color = "black"),
-                  axis.text = element_text(face = "bold", color = "black"),
-                  strip.text = element_text(face = "bold"),
-                  strip.background = element_blank()
-                )
-            })
+            if (identical(res$stat_method, "sam")) {
+              safe_save(
+                "sam_plot.png",
+                function() sam_qq_plot(lr, res$sam$summary),
+                w = 14,
+                h = 10
+              )
+              safe_save(
+                "sam_d_vs_s_plot.png",
+                function() sam_scatter_plot(lr),
+                w = 14,
+                h = 10
+              )
+            }
+            if ("Sigma" %in% names(lr)) {
+              safe_save("power_plot.png", function() {
+                ggplot(lr, aes(x = Sigma, y = abs(logFC))) +
+                  geom_point(aes(color = status), alpha = 0.3) +
+                  guides(
+                    color = guide_legend(
+                      override.aes = list(alpha = 1, size = 3)
+                    )
+                  ) +
+                  labs(
+                    x = "eBayes posterior SD (√s2.post)",
+                    y = "Observed |log₂FC|",
+                    color = "Significance call"
+                  ) +
+                  scale_color_brewer(palette = "Dark2") +
+                  facet_wrap(~comparison, scales = "free", ncol = 2) +
+                  theme_bw() +
+                  theme(
+                    text = element_text(size = 16),
+                    legend.position = "bottom",
+                    legend.title = element_text(
+                      face = "bold",
+                      color = "black",
+                      hjust = 0.5
+                    ),
+                    legend.title.position = "top",
+                    axis.title = element_text(face = "bold", color = "black"),
+                    axis.text = element_text(face = "bold", color = "black"),
+                    strip.text = element_text(face = "bold"),
+                    strip.background = element_blank()
+                  )
+              })
+            }
 
             # 10. P-value distribution
             safe_save(
@@ -7563,8 +8538,11 @@ PwrQuant_server <- function(id) {
       )
 
       lr <- tryCatch(limma_results_ev()$limma_results, error = function(e) NULL)
-      if (!is.null(lr) && all(c("Protein", "adj.P.Val") %in% names(lr))) {
+      # adj.P.Val (limma) or q.value (SAM)
+      fdr_col <- if (is.null(lr)) NULL else stat_result_columns(lr)$fdr
+      if (!is.null(lr) && all(c("Protein", fdr_col) %in% names(lr))) {
         best <- lr |>
+          dplyr::mutate(adj.P.Val = .data[[fdr_col]]) |>
           dplyr::filter(Protein %in% df$Protein, !is.na(adj.P.Val)) |>
           dplyr::group_by(Protein) |>
           dplyr::slice_min(adj.P.Val, n = 1, with_ties = FALSE) |>
@@ -8098,7 +9076,77 @@ PwrQuant_server <- function(id) {
       )
     })
 
-    # ── limma results table ────────────────────────────────────────────────
+    # ── SAM-only outputs (hidden by the body unless the run was SAM) ───────
+    sam_run <- reactive({
+      res <- limma_results_ev()
+      req(identical(res$stat_method, "sam"), res$sam)
+      res
+    })
+
+    output$sam_plot <- renderPlot({
+      res <- sam_run()
+      sam_qq_plot(res$limma_results, res$sam$summary)
+    })
+
+    output$sam_scatter_plot <- renderPlot({
+      sam_scatter_plot(sam_run()$limma_results)
+    })
+
+    output$sam_summary_table <- DT::renderDataTable({
+      res <- sam_run()
+      # Calls after the |log2FC| cutoff and the imputation rule, next to the
+      # raw SAM calls the FDR estimate refers to.
+      final <- table(
+        res$limma_results$comparison[
+          res$limma_results$status != "Not significant"
+        ]
+      )
+      sm <- res$sam$summary
+      data.frame(
+        Contrast = sm$comparison,
+        `Proteins tested` = sm$n_tested,
+        Permutations = paste0(
+          sm$n_perm,
+          ifelse(sm$complete_enumeration, " (all", " (random"),
+          ifelse(sm$blocked, ", within batch)", ")")
+        ),
+        s0 = signif(sm$s0, 3),
+        pi0 = round(sm$pi0, 3),
+        Delta = signif(sm$delta, 3),
+        `Cutoff up` = signif(sm$cut_up, 3),
+        `Cutoff down` = signif(sm$cut_down, 3),
+        `Called by SAM` = sm$n_called,
+        `Falsely called (est.)` = round(sm$n_false, 1),
+        `FDR (est.)` = signif(sm$FDR, 3),
+        `Significant after cutoffs` = as.integer(final[sm$comparison]),
+        check.names = FALSE
+      ) |>
+        DT::datatable(
+          rownames = FALSE,
+          options = list(dom = "t", scrollX = TRUE)
+        )
+    })
+
+    output$sam_delta_table <- DT::renderDataTable({
+      dt <- sam_run()$sam$delta_table
+      data.frame(
+        Contrast = factor(dt$comparison),
+        Delta = signif(dt$delta, 4),
+        `Cutoff up` = signif(dt$cut_up, 4),
+        `Cutoff down` = signif(dt$cut_down, 4),
+        `Called` = dt$n_called,
+        `Falsely called (est.)` = round(dt$n_false, 2),
+        `FDR (est.)` = signif(dt$FDR, 3),
+        check.names = FALSE
+      ) |>
+        DT::datatable(
+          rownames = FALSE,
+          filter = "top",
+          options = list(pageLength = 15, scrollX = TRUE)
+        )
+    })
+
+    # ── limma / SAM results table ──────────────────────────────────────────
     output$limma_table_comparison_ui <- renderUI({
       res <- limma_results_ev()
       req(res$limma_results)
@@ -8135,11 +9183,18 @@ PwrQuant_server <- function(id) {
           "status",
           "logFC",
           "AveExpr",
+          # limma: t, adj.P.Val, B, MDD columns. SAM: d, d_expected, s0,
+          # q.value, sam_delta. Whichever set the run produced is shown.
           "t",
+          "d",
+          "d_expected",
           "P.Value",
           "adj.P.Val",
+          "q.value",
           "B",
           "SE",
+          "s0",
+          "sam_delta",
           "Conditional_MDD_Log2FC",
           "Above_MDD",
           "imputation_driven"
@@ -8147,7 +9202,8 @@ PwrQuant_server <- function(id) {
         names(df)
       )
       df <- df[, keep_cols, drop = FALSE]
-      df <- df[order(df$adj.P.Val, -abs(df$logFC)), , drop = FALSE]
+      fdr_col <- stat_result_columns(df)$fdr
+      df <- df[order(df[[fdr_col]], -abs(df$logFC)), , drop = FALSE]
       rownames(df) <- NULL
       df
     })
@@ -8157,10 +9213,21 @@ PwrQuant_server <- function(id) {
       req(nrow(df) > 0)
 
       round_cols <- intersect(
-        c("logFC", "AveExpr", "t", "B", "SE", "Conditional_MDD_Log2FC"),
+        c(
+          "logFC",
+          "AveExpr",
+          "t",
+          "d",
+          "d_expected",
+          "B",
+          "SE",
+          "s0",
+          "sam_delta",
+          "Conditional_MDD_Log2FC"
+        ),
         names(df)
       )
-      sci_cols <- intersect(c("P.Value", "adj.P.Val"), names(df))
+      sci_cols <- intersect(c("P.Value", "adj.P.Val", "q.value"), names(df))
 
       DT::datatable(
         df,
@@ -8185,7 +9252,14 @@ PwrQuant_server <- function(id) {
         } else {
           gsub("[^A-Za-z0-9]+", "_", comp)
         }
-        paste0("limma_table_", tag, "_", Sys.Date(), ".tsv")
+        paste0(
+          limma_results_ev()$stat_method %||% "limma",
+          "_table_",
+          tag,
+          "_",
+          Sys.Date(),
+          ".tsv"
+        )
       },
       content = function(file) {
         data.table::fwrite(
