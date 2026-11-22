@@ -99,6 +99,121 @@ test_that("limma runs end to end with free-form condition and display names", {
   }))
 })
 
+test_that("SAM runs end to end and returns its own result columns", {
+  local_server_packages()
+  logged <- character(0)
+  withCallingHandlers(
+    suppressWarnings(shiny::testServer(PwrQuant_server, {
+      session$setInputs(matrix_file = fixture_upload, already_log2 = FALSE)
+      meta <- metadata_base()
+      meta$Condition <- sub("_r[0-9]+$", "", meta$Sample)
+      meta_all(meta)
+
+      session$setInputs(
+        stat_method = "sam",
+        contrast_pairs = c("m1 vs m0", "m2 vs m0"),
+        sam_imputation = "none",
+        sam_nperm = 200,
+        sam_s0_mode = "auto",
+        sam_fdr_method = "samr",
+        sam_delta_mode = "fdr",
+        sam_seed = 99,
+        norm_method = "none",
+        min_valid_pct = 60,
+        sig_fdr = 0.05,
+        sig_lfc = 1,
+        run_limma = 1
+      )
+      res <- limma_results_ev()
+      lr <- res$limma_results
+
+      expect_equal(res$stat_method, "sam")
+      expect_null(res$contrast_fit)
+      expect_null(res$impute_method)
+      expect_equal(res$sam$summary$comparison, c("m1 vs m0", "m2 vs m0"))
+      expect_true(all(
+        c("d", "d_expected", "q.value", "P.Value", "SE", "s0", "status") %in%
+          names(lr)
+      ))
+      expect_false(any(
+        c("t", "B", "adj.P.Val", "Sigma", "fdr_pass") %in% names(lr)
+      ))
+      expect_equal(lr$group_a[match("m1 vs m0", lr$comparison)], "m1")
+      expect_false(any(lr$imputation_driven))
+
+      # Significance = SAM call + the shared |log2FC| cutoff.
+      sig <- lr$status != "Not significant"
+      expect_true(any(sig))
+      expect_true(all(lr$sam_called[sig]))
+      expect_true(all(abs(lr$logFC[sig]) >= 1))
+      expect_true(all(lr$q.value[sig] <= 0.05))
+      expect_equal(
+        as.character(lr$status[sig]),
+        ifelse(lr$logFC[sig] > 0, "Increased", "Decreased")
+      )
+
+      # The results table adapts its columns to the method.
+      tbl <- limma_table_data()
+      expect_true(all(c("d", "q.value") %in% names(tbl)))
+      expect_false(any(c("t", "adj.P.Val") %in% names(tbl)))
+      expect_false(is.unsorted(tbl$q.value))
+
+      expect_false(any(res$sam$summary$blocked)) # single batch
+
+      # A manual delta replaces the FDR criterion.
+      session$setInputs(sam_delta_mode = "manual", sam_delta = 2, run_limma = 2)
+      res2 <- limma_results_ev()
+      expect_equal(res2$sam$summary$delta, c(2, 2))
+      expect_equal(
+        res2$limma_results$sam_called,
+        res2$limma_results$sam_delta >= 2
+      )
+    })),
+    message = function(m) {
+      logged <<- c(logged, conditionMessage(m))
+      invokeRestart("muffleMessage")
+    }
+  )
+  runs <- grep("PwrQuant SAM parameters", logged, value = TRUE)
+  expect_length(runs, 2)
+  expect_match(
+    runs[1],
+    "SAM permutations used per contrast\\s+: 20 \\(complete"
+  )
+  expect_match(runs[2], "\\(manual\\)")
+  expect_length(grep("PwrQuant limma parameters", logged), 0)
+})
+
+test_that("SAM permutes within Batch when batches cross the conditions", {
+  local_server_packages()
+  suppressWarnings(shiny::testServer(PwrQuant_server, {
+    session$setInputs(matrix_file = fixture_upload, already_log2 = FALSE)
+    meta <- metadata_base()
+    meta$Condition <- sub("_r[0-9]+$", "", meta$Sample)
+    meta$Batch <- ifelse(grepl("_r1$", meta$Sample), "A", "B")
+    meta_all(meta)
+    session$setInputs(
+      stat_method = "sam",
+      contrast_pairs = "m1 vs m0",
+      sam_nperm = 200,
+      norm_method = "none",
+      min_valid_pct = 100,
+      sig_fdr = 0.05,
+      sig_lfc = 0,
+      run_limma = 1
+    )
+    sm <- limma_results_ev()$sam$summary
+    expect_true(sm$blocked)
+    # 1 of 2 batch-A samples x 2 of 4 batch-B samples
+    expect_equal(sm$n_perm, choose(2, 1) * choose(4, 2))
+
+    session$setInputs(sam_block_batch = FALSE, run_limma = 2)
+    sm <- limma_results_ev()$sam$summary
+    expect_false(sm$blocked)
+    expect_equal(sm$n_perm, choose(6, 3))
+  }))
+})
+
 test_that("every Start limma press logs parameters and metadata assignment", {
   local_server_packages()
   logged <- character(0)
