@@ -1,6 +1,6 @@
 ## proteOmni — Unified Proteomics QC Dashboard
 ## Modules: PSManalyst (FragPipe - DDA QC), QC4DIANN (DIA-NN - DIA QC),
-##          deNovo (Casanovo - de novo analysis), PwrQuant (limma + ORA),
+##          deNovo (Casanovo - de novo analysis), PwrQuant (limma / SAM + ORA),
 ##          MaxQuant (MaxQuant - DDA QC), InstaNovo (InstaNovo - de novo analysis),
 ##          EncyclopeDIA (EncyclopeDIA - DIA), Sage (Sage - DDA/DIA QC)
 
@@ -408,7 +408,7 @@ ui <- dashboardPage(
                   div(class = "tool-icon", icon("calculator")),
                   tags$h3("PwrQuant"),
                   tags$p("Differential abundance mapping and Power analysis."),
-                  tags$span("limma / stats", class = "tool-badge")
+                  tags$span("limma / SAM / stats", class = "tool-badge")
                 )
               ),
               column(
