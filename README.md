@@ -21,7 +21,7 @@
 5. [Modules](#modules-included)
    - [PSManalyst](#1-psmanalyst--fragpipe--dda)
    - [QC4DIANN](#2-qc4diann--dia-nn--dia)
-   - [PwrQuant](#3-pwrquant--limma--stats)
+   - [PwrQuant](#3-pwrquant--limma--sam--stats)
    - [Casanovo](#4-casanovo--de-novo)
    - [InstaNovo](#5-instanovo--de-novo)
    - [EncyclopeDIA](#6-encyclopedia--encyclopedia--dia)
@@ -43,7 +43,7 @@
 - **Interactive Visualization** — Explore 3D QuantUMS score distributions, interactive PCA plots, sample correlation matrices, cosine/Euclidean/Jaccard similarity heatmaps, and annotated MS/MS fragmentation spectra directly in the browser.
 - **Peptide-to-Protein Mapping** — Map identified peptides onto user-provided FASTA sequences with a colour-coded protein sequence viewer.
 - **Sequence Profiling & *In Silico* Digestion** — Paste any protein or peptide sequence to get sliding-window profiles (charge, hydropathy, hydrophilicity, amphiphilicity, surface accessibility, beta-turn propensity, B-cell antigenicity, MHC-I T-cell immunogenicity), or digest it with a preset or custom enzyme rule to see the theoretical peptides, the sequence coverage reachable in a given length and m/z window, and theoretical b/y spectra.
-- **Differential Abundance Analysis** — Full limma-based workflow with normalization (limma between-array methods or edgeR TMM), batch correction (ComBat/SVA), flexible missing value imputation (KNN, MinProb, BPCA or missForest), MA plots, volcano plots, and a simulation-based prospective power analysis.
+- **Differential Abundance Analysis** — Full limma-based workflow (or the permutation-based SAM of Tusher et al. 2001 as an alternative test) with normalization (limma between-array methods or edgeR TMM), batch correction (ComBat/SVA), flexible missing value imputation (KNN, MinProb, BPCA or missForest), MA plots, volcano plots, and a simulation-based prospective power analysis.
 - **Prospective Power / Sensitivity Analysis** — Minimum detectable difference (MDD) estimated by simulating fresh datasets from the fitted empirical Bayes priors, spiking in known fold changes, and re-running the real design through `lmFit` → `eBayes` → BH — optionally including intensity-dependent missingness and imputation. A replicate sweep answers "how many replicates would I need?".
 - **Functional Enrichment** — GO over-representation analysis (ORA) with `clusterProfiler::enrichGO`, run per contrast and split by regulation direction, using Bioconductor OrgDb annotation packages for 20 supported organisms.
 - **Protein-Protein Interaction Networks** — STRING interaction networks for the significant proteins of any contrast via the `STRINGdb` package, with nodes halo-coloured by up/down regulation and confidence-score edge filtering.
@@ -146,7 +146,7 @@ proteOmni/
 ├── modules/
 │   ├── mod_PSManalyst.r         # PSManalyst module (FragPipe / DDA)
 │   ├── mod_QC4DIANN.r           # QC4DIANN module (DIA-NN / DIA)
-│   ├── mod_PwrQuant.r           # PwrQuant module (limma / differential abundance)
+│   ├── mod_PwrQuant.r           # PwrQuant module (limma / SAM differential abundance)
 │   ├── mod_PwrQuantDocs.r       # In-app Documentation page for PwrQuant
 │   ├── dash_deNovo.r            # Casanovo de novo module
 │   ├── mod_InstaNovo.r          # InstaNovo de novo module
@@ -231,7 +231,7 @@ Diagnostics for DIA-NN `report.parquet` files. Optionally accepts a FASTA file (
 
 ---
 
-### 3. PwrQuant — *limma / stats*
+### 3. PwrQuant — *limma / SAM / stats*
 
 End-to-end differential abundance and statistical power analysis pipeline. Accepts any protein abundance matrix in `.tsv`, `.txt`, or `.csv` format (proteins × samples), with a checkbox to declare the values as already log2-transformed. See [PwrQuant — Analytical Pipeline](#pwrquant--analytical-pipeline) for full details, and the in-app **Documentation** menu item for a step-by-step explanation of the statistics.
 
@@ -242,17 +242,19 @@ End-to-end differential abundance and statistical power analysis pipeline. Accep
 | **Metadata Mapping** | Editable table for assigning samples to conditions and batches; samples can be excluded from the analysis |
 | **Sparsity** | Missing-value heatmap (`naniar::vis_miss`) |
 | **Pre-processing QC** | CV distributions per condition, mean–variance relationship (loess trend), raw and normalized abundance boxplots, PCA and PLS-DA on raw and processed data |
-| **Differential Abundance** | MA/Bland-Altman plots, volcano plots with user-selected protein labels, top-20 DAP bar mirror chart, raw p-value histograms per contrast |
+| **Differential Abundance** | MA/Bland-Altman plots, volcano plots with user-selected protein labels, top-20 DAP bar mirror chart, raw p-value histograms per contrast. After a SAM run: the SAM plot (observed vs expected relative difference with the Δ band) and a per-contrast summary |
 | **Correlation** | Inter-contrast logFC scatter with Spearman ρ and concordant/inverse/mismatch classification, with a downloadable table |
-| **Power Statistics** | Prospective MDD power curve from simulated data (with summary table), an MDD-vs-replicates design sweep, and a conditional per-protein sensitivity map (diagnostic only) |
+| **Power Statistics** | limma runs: prospective MDD power curve from simulated data (with summary table), an MDD-vs-replicates design sweep, and a conditional per-protein sensitivity map (diagnostic only). SAM runs: *d(i)* vs *s(i)* scatter and the Δ table (called, falsely called, FDR per Δ) |
 | **Enrichment** | GO over-representation analysis with `clusterProfiler::enrichGO`, run per contrast and split by up/down direction; results shown as a dotplot (top terms per contrast) and a Manhattan plot (all enriched terms), across 20 supported OrgDb organisms |
 | **Interaction Network** | STRING protein-protein interaction network (`STRINGdb`) for a selected contrast, with nodes halo-coloured by regulation and edges filtered by a confidence score; unmapped proteins are listed for transparency |
 | **Selected Proteins** | Abundance profiles for a user-selected set of proteins across conditions (adjustable grid columns) |
 | **UpSet — Proteins by Condition** | Intersections of detected proteins across conditions, with a downloadable membership table |
-| **limma Results Table** | Full `topTable` output filterable by significance status, downloadable as `.tsv` |
+| **Statistics Results Table** | Full per-protein results (limma `topTable` output, or the SAM table) filterable by significance status, downloadable as `.tsv` |
 | **Z-Score Heatmap** | Row-scaled heatmap of significant or top-N proteins (`ComplexHeatmap`) with row clustering, downloadable cluster assignments, per-cluster abundance profiles, and per-cluster GO enrichment |
 
-Sidebar downloads: limma results, ORA results, STRING network, and a ZIP of all plots.
+Sidebar downloads: statistics results (limma or SAM), ORA results, STRING network, and a ZIP of all plots.
+
+The **Statistics** selector in the sidebar switches between **limma** (default) and **SAM** (Significance Analysis of Microarrays, Tusher et al. 2001); the controls specific to the selected method appear below it. See [Step 6b](#step-6b--sam-alternative-to-limma).
 
 ---
 
@@ -508,7 +510,40 @@ The **eBayes trend** parameter (sidebar toggle) controls whether the prior varia
 - **Flat trend line** → `trend = FALSE`
 - **Positively sloped trend** → `trend = TRUE`
 
+### Step 6b — SAM (alternative to limma)
+
+Selecting **Statistics = SAM** replaces Step 6 with the Significance Analysis of Microarrays of [Tusher, Tibshirani & Chu, 2001](https://doi.org/10.1073/pnas.091062498). Steps 1–5 are unchanged, except that imputation is controlled by SAM's own **Missing values** option (default: none, the statistic is computed on the observed values). SAM is implemented inside the module (`sam_contrast()` / `run_sam()`), not through the `samr` package, so that it runs on the same contrast matrix and the same NA-containing matrix as limma; no extra dependency is needed.
+
+For every contrast the **relative difference** is
+
+$$d(i) = \frac{r(i)}{s(i) + s_0}$$
+
+where *r(i)* is the contrast of the group means (the log2FC), *s(i)* is its pooled-variance standard error over the groups in the contrast (Eq. 2 of the paper for `A vs B`), and *s₀* is a small constant that stops proteins with a tiny variance from dominating. By default *s₀* is the percentile of *s(i)* that minimises the coefficient of variation of *d(i)* across 100 windows of *s(i)* (the 5th percentile when fewer than 500 proteins are testable).
+
+The null distribution comes from **permuting the sample labels** of the groups in the contrast. The expected relative difference *dE(i)* is the average, over permutations, of the *i*-th ordered *d*. Proteins whose distance from the *d = dE* line exceeds a threshold **Δ** are called, and the FDR of a Δ is the number of permuted *d* beyond the resulting cutoffs divided by the number of proteins called.
+
+| Sidebar control | Meaning |
+|---|---|
+| **Missing values** | `No imputation` (default) or one of the four imputation methods of Step 3 |
+| **Permutations** | Number of label permutations (default 1000). When a two-group contrast has fewer distinct splits (e.g. 20 for 3 vs 3) all of them are enumerated instead |
+| **Balanced permutations (within Batch)** | With more than one batch, labels are swapped only between samples of the same batch, so each permuted group keeps its batch composition — the "balanced" permutations of the paper. Falls back to unrestricted permutations, with a warning, for a contrast whose samples share one batch or whose groups are confounded with batch |
+| **Fudge factor s₀** | Automatic (minimise the CV of *d(i)*), a fixed percentile of *s(i)*, or zero (ordinary *t*-statistic) |
+| **FDR estimator** | `π₀ × median` number of falsely called proteins (the estimator of the later SAM software; default), or the `mean` number without π₀ (the 2001 paper) |
+| **Threshold Δ** | Chosen so that the estimated FDR meets the sidebar *Significance FDR* (equivalent to `q.value ≤ FDR`), or entered manually |
+| **Permutation seed** | Makes the random permutations reproducible |
+
+**Result columns.** A SAM run returns `logFC`, `AveExpr`, `d`, `d_expected`, `SE` (= *s(i)*), `s0`, `P.Value` (permutation p-value pooled over proteins), `q.value` (lowest FDR at which the protein is called), `sam_delta` (largest Δ at which it is still called) and `sam_called`. It has no `t`, `B`, `adj.P.Val`, `Sigma` or MDD columns; the tabs adapt accordingly (the volcano plot shows the permutation p-value, because q-values are heavily tied and often exactly zero).
+
+**Caveats.**
+- With few replicates the permutation null is coarse (20 splits for 3 vs 3; fewer with balanced permutations). The app warns when fewer than 50 exist.
+- With complete enumeration and very few splits the original mean-based estimator cannot report a low FDR (the true labelling and its mirror are among the permutations: at least 10% for 3 vs 3). Use the default estimator in that situation.
+- The default estimator scales by π₀, which BH does not, so SAM typically calls more proteins than limma at the same nominal FDR when many proteins change.
+- Balanced permutations restrict the null distribution; they do not remove a batch effect from *d(i)* itself. ComBat (Step 4) still does that.
+- Paired designs are not supported.
+
 ### Step 7 — Power analysis / minimum detectable difference (MDD)
+
+> Step 7 applies to **limma** runs only: both quantities are built on the `eBayes` fit. After a SAM run the *Power Statistics* tab shows the SAM diagnostics of Step 6b instead.
 
 The *Power Statistics* tab reports **two distinct quantities**. They answer different questions and should not be confused.
 
@@ -577,7 +612,7 @@ Unbalanced group sizes and non-pairwise contrasts are handled correctly because 
 
 ### Step 8 — Results and significance calling
 A protein is called **significant** if:
-- `adj.P.Val ≤ 0.05`,
+- `adj.P.Val ≤ 0.05` (limma; the cutoff is the sidebar *Significance FDR*), or the SAM call of Step 6b (q-value ≤ the same cutoff, or the manual Δ),
 - log2FC threshold user-defined,
 - Safeguard for not imputation-driven (i.e. not completely absent in one of the contrast groups).
 
@@ -629,7 +664,7 @@ Every proteOmni session automatically writes a log file (`Session_Info_log.txt`)
 - Platform information
 - Installed package versions for all key dependencies
 - All R `message()` and `warning()` calls with timestamps
-- For PwrQuant, one entry per **Start limma** press: the limma parameters used and the sample metadata assignment (sample, display name, condition, batch, removed samples), or the reason the run did not start
+- For PwrQuant, one entry per **Start analysis** press: the limma or SAM parameters used and the sample metadata assignment (sample, display name, condition, batch, removed samples), or the reason the run did not start
 
 The log file can be downloaded at any time using the **Download Log History** button at the top of the sidebar. This is useful for reproducing analyses and reporting issues.
 
