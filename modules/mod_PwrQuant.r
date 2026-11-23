@@ -2194,6 +2194,254 @@ detect_go_keytype <- function(lookup_ids) {
   if (mean(is_uniprot_accession(lookup_ids)) >= 0.5) "UNIPROT" else "SYMBOL"
 }
 
+# Maps IDs to keys of the OrgDb's `target` keytype, trying each of `sources`
+# in turn for the IDs still unmapped. Returns a vector named by ID (NA where
+# no source keytype contains it).
+map_ids_to_orgdb_key <- function(ids, orgdb, sources, target) {
+  map <- setNames(rep(NA_character_, length(ids)), ids)
+  for (src in sources) {
+    todo <- names(map)[is.na(map)]
+    if (length(todo) == 0) {
+      break
+    }
+    # Some OrgDbs advertise keytypes they cannot serve (org.Pf.plasmo.db lists
+    # ENTREZID but errors on it), so a failing keytype is skipped.
+    hits <- tryCatch(
+      intersect(todo, AnnotationDbi::keys(orgdb, keytype = src)),
+      error = function(e) character(0)
+    )
+    if (length(hits) == 0) {
+      next
+    }
+    map[hits] <- if (identical(src, target)) {
+      hits
+    } else {
+      tryCatch(
+        as.character(suppressMessages(AnnotationDbi::mapIds(
+          orgdb,
+          keys = hits,
+          column = target,
+          keytype = src,
+          multiVals = "first"
+        ))),
+        error = function(e) NA_character_
+      )
+    }
+  }
+  map
+}
+
+# App-wide cache of UniProt accession -> gene-identifier lookups, so the
+# enrichment tabs query each accession once per R process.
+.uniprot_gene_cache <- new.env(parent = emptyenv())
+
+# Looks up gene identifiers for UniProt accessions through the UniProt REST
+# API. Returns a long data.frame (id, candidate) with each accession's
+# candidates in priority order: database cross-references first (TAIR locus,
+# Entrez GeneID), then locus/ORF names, then gene names. `id` is the accession
+# as supplied (isoform suffix kept). Throws if UniProt cannot be reached.
+fetch_uniprot_gene_ids <- function(accessions, chunk_size = 300L) {
+  accessions <- unique(accessions[!is.na(accessions) & nzchar(accessions)])
+  empty <- data.frame(
+    id = character(0),
+    candidate = character(0),
+    stringsAsFactors = FALSE
+  )
+  if (length(accessions) == 0) {
+    return(empty)
+  }
+  base_acc <- sub("-[0-9]+$", "", accessions)
+  missing <- setdiff(unique(base_acc), ls(.uniprot_gene_cache))
+  chunks <- split(missing, ceiling(seq_along(missing) / chunk_size))
+  split_field <- function(x) {
+    x <- unlist(strsplit(x, "[; ]+"))
+    x[!is.na(x) & nzchar(x)]
+  }
+  for (chunk in chunks) {
+    resp <- httr::GET(
+      "https://rest.uniprot.org/uniprotkb/accessions",
+      query = list(
+        accessions = paste(chunk, collapse = ","),
+        fields = "accession,xref_tair,xref_geneid,gene_oln,gene_orf,gene_primary,gene_synonym",
+        format = "tsv"
+      ),
+      httr::timeout(60)
+    )
+    if (httr::status_code(resp) != 200) {
+      stop("UniProt returned HTTP ", httr::status_code(resp))
+    }
+    tbl <- utils::read.delim(
+      text = httr::content(resp, as = "text", encoding = "UTF-8"),
+      colClasses = "character",
+      quote = "",
+      check.names = FALSE
+    )
+    for (i in seq_len(nrow(tbl))) {
+      cands <- split_field(unlist(tbl[i, -1], use.names = FALSE))
+      # Locus names are often mixed case in UniProt (At5g10270) but upper case
+      # in the OrgDb.
+      assign(
+        tbl[[1]][i],
+        unique(c(cands, toupper(cands))),
+        envir = .uniprot_gene_cache
+      )
+    }
+    # Remember accessions UniProt does not know, so they are not re-queried.
+    for (acc in setdiff(chunk, tbl[[1]])) {
+      assign(acc, character(0), envir = .uniprot_gene_cache)
+    }
+  }
+  per_acc <- lapply(seq_along(accessions), function(i) {
+    cands <- .uniprot_gene_cache[[base_acc[i]]]
+    if (length(cands) == 0) {
+      return(NULL)
+    }
+    data.frame(id = accessions[i], candidate = cands, stringsAsFactors = FALSE)
+  })
+  per_acc <- per_acc[!vapply(per_acc, is.null, logical(1))]
+  if (length(per_acc) == 0) empty else do.call(rbind, per_acc)
+}
+
+# Resolves lookup IDs to keys of one OrgDb keytype usable by enrichGO().
+#
+# UniProt accessions for an OrgDb without a UNIPROT keytype are first turned
+# into gene identifiers through the UniProt REST API.
+#
+# The org.*.eg.db packages (human, mouse, ...) expose SYMBOL and UNIPROT, so
+# the IDs are used as they are. Other OrgDbs differ: org.Sc.sgd.db has no
+# SYMBOL keytype (gene names are GENENAME/COMMON) and yeast matrices mix gene
+# names with systematic ORF names; org.At.tair.db and org.Pf.plasmo.db are
+# keyed on TAIR/ORF. For those, each ID is translated to the central keytype by
+# trying the candidate source keytypes in turn.
+#
+# Returns list(keytype, map, labels): `map` is named by input ID (NA where it
+# could not be resolved); `labels` is NULL when the IDs are used unchanged,
+# otherwise a key -> display-name vector for relabelling enrichGO's geneID.
+resolve_go_ids <- function(
+  lookup_ids,
+  orgdb,
+  uniprot_lookup = fetch_uniprot_gene_ids
+) {
+  ids <- unique(lookup_ids[!is.na(lookup_ids) & nzchar(lookup_ids)])
+  kts <- AnnotationDbi::keytypes(orgdb)
+  preferred <- detect_go_keytype(ids)
+  central <- intersect(c("ORF", "TAIR"), kts)
+
+  if (preferred %in% kts && length(central) == 0) {
+    return(list(keytype = preferred, map = setNames(ids, ids), labels = NULL))
+  }
+
+  target <- if (length(central) > 0) central[1] else "ENTREZID"
+  sources <- intersect(
+    unique(c(
+      preferred,
+      "SYMBOL",
+      "GENENAME",
+      "COMMON",
+      target,
+      "ALIAS",
+      "UNIPROT"
+    )),
+    kts
+  )
+  map <- map_ids_to_orgdb_key(ids, orgdb, sources, target)
+
+  # OrgDbs without a UNIPROT keytype (E. coli, Arabidopsis, Plasmodium, ...):
+  # ask UniProt for each accession's gene identifiers and resolve those.
+  via_uniprot <- identical(preferred, "UNIPROT") && !"UNIPROT" %in% kts
+  uniprot_error <- NULL
+  if (via_uniprot && anyNA(map)) {
+    todo <- names(map)[is.na(map)]
+    cand <- tryCatch(
+      uniprot_lookup(todo[is_uniprot_accession(todo)]),
+      error = function(e) {
+        uniprot_error <<- conditionMessage(e)
+        NULL
+      }
+    )
+    if (!is.null(cand) && nrow(cand) > 0) {
+      cand_sources <- intersect(
+        unique(c(target, "ENTREZID", "SYMBOL", "COMMON", "ALIAS")),
+        kts
+      )
+      cand$key <- unname(map_ids_to_orgdb_key(
+        unique(cand$candidate),
+        orgdb,
+        cand_sources,
+        target
+      )[cand$candidate])
+      # Candidates are in priority order, so keep each accession's first hit.
+      cand <- cand[!is.na(cand$key), , drop = FALSE]
+      cand <- cand[!duplicated(cand$id), , drop = FALSE]
+      map[cand$id] <- cand$key
+    }
+  }
+
+  if (all(is.na(map))) {
+    stop(
+      "None of the protein identifiers could be matched to the selected ",
+      "organism's annotation package (tried keytypes: ",
+      paste(sources, collapse = ", "),
+      if (via_uniprot) ", plus gene identifiers looked up in UniProt",
+      "). Check that the Organism (OrgDb) matches your samples",
+      if (!is.null(uniprot_error)) {
+        paste0(
+          "; this OrgDb has no UniProt accessions and the UniProt lookup ",
+          "failed (",
+          uniprot_error,
+          "), so check your internet connection or use a gene-name matrix"
+        )
+      },
+      ".",
+      call. = FALSE
+    )
+  }
+
+  # Display names: the user's own IDs, unless those are UniProt accessions, in
+  # which case gene names from the OrgDb are more readable.
+  ok <- !is.na(map)
+  labels <- setNames(names(map)[ok], map[ok])
+  labels <- labels[!duplicated(names(labels))]
+  name_col <- intersect(c("SYMBOL", "GENENAME"), kts)
+  if (identical(preferred, "UNIPROT") && length(name_col) > 0) {
+    gene_names <- tryCatch(
+      suppressMessages(AnnotationDbi::mapIds(
+        orgdb,
+        keys = names(labels),
+        column = name_col[1],
+        keytype = target,
+        multiVals = "first"
+      )),
+      error = function(e) NULL
+    )
+    if (!is.null(gene_names)) {
+      gene_names <- as.character(gene_names)
+      labels[] <- ifelse(is.na(gene_names), names(labels), gene_names)
+    }
+  }
+  list(keytype = target, map = map, labels = labels)
+}
+
+# Translates lookup IDs to the enrichment keys of a resolve_go_ids() result.
+to_go_keys <- function(id_res, lookup_ids) {
+  lookup_ids <- lookup_ids[!is.na(lookup_ids) & nzchar(lookup_ids)]
+  keys <- unname(id_res$map[lookup_ids])
+  unique(keys[!is.na(keys)])
+}
+
+# Some OrgDb packages are tied to a strain-level NCBI taxon that STRING does
+# not list; STRING files the same organism under another taxon ID.
+pwrquant_string_taxon_alias <- c("559292" = "4932", "83333" = "511145")
+
+string_taxon_for <- function(taxon_id) {
+  taxon_id <- trimws(as.character(taxon_id %||% ""))
+  if (taxon_id %in% names(pwrquant_string_taxon_alias)) {
+    taxon_id <- pwrquant_string_taxon_alias[[taxon_id]]
+  }
+  taxon <- suppressWarnings(as.integer(taxon_id))
+  if (is.na(taxon)) 9606L else taxon
+}
+
 parse_ratio_fraction <- function(x) {
   vapply(
     strsplit(as.character(x), "/", fixed = TRUE),
@@ -2204,6 +2452,55 @@ parse_ratio_fraction <- function(x) {
   )
 }
 
+# FALSE for OrgDbs that have no usable ENTREZID keytype. org.Pf.plasmo.db
+# lists ENTREZID among its keytypes but errors when it is queried.
+orgdb_serves_entrez <- function(orgdb) {
+  tryCatch(
+    length(AnnotationDbi::keys(orgdb, keytype = "ENTREZID")) > 0,
+    error = function(e) FALSE
+  )
+}
+
+# GO gene sets read straight from an OrgDb, in the shape enricher() expects.
+# GOALL includes annotations inherited from child terms, as enrichGO() uses.
+# Returns list(term2gene, term2name, ontology); `ontology` is named by GO ID.
+orgdb_go_term2gene <- function(orgdb, keytype, ont = "ALL") {
+  go <- suppressMessages(AnnotationDbi::select(
+    orgdb,
+    keys = AnnotationDbi::keys(orgdb, keytype = keytype),
+    keytype = keytype,
+    columns = c("GOALL", "ONTOLOGYALL")
+  ))
+  go <- go[!is.na(go$GOALL) & !is.na(go$ONTOLOGYALL), , drop = FALSE]
+  if (!identical(ont, "ALL")) {
+    go <- go[go$ONTOLOGYALL == ont, , drop = FALSE]
+  }
+  go <- unique(go[, c("GOALL", keytype, "ONTOLOGYALL")])
+  if (nrow(go) == 0) {
+    stop(
+      "The selected organism's annotation package has no GO annotations ",
+      "for the requested category.",
+      call. = FALSE
+    )
+  }
+  term_ids <- unique(go$GOALL)
+  term_names <- suppressMessages(AnnotationDbi::select(
+    GO.db::GO.db,
+    keys = term_ids,
+    keytype = "GOID",
+    columns = "TERM"
+  ))
+  # Terms obsolete in the installed GO.db keep their ID as the description.
+  term_names$TERM[is.na(term_names$TERM)] <- term_names$GOID[
+    is.na(term_names$TERM)
+  ]
+  list(
+    term2gene = setNames(go[, c("GOALL", keytype)], c("term", "gene")),
+    term2name = setNames(term_names[, c("GOID", "TERM")], c("term", "name")),
+    ontology = setNames(go$ONTOLOGYALL, go$GOALL)[term_ids]
+  )
+}
+
 run_per_contrast_enrichment <- function(
   gene_clusters,
   orgdb,
@@ -2211,7 +2508,8 @@ run_per_contrast_enrichment <- function(
   universe = NULL,
   ont = "ALL",
   pvalue_cutoff = 0.05,
-  qvalue_cutoff = 0.2
+  qvalue_cutoff = 0.2,
+  labels = NULL
 ) {
   gene_clusters <- gene_clusters[
     vapply(gene_clusters, function(g) length(g) > 0, logical(1))
@@ -2219,26 +2517,63 @@ run_per_contrast_enrichment <- function(
   if (length(gene_clusters) == 0) {
     return(NULL)
   }
+  # enrichGO() converts every ID to ENTREZID, which some OrgDbs cannot serve;
+  # those are tested with enricher() on GO annotations read from the OrgDb.
+  go_sets <- if (orgdb_serves_entrez(orgdb)) {
+    NULL
+  } else {
+    orgdb_go_term2gene(orgdb, keytype, ont)
+  }
   per <- lapply(names(gene_clusters), function(cmp) {
-    eg <- clusterProfiler::enrichGO(
-      gene = gene_clusters[[cmp]],
-      OrgDb = orgdb,
-      keyType = keytype,
-      ont = ont,
-      universe = universe,
-      pvalueCutoff = pvalue_cutoff,
-      qvalueCutoff = qvalue_cutoff
-    )
+    eg <- if (is.null(go_sets)) {
+      clusterProfiler::enrichGO(
+        gene = gene_clusters[[cmp]],
+        OrgDb = orgdb,
+        keyType = keytype,
+        ont = ont,
+        universe = universe,
+        pvalueCutoff = pvalue_cutoff,
+        qvalueCutoff = qvalue_cutoff
+      )
+    } else {
+      clusterProfiler::enricher(
+        gene = gene_clusters[[cmp]],
+        TERM2GENE = go_sets$term2gene,
+        TERM2NAME = go_sets$term2name,
+        universe = universe,
+        pvalueCutoff = pvalue_cutoff,
+        qvalueCutoff = qvalue_cutoff
+      )
+    }
     if (is.null(eg) || nrow(as.data.frame(eg)) == 0) {
       return(NULL)
     }
-    if (!identical(keytype, "SYMBOL")) {
+    if (is.null(go_sets) && is.null(labels) && !identical(keytype, "SYMBOL")) {
       eg <- tryCatch(
         clusterProfiler::setReadable(eg, OrgDb = orgdb, keyType = keytype),
         error = function(e) eg
       )
     }
     d <- as.data.frame(eg)
+    if (!is.null(go_sets) && identical(ont, "ALL")) {
+      # Same leading column enrichGO(ont = "ALL") returns.
+      d <- cbind(
+        ONTOLOGY = unname(go_sets$ontology[d$ID]),
+        d,
+        stringsAsFactors = FALSE
+      )
+    }
+    if (!is.null(labels)) {
+      # setReadable() needs a SYMBOL keytype, which these OrgDbs may lack.
+      d$geneID <- vapply(
+        strsplit(as.character(d$geneID), "/", fixed = TRUE),
+        function(g) {
+          lab <- unname(labels[g])
+          paste(ifelse(is.na(lab), g, lab), collapse = "/")
+        },
+        character(1)
+      )
+    }
     d$Group <- cmp
     d
   })
@@ -5639,8 +5974,9 @@ PwrQuant_server <- function(id) {
           #    the keyType from the resolved lookup IDs.
           incProgress(0.35, detail = "Resolving protein identifiers")
           all_ids <- unique(lr$Protein)
-          universe <- unique(extract_uniprot_lookup_id(all_ids))
-          keytype <- detect_go_keytype(universe)
+          id_res <- resolve_go_ids(extract_uniprot_lookup_id(all_ids), orgdb)
+          keytype <- id_res$keytype
+          universe <- unique(unname(id_res$map[!is.na(id_res$map)]))
 
           # 3. One gene cluster per selected limma contrast: its significant &
           #    reliable proteins, mapped to the enrichment keyType. When no
@@ -5689,6 +6025,20 @@ PwrQuant_server <- function(id) {
           # OrgDb under the chosen keyType.
           incProgress(0.5, detail = "Checking annotation coverage")
           query_ids <- unique(unlist(gene_clusters))
+          query_ids <- query_ids[!is.na(query_ids) & nzchar(query_ids)]
+          query_keys <- unname(id_res$map[query_ids])
+          gene_clusters <- lapply(gene_clusters, to_go_keys, id_res = id_res)
+          gene_clusters <- gene_clusters[
+            vapply(gene_clusters, length, integer(1)) > 0
+          ]
+          if (length(gene_clusters) == 0) {
+            stop(
+              "None of the significant protein identifiers could be matched to ",
+              "the selected organism's annotation package. Check that the ",
+              "Organism (OrgDb) matches your samples.",
+              call. = FALSE
+            )
+          }
           annotated <- tryCatch(
             suppressWarnings(suppressMessages(
               AnnotationDbi::keys(orgdb, keytype = keytype)
@@ -5696,7 +6046,7 @@ PwrQuant_server <- function(id) {
             error = function(e) character(0)
           )
           if (length(annotated) > 0) {
-            n_ann <- length(intersect(query_ids, annotated))
+            n_ann <- sum(!is.na(query_keys) & query_keys %in% annotated)
             coverage_pct <- 100 * n_ann / length(query_ids)
             coverage_msg <- sprintf(
               "GO annotation coverage: %d of %d significant IDs (%.1f%%) map to the OrgDb (keyType = %s).",
@@ -5722,7 +6072,8 @@ PwrQuant_server <- function(id) {
               universe = universe,
               ont = ont,
               pvalue_cutoff = fdr_cutoff,
-              qvalue_cutoff = fdr_cutoff
+              qvalue_cutoff = fdr_cutoff,
+              labels = id_res$labels
             ),
             error = function(e) {
               stop(
@@ -5778,10 +6129,7 @@ PwrQuant_server <- function(id) {
         {
           lr <- limma_results_ev()$limma_results
           taxon_id <- trimws(input$uniprot_taxon %||% "")
-          taxon_species <- suppressWarnings(as.integer(taxon_id))
-          if (is.na(taxon_species)) {
-            taxon_species <- 9606L
-          }
+          taxon_species <- string_taxon_for(taxon_id)
           score_threshold <- input$string_score_threshold %||% 400
           scope <- input$string_scope %||% "combined"
 
@@ -8985,13 +9333,20 @@ PwrQuant_server <- function(id) {
           }
 
           incProgress(0.35, detail = "Resolving protein identifiers")
-          universe <- unique(extract_uniprot_lookup_id(rownames(raw_matrix())))
-          keytype <- detect_go_keytype(universe)
+          id_res <- resolve_go_ids(
+            extract_uniprot_lookup_id(rownames(raw_matrix())),
+            orgdb
+          )
+          keytype <- id_res$keytype
+          universe <- unique(unname(id_res$map[!is.na(id_res$map)]))
 
           gene_clusters <- lapply(selected, function(k) {
-            unique(extract_uniprot_lookup_id(
-              names(cl$cluster)[as.character(cl$cluster) == k]
-            ))
+            to_go_keys(
+              id_res,
+              extract_uniprot_lookup_id(
+                names(cl$cluster)[as.character(cl$cluster) == k]
+              )
+            )
           })
           names(gene_clusters) <- paste("Cluster", selected)
           gene_clusters <- gene_clusters[
@@ -9010,7 +9365,8 @@ PwrQuant_server <- function(id) {
               universe = universe,
               ont = ont,
               pvalue_cutoff = fdr_cutoff,
-              qvalue_cutoff = fdr_cutoff
+              qvalue_cutoff = fdr_cutoff,
+              labels = id_res$labels
             ),
             error = function(e) {
               stop(
