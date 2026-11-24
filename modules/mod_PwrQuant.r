@@ -1860,8 +1860,14 @@ sam_status_colors <- c(
   "Increased" = "firebrick"
 )
 
-#' SAM plot: observed vs expected relative difference, with the delta band
-sam_qq_plot <- function(lr, sam_summary) {
+# SAM plot: observed vs expected relative difference, with the delta band
+sam_qq_plot <- function(
+  lr,
+  sam_summary,
+  ncol = 2L,
+  font_size = 16,
+  base_theme = ggplot2::theme_bw(base_size = font_size)
+) {
   lr <- lr[!is.na(lr$d) & !is.na(lr$d_expected), , drop = FALSE]
   band <- sam_summary[is.finite(sam_summary$delta), , drop = FALSE]
   band <- rbind(
@@ -1879,19 +1885,20 @@ sam_qq_plot <- function(lr, sam_summary) {
     ) +
     scale_color_manual(values = sam_status_colors) +
     guides(color = guide_legend(override.aes = list(alpha = 1, size = 3))) +
-    facet_wrap(~comparison, scales = "free", ncol = 2) +
-    theme_bw() +
+    facet_wrap(~comparison, scales = "free", ncol = ncol) +
+    base_theme +
     labs(
-      x = "Expected relative difference dE(i)",
-      y = "Observed relative difference d(i)"
+      x = "Expected relative difference *d<sub>E</sub>(i)*",
+      y = "Observed relative difference *d(i)*"
     ) +
     theme(
-      text = element_text(size = 16),
+      text = element_text(size = font_size),
       strip.text = element_text(face = "bold"),
       strip.background = element_blank(),
       legend.position = "bottom",
       legend.title = element_blank(),
-      axis.title = element_text(face = "bold", color = "black"),
+      axis.title.y = element_markdown(face = "bold", color = "black"),
+      axis.title.x = element_markdown(face = "bold", color = "black"),
       axis.text = element_text(face = "bold", color = "black")
     )
 }
@@ -4015,6 +4022,59 @@ PwrQuant_body_ui <- function(id) {
     ),
     tabPanel(
       "Differential Abundance",
+      fluidRow(
+        box(
+          title = "Plot aesthetics",
+          status = "info",
+          solidHeader = TRUE,
+          width = 12,
+          collapsible = TRUE,
+          collapsed = FALSE,
+          fluidRow(
+            column(
+              4,
+              numericInput(
+                ns("da_facet_ncol"),
+                "Facet columns",
+                value = 2,
+                min = 1,
+                max = 6,
+                step = 1,
+                width = "100%"
+              )
+            ),
+            column(
+              4,
+              numericInput(
+                ns("da_font_size"),
+                "Font size",
+                value = 16,
+                min = 8,
+                max = 28,
+                step = 1,
+                width = "100%"
+              )
+            ),
+            column(
+              4,
+              selectInput(
+                ns("da_theme"),
+                "Theme",
+                choices = c(
+                  "Black & White (theme_bw)" = "bw",
+                  "Classic (theme_classic)" = "classic",
+                  "Minimal (theme_minimal)" = "minimal",
+                  "Light (theme_light)" = "light",
+                  "Linedraw (theme_linedraw)" = "linedraw",
+                  "Grey (theme_grey)" = "grey"
+                ),
+                selected = "bw",
+                width = "100%"
+              )
+            )
+          )
+        )
+      ),
       # Shown only after a SAM run (see output$stat_method_run).
       conditionalPanel(
         condition = sprintf("output['%s'] == 'sam'", ns("stat_method_run")),
@@ -4569,18 +4629,32 @@ PwrQuant_body_ui <- function(id) {
           width = 12,
           fluidRow(
             column(
-              9,
-              selectizeInput(
-                ns("sel_proteins"),
-                "Proteins to plot",
-                choices = NULL,
-                multiple = TRUE,
-                options = list(placeholder = "Type or select proteins..."),
+              4,
+              selectInput(
+                ns("sel_proteins_status"),
+                "Filter by statistical status",
+                choices = c(
+                  "All" = "All",
+                  "Increased" = "Increased",
+                  "Decreased" = "Decreased",
+                  "Not significant" = "Not significant"
+                ),
+                selected = "All",
                 width = "100%"
               )
             ),
             column(
-              3,
+              4,
+              selectInput(
+                ns("sel_proteins_comparison"),
+                "Contrast (for status filter)",
+                choices = c("All contrasts" = "All"),
+                selected = "All",
+                width = "100%"
+              )
+            ),
+            column(
+              4,
               numericInput(
                 ns("sel_proteins_ncol"),
                 "Facet columns",
@@ -4590,6 +4664,20 @@ PwrQuant_body_ui <- function(id) {
                 step = 1,
                 width = "100%"
               )
+            )
+          ),
+          fluidRow(
+            column(
+              12,
+              selectizeInput(
+                ns("sel_proteins"),
+                "Proteins to plot",
+                choices = NULL,
+                multiple = TRUE,
+                options = list(placeholder = "Type or select proteins..."),
+                width = "100%"
+              ),
+              uiOutput(ns("sel_proteins_filter_info"))
             )
           ),
           p(
@@ -4935,6 +5023,24 @@ PwrQuant_body_ui <- function(id) {
 # ── Server ───────────────────────────────────────────────────────────────────
 PwrQuant_server <- function(id) {
   moduleServer(id, function(input, output, session) {
+    da_aesthetics <- reactive({
+      ncol_val <- suppressWarnings(as.integer(input$da_facet_ncol %||% 2L))
+      if (is.na(ncol_val) || ncol_val < 1L) {
+        ncol_val <- 2L
+      }
+      font_size <- suppressWarnings(as.numeric(input$da_font_size %||% 16))
+      if (is.na(font_size) || font_size < 6) {
+        font_size <- 16
+      }
+      theme_name <- input$da_theme %||% "bw"
+      list(
+        ncol = ncol_val,
+        font_size = font_size,
+        theme_name = theme_name,
+        theme_obj = get_da_theme(theme_name, base_size = font_size)
+      )
+    })
+
     pq_plot_h <- reactive({
       lr <- limma_results_ev()$limma_results
       req(lr, "comparison" %in% names(lr))
@@ -4942,31 +5048,150 @@ PwrQuant_server <- function(id) {
       max(400L, ceiling(n / 2) * 400L)
     })
 
-    make_pq_plot_ui <- function(plot_id) {
+    da_plot_h <- reactive({
+      lr <- limma_results_ev()$limma_results
+      req(lr, "comparison" %in% names(lr))
+      n <- length(unique(lr$comparison))
+      ncol_val <- da_aesthetics()$ncol
+      max(400L, ceiling(n / ncol_val) * 400L)
+    })
+
+    make_pq_plot_ui <- function(plot_id, height_rx = pq_plot_h) {
       renderUI({
         req(limma_results_ev())
-        plotOutput(ns(plot_id), height = paste0(pq_plot_h(), "px"))
+        plotOutput(ns(plot_id), height = paste0(height_rx(), "px"))
       })
     }
 
-    output$dap_plot_ui <- make_pq_plot_ui("dap_plot")
-    output$volcano_plot_ui <- make_pq_plot_ui("volcano_plot")
-    output$barmir_plot_ui <- make_pq_plot_ui("barmir_plot")
-    output$pval_histogram_ui <- make_pq_plot_ui("pval_histogram")
+    output$dap_plot_ui <- make_pq_plot_ui("dap_plot", da_plot_h)
+    output$volcano_plot_ui <- make_pq_plot_ui("volcano_plot", da_plot_h)
+    output$barmir_plot_ui <- make_pq_plot_ui("barmir_plot", da_plot_h)
+    output$pval_histogram_ui <- make_pq_plot_ui("pval_histogram", da_plot_h)
+    output$sam_plot_ui <- make_pq_plot_ui("sam_plot", da_plot_h)
     output$adv_corr_plot_ui <- make_pq_plot_ui("adv_corr_plot")
-    output$sam_plot_ui <- make_pq_plot_ui("sam_plot")
     output$sam_scatter_plot_ui <- make_pq_plot_ui("sam_scatter_plot")
 
-    # Populate Selected Proteins selectize from raw matrix row names
+    # Update contrast choices for the Selected Proteins status filter after a run
     observe({
+      res <- tryCatch(limma_results_ev(), error = function(e) NULL)
+      if (!is.null(res) && !is.null(res$limma_results)) {
+        comps <- unique(res$limma_results$comparison)
+        prev <- isolate(input$sel_proteins_comparison %||% "All")
+        updateSelectInput(
+          session,
+          "sel_proteins_comparison",
+          choices = c("All contrasts" = "All", setNames(comps, comps)),
+          selected = if (prev %in% c("All", comps)) prev else "All"
+        )
+      } else {
+        updateSelectInput(
+          session,
+          "sel_proteins_comparison",
+          choices = c("All contrasts" = "All"),
+          selected = "All"
+        )
+      }
+    })
+
+    # Candidate proteins for Selected Proteins tab, filtered by statistical status
+    # and ranked by smallest adjusted p-value (limma: adj.P.Val; SAM: q.value)
+    sel_proteins_choices <- reactive({
       req(raw_matrix())
-      proteins <- rownames(raw_matrix())
+      all_prots <- rownames(raw_matrix())
+      status_filter <- input$sel_proteins_status %||% "All"
+
+      if (identical(status_filter, "All")) {
+        return(list(
+          proteins = all_prots,
+          auto_select = NULL,
+          fdr_col = NULL,
+          needs_stats = FALSE
+        ))
+      }
+
+      res <- tryCatch(limma_results_ev(), error = function(e) NULL)
+      if (is.null(res) || is.null(res$limma_results)) {
+        return(list(
+          proteins = character(0),
+          auto_select = character(0),
+          fdr_col = NULL,
+          needs_stats = TRUE
+        ))
+      }
+
+      lr <- res$limma_results
+      comp_filter <- input$sel_proteins_comparison %||% "All"
+      if (!identical(comp_filter, "All")) {
+        lr <- lr[lr$comparison == comp_filter, , drop = FALSE]
+      }
+
+      lr <- lr[
+        as.character(lr$status) == status_filter & lr$Protein %in% all_prots,
+        ,
+        drop = FALSE
+      ]
+
+      fdr_col <- stat_result_columns(lr)$fdr
+      if (nrow(lr) > 0) {
+        ord <- order(lr[[fdr_col]], -abs(lr$logFC), na.last = TRUE)
+        ranked_prots <- unique(lr$Protein[ord])
+      } else {
+        ranked_prots <- character(0)
+      }
+
+      list(
+        proteins = ranked_prots,
+        auto_select = utils::head(ranked_prots, 30L),
+        fdr_col = fdr_col,
+        needs_stats = FALSE
+      )
+    })
+
+    observe({
+      info <- sel_proteins_choices()
+      sel <- if (!is.null(info$auto_select)) {
+        info$auto_select
+      } else {
+        intersect(isolate(input$sel_proteins), info$proteins)
+      }
       updateSelectizeInput(
         session,
         "sel_proteins",
-        choices = proteins,
+        choices = info$proteins,
+        selected = sel,
         server = TRUE
       )
+    })
+
+    output$sel_proteins_filter_info <- renderUI({
+      info <- sel_proteins_choices()
+      status_filter <- input$sel_proteins_status %||% "All"
+      if (isTRUE(info$needs_stats)) {
+        return(tags$p(
+          style = "color:#f0ad4e;font-size:12px;margin-top:-8px;",
+          "Run statistical analysis (limma or SAM) first to filter proteins by status."
+        ))
+      }
+      if (!identical(status_filter, "All")) {
+        n_total <- length(info$proteins)
+        n_shown <- length(info$auto_select)
+        metric_lab <- if (identical(info$fdr_col, "q.value")) {
+          "q-value"
+        } else {
+          "adjusted p-value"
+        }
+        return(tags$p(
+          style = "color:#adb5bd;font-size:12px;margin-top:-8px;",
+          sprintf(
+            "%d protein(s) matching '%s' — auto-selected top %d by smallest %s.",
+            n_total,
+            status_filter,
+            n_shown,
+            metric_lab
+          )
+        ))
+      }
+      NULL
     })
 
     # ── Selected Proteins Plot ──────────────────────────────────────────────
@@ -7214,6 +7439,7 @@ PwrQuant_server <- function(id) {
       rh(
         function() {
           lr <- limma_results_ev()$limma_results
+          aes_cfg <- da_aesthetics()
           label_ids <- input$label_proteins
           lr <- lr %>%
             dplyr::mutate(
@@ -7262,14 +7488,14 @@ PwrQuant_server <- function(id) {
             guides(
               color = guide_legend(override.aes = list(alpha = 1, size = 3))
             ) +
-            facet_wrap(~comparison, ncol = 2) +
-            theme_bw() +
+            facet_wrap(~comparison, ncol = aes_cfg$ncol) +
+            aes_cfg$theme_obj +
             labs(
               x = "log₂ average abundance",
               y = "log₂FC"
             ) +
             theme(
-              text = element_text(size = 16),
+              text = element_text(size = aes_cfg$font_size),
               strip.text = element_text(face = "bold"),
               strip.background = element_blank(),
               legend.position = "bottom",
@@ -7286,6 +7512,7 @@ PwrQuant_server <- function(id) {
       rh(
         function() {
           lr <- limma_results_ev()$limma_results
+          aes_cfg <- da_aesthetics()
           label_ids <- input$label_proteins
           lr <- lr %>%
             dplyr::mutate(
@@ -7347,14 +7574,14 @@ PwrQuant_server <- function(id) {
             guides(
               color = guide_legend(override.aes = list(alpha = 1, size = 3))
             ) +
-            facet_wrap(~comparison, ncol = 2) +
-            theme_bw() +
+            facet_wrap(~comparison, ncol = aes_cfg$ncol) +
+            aes_cfg$theme_obj +
             labs(
               x = "log<sub>2</sub>FC",
               y = paste0("-log<sub>10</sub>", sc$volcano_lab)
             ) +
             theme(
-              text = element_text(size = 16),
+              text = element_text(size = aes_cfg$font_size),
               strip.text = element_text(face = "bold"),
               strip.background = element_blank(),
               legend.position = "bottom",
@@ -7387,6 +7614,7 @@ PwrQuant_server <- function(id) {
       rh(
         function() {
           lr <- limma_results_ev()$limma_results
+          aes_cfg <- da_aesthetics()
           sig <- lr %>%
             dplyr::filter(status != "Not significant")
 
@@ -7429,21 +7657,23 @@ PwrQuant_server <- function(id) {
             scale_fill_manual(
               values = c("Decreased" = "steelblue", "Increased" = "firebrick")
             ) +
-            facet_wrap(~comparison, scales = "free_y") +
+            facet_wrap(~comparison, scales = "free_y", ncol = aes_cfg$ncol) +
             labs(
               x = NULL,
               y = "log₂FC",
               fill = NULL
             ) +
-            theme_bw() +
+            aes_cfg$theme_obj +
             theme(
-              text = element_text(size = 14),
+              text = element_text(size = aes_cfg$font_size),
               strip.text = element_text(face = "bold"),
               strip.background = element_blank(),
               legend.position = "bottom",
               axis.title = element_markdown(face = "bold"),
               axis.text = element_text(color = "black"),
-              axis.text.y = element_text(size = 9)
+              axis.text.y = element_text(
+                size = max(7, round(aes_cfg$font_size * 0.65))
+              )
             )
         },
         "sp_barmir"
@@ -7455,6 +7685,7 @@ PwrQuant_server <- function(id) {
       rh(
         function() {
           lr <- limma_results_ev()$limma_results
+          aes_cfg <- da_aesthetics()
           ggplot(lr, aes(x = P.Value)) +
             geom_histogram(
               bins = 50,
@@ -7479,15 +7710,15 @@ PwrQuant_server <- function(id) {
               fontface = "bold",
               size = 3.5
             ) +
-            facet_wrap(~comparison, ncol = 2) +
+            facet_wrap(~comparison, ncol = aes_cfg$ncol) +
             labs(
               title = "Raw p-value distribution",
               x = "p-value",
               y = "Count"
             ) +
-            theme_bw() +
+            aes_cfg$theme_obj +
             theme(
-              text = element_text(size = 14),
+              text = element_text(size = aes_cfg$font_size),
               strip.text = element_text(face = "bold"),
               strip.background = element_blank(),
               axis.text = element_text(color = "black", face = "bold"),
@@ -8555,6 +8786,7 @@ PwrQuant_server <- function(id) {
           {
             res <- limma_results_ev()
             lr <- res$limma_results
+            aes_cfg <- da_aesthetics()
 
             # 5. Normalized boxplots
             safe_save("norm_boxplots.png", function() {
@@ -8653,11 +8885,11 @@ PwrQuant_server <- function(id) {
                       "Increased" = "firebrick"
                     )
                   ) +
-                  facet_wrap(~comparison, ncol = 2) +
-                  theme_bw() +
+                  facet_wrap(~comparison, ncol = aes_cfg$ncol) +
+                  aes_cfg$theme_obj +
                   labs(x = "log\u2082 average abundance", y = "log\u2082FC") +
                   theme(
-                    text = element_text(size = 16),
+                    text = element_text(size = aes_cfg$font_size),
                     strip.text = element_text(face = "bold", size = 14),
                     strip.background = element_blank(),
                     legend.position = "bottom",
@@ -8744,14 +8976,14 @@ PwrQuant_server <- function(id) {
                       "Increased" = "firebrick"
                     )
                   ) +
-                  facet_wrap(~comparison, ncol = 2) +
-                  theme_bw() +
+                  facet_wrap(~comparison, ncol = aes_cfg$ncol) +
+                  aes_cfg$theme_obj +
                   labs(
                     x = "log\u2082FC",
                     y = paste0("-log\u2081\u2080", sc$volcano_lab)
                   ) +
                   theme(
-                    text = element_text(size = 16),
+                    text = element_text(size = aes_cfg$font_size),
                     strip.text = element_text(face = "bold", size = 14),
                     strip.background = element_blank(),
                     legend.position = "bottom",
@@ -8810,17 +9042,23 @@ PwrQuant_server <- function(id) {
                       "Increased" = "firebrick"
                     )
                   ) +
-                  facet_wrap(~comparison, scales = "free_y") +
+                  facet_wrap(
+                    ~comparison,
+                    scales = "free_y",
+                    ncol = aes_cfg$ncol
+                  ) +
                   labs(x = NULL, y = "log₂FC", fill = NULL) +
-                  theme_bw() +
+                  aes_cfg$theme_obj +
                   theme(
-                    text = element_text(size = 14),
+                    text = element_text(size = aes_cfg$font_size),
                     strip.text = element_text(face = "bold", size = 14),
                     strip.background = element_blank(),
                     legend.position = "bottom",
                     axis.title = element_markdown(face = "bold", size = 14),
                     axis.text = element_text(color = "black", size = 12),
-                    axis.text.y = element_text(size = 9)
+                    axis.text.y = element_text(
+                      size = max(7, round(aes_cfg$font_size * 0.65))
+                    )
                   )
               },
               w = 14,
@@ -8831,7 +9069,15 @@ PwrQuant_server <- function(id) {
             if (identical(res$stat_method, "sam")) {
               safe_save(
                 "sam_plot.png",
-                function() sam_qq_plot(lr, res$sam$summary),
+                function() {
+                  sam_qq_plot(
+                    lr,
+                    res$sam$summary,
+                    ncol = aes_cfg$ncol,
+                    font_size = aes_cfg$font_size,
+                    base_theme = aes_cfg$theme_obj
+                  )
+                },
                 w = 14,
                 h = 10
               )
@@ -8904,15 +9150,15 @@ PwrQuant_server <- function(id) {
                     fontface = "bold",
                     size = 3.5
                   ) +
-                  facet_wrap(~comparison, ncol = 2) +
+                  facet_wrap(~comparison, ncol = aes_cfg$ncol) +
                   labs(
                     title = "Raw p-value distribution",
                     x = "p-value",
                     y = "Count"
                   ) +
-                  theme_bw() +
+                  aes_cfg$theme_obj +
                   theme(
-                    text = element_text(size = 14),
+                    text = element_text(size = aes_cfg$font_size),
                     strip.text = element_text(face = "bold", size = 14),
                     strip.background = element_blank(),
                     axis.text = element_text(color = "black", face = "bold"),
@@ -10267,7 +10513,14 @@ PwrQuant_server <- function(id) {
 
     output$sam_plot <- renderPlot({
       res <- sam_run()
-      sam_qq_plot(res$limma_results, res$sam$summary)
+      aes_cfg <- da_aesthetics()
+      sam_qq_plot(
+        res$limma_results,
+        res$sam$summary,
+        ncol = aes_cfg$ncol,
+        font_size = aes_cfg$font_size,
+        base_theme = aes_cfg$theme_obj
+      )
     })
 
     output$sam_scatter_plot <- renderPlot({
