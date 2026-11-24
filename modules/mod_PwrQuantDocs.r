@@ -71,13 +71,13 @@ PwrQuantDocs_body_ui <- function(id) {
             tags$h3("What PwrQuant does"),
             tags$p(
               "PwrQuant takes a protein abundance matrix, fits a linear model ",
-"with ",
-tags$code("limma"),
-" (or, as an alternative, runs the permutation-based ",
-tags$b("SAM"),
-" procedure \u2014 see the ",
-tags$b("SAM"),
-" tab), and reports differentially ",
+              "with ",
+              tags$code("limma"),
+              " (or, as an alternative, runs the permutation-based ",
+              tags$b("SAM"),
+              " procedure \u2014 see the ",
+              tags$b("SAM"),
+              " tab), and reports differentially ",
               "abundant proteins together with an honest assessment of how ",
               "small an effect the experiment could actually have detected. ",
               "It then layers on functional interpretation (GO over-",
@@ -208,22 +208,22 @@ tags$b("SAM"),
               ),
               tags$li(
                 tags$b("Choose the statistics"),
-" (",
-tags$b("limma"),
-" or ",
-tags$b("SAM"),
-") in the sidebar; the controls specific to the chosen method ",
-"appear below the selector."
-),
-tags$li(
-tags$b("Press Start analysis."),
-" Everything downstream ",
-"(enrichment, networks, power) depends on this run."
+                " (",
+                tags$b("limma"),
+                " or ",
+                tags$b("SAM"),
+                ") in the sidebar; the controls specific to the chosen method ",
+                "appear below the selector."
+              ),
+              tags$li(
+                tags$b("Press Start analysis."),
+                " Everything downstream ",
+                "(enrichment, networks, power) depends on this run."
               ),
               tags$li(
                 tags$b("Press Run MDD simulation"),
-" to learn what effect size ",
-"your design can resolve (limma runs only)."
+                " to learn what effect size ",
+                "your design can resolve (limma runs only)."
               )
             ),
 
@@ -249,23 +249,27 @@ tags$b("Press Start analysis."),
                 c(
                   "Differential Abundance",
                   "MA, volcano, top hits, p-value histograms; after a SAM run also the SAM plot and its summary",
-"limma / SAM"
+                  "limma / SAM"
                 ),
-                c("Correlation", "Agreement between two contrasts", "limma / SAM"),
+                c(
+                  "Correlation",
+                  "Agreement between two contrasts",
+                  "limma / SAM"
+                ),
                 c(
                   "Power Statistics",
                   "limma: prospective MDD, replicate sweep, conditional sensitivity. SAM: d(i) vs s(i) and the &Delta; table",
-"limma (+ MDD run) / SAM"
+                  "limma (+ MDD run) / SAM"
                 ),
                 c(
                   "Enrichment",
                   "GO over-representation per contrast and direction",
-"limma / SAM + ORA"
+                  "limma / SAM + ORA"
                 ),
                 c(
                   "Interaction Network",
                   "STRING protein&ndash;protein network",
-"limma / SAM + STRING"
+                  "limma / SAM + STRING"
                 ),
                 c(
                   "Selected Proteins",
@@ -273,11 +277,11 @@ tags$b("Press Start analysis."),
                   "Upload"
                 ),
                 c("UpSet", "Detection overlap between conditions", "Upload"),
-c(
-"Statistics Results Table",
-"Full per-protein results of the run; the columns follow the method (limma or SAM)",
-"limma / SAM"
-),
+                c(
+                  "Statistics Results Table",
+                  "Full per-protein results of the run; the columns follow the method (limma or SAM)",
+                  "limma / SAM"
+                ),
                 c(
                   "Z-Score Heatmap",
                   "Clustered abundance heatmap, cluster membership table, per-cluster profiles and cluster GO enrichment",
@@ -294,23 +298,27 @@ c(
           div(
             class = "pq-doc",
             tags$h3("Pipeline order"),
-            tags$p("Pressing ", tags$b("Start analysis"), " runs, in this order:"),
+            tags$p(
+              "Pressing ",
+              tags$b("Start analysis"),
+              " runs, in this order:"
+            ),
             pq_eq(
               "log2(x + 1)*  \u2192  min-valid filter  \u2192  imputation (robust mode only)",
               tags$br(),
               "  \u2192  ComBat  \u2192  normalizeBetweenArrays / TMM  \u2192  lmFit  \u2192  contrasts.fit  \u2192  eBayes"
-),
-tags$p(
-"With ",
-tags$b("Statistics = SAM"),
-" the steps up to and including normalization are the same; the ",
-"last three are replaced by the SAM statistic and its label ",
-"permutations, and imputation is governed by SAM's own ",
-tags$b("Missing values"),
-" control instead of the regression method. See the ",
-tags$i("SAM"),
-" tab."
-),
+            ),
+            tags$p(
+              "With ",
+              tags$b("Statistics = SAM"),
+              " the steps up to and including normalization are the same; the ",
+              "last three are replaced by the SAM statistic and its label ",
+              "permutations, and imputation is governed by SAM's own ",
+              tags$b("Missing values"),
+              " control instead of the regression method. See the ",
+              tags$i("SAM"),
+              " tab."
+            ),
             tags$p(
               tags$small(
                 "* Skipped when ",
@@ -1535,9 +1543,14 @@ tags$i("SAM"),
               c("Control", "Default", "Guidance"),
               list(
                 c(
+                  "Annotation source",
+                  "Bioconductor OrgDb",
+                  "OrgDb is version-pinned and works offline for 20 organisms. UniProt REST API covers any organism but needs UniProt accessions and, for accessions not yet cached, a connection. Also applies to cluster enrichment in the Z-Score Heatmap."
+                ),
+                c(
                   "Organism (OrgDb)",
                   "<i>Homo sapiens</i>",
-                  "Selects the Bioconductor annotation package, installed on first use. Also sets the STRING organism."
+                  "Selects the Bioconductor annotation package, installed on first use. Also sets the STRING organism. Hidden while the UniProt source is selected."
                 ),
                 c(
                   "Contrasts to compare",
@@ -1579,6 +1592,58 @@ tags$i("SAM"),
               "A coverage diagnostic reports how many of your significant IDs ",
               "were actually annotated \u2014 check it, because low mapping rates ",
               "quietly bias enrichment."
+            ),
+            tags$h4("UniProt annotation source"),
+            tags$p(
+              "For organisms without an OrgDb package, and for multi-organism ",
+              "matrices, set ",
+              tags$b("Annotation source"),
+              " to ",
+              tags$b("UniProt REST API"),
+              ". No organism has to be chosen. GO annotations are downloaded ",
+              "for the UniProt accessions in your quantified matrix, each ",
+              "directly annotated term is propagated to its ancestors with ",
+              tags$code("GO.db"),
+              ", and the gene sets are tested with ",
+              tags$code("clusterProfiler::enricher"),
+              " against the same quantified background. With GO Category ",
+              tags$code("ALL"),
+              " each ontology is tested separately, as ",
+              tags$code("enrichGO"),
+              " does."
+            ),
+            tags$ul(
+              tags$li(
+                tags$b("Accessions required."),
+                " At least half of the identifiers must be UniProt accessions, ",
+                "otherwise the run stops; use the OrgDb source for gene-symbol ",
+                "matrices. Isoform accessions (",
+                tags$code("P12345-2"),
+                ") are matched to their canonical entry. Obsolete and ",
+                "secondary accessions are not returned by UniProt and count ",
+                "as unannotated."
+              ),
+              tags$li(
+                tags$b("Cached locally."),
+                " Downloads are kept in ",
+                tags$code("uniprot_go_cache.rds"),
+                " in the proteOmni user cache folder, so a repeat run makes no ",
+                "requests and works offline. Entries are fetched again after ",
+                "60 days."
+              ),
+              tags$li(
+                tags$b("Sparse annotation."),
+                " Many proteins of non-model organisms have no GO terms or ",
+                "only electronically inferred ones. The coverage notification ",
+                "shows the annotated fraction."
+              )
+            ),
+            pq_warn(
+              "UniProt annotations are not version-pinned: they change with ",
+              "every UniProt release. The session log records the release, the ",
+              "fetch date and the number of accessions queried and annotated ",
+              "\u2014 keep it with your results. Expect results close to, but not ",
+              "identical with, the OrgDb route on the same data."
             ),
             tags$h4("Plots"),
             tags$ul(
@@ -1660,7 +1725,7 @@ tags$i("SAM"),
               list(
                 c(
                   "Download Statistics Results",
-"<code>limma_results_DATE.tsv</code> &mdash; full table including logFC, adj.P.Val, status, Sigma, alpha_eff, df_total and Conditional_MDD_Log2FC. After a SAM run: <code>sam_results_DATE.tsv</code> with logFC, d, d_expected, SE (= s(i)), s0, P.Value, q.value, sam_delta, sam_called and status"
+                  "<code>limma_results_DATE.tsv</code> &mdash; full table including logFC, adj.P.Val, status, Sigma, alpha_eff, df_total and Conditional_MDD_Log2FC. After a SAM run: <code>sam_results_DATE.tsv</code> with logFC, d, d_expected, SE (= s(i)), s0, P.Value, q.value, sam_delta, sam_called and status"
                 ),
                 c(
                   "Download ORA table",
@@ -1902,10 +1967,13 @@ tags$i("SAM"),
             tags$p(
               "Builds one gene set per selected cluster and runs ",
               tags$code("clusterProfiler::enrichGO"),
-              " on each, reusing the organism (OrgDb), identifier detection ",
-              "and annotation cache described under ",
+              " on each, reusing the annotation source, organism (OrgDb), ",
+              "identifier detection and annotation cache described under ",
               tags$b("Enrichment & networks"),
-              ". The organism is the one chosen in the Enrichment tab."
+              ". The annotation source and organism are the ones chosen in ",
+              "the Enrichment tab; with the UniProt source the test is ",
+              tags$code("clusterProfiler::enricher"),
+              " on GO annotations fetched from UniProt."
             ),
             pq_table(
               c("Control", "Default", "Guidance"),
@@ -2006,7 +2074,7 @@ tags$i("SAM"),
                 c(
                   "Most proteins unmapped in STRING or GO",
                   "Wrong organism, or identifiers not resolving",
-                  "Check the organism selector and the coverage diagnostic; supply UniProt accessions if possible."
+                  "Check the organism selector and the coverage diagnostic; supply UniProt accessions if possible. For GO on an organism without an OrgDb, switch the annotation source to UniProt."
                 ),
                 c(
                   "PCA shows batches, not conditions, after correction",
