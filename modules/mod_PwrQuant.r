@@ -1935,7 +1935,8 @@ is_uniprot_accession <- function(x) {
 extract_uniprot_lookup_id <- function(protein_ids) {
   first_id <- str_extract(protein_ids, "^[^;,]+")
   first_id <- ifelse(is.na(first_id) | first_id == "", protein_ids, first_id)
-  acc <- str_extract(first_id, "(?<=\\|)[A-Za-z0-9]+(?=\\|)")
+  # The hyphen keeps isoform accessions (sp|P12345-2|NAME_ORG) intact.
+  acc <- str_extract(first_id, "(?<=\\|)[A-Za-z0-9-]+(?=\\|)")
   gene <- str_extract(first_id, "(?<=GN=)[A-Za-z0-9_]+")
   gene <- ifelse(
     is.na(gene),
@@ -1945,6 +1946,10 @@ extract_uniprot_lookup_id <- function(protein_ids) {
   lookup <- ifelse(!is.na(acc), acc, ifelse(!is.na(gene), gene, first_id))
   ifelse(is.na(lookup) | lookup == "", protein_ids, lookup)
 }
+
+# Canonical accession of an isoform accession (P12345-2 -> P12345). UniProt
+# annotates GO terms on the canonical entry.
+strip_uniprot_isoform <- function(x) sub("-[0-9]+$", "", x)
 
 # ── limma run parameter log ─────────────────────────────────────────────────
 
@@ -2501,15 +2506,442 @@ orgdb_go_term2gene <- function(orgdb, keytype, ont = "ALL") {
   )
 }
 
+# ── UniProt GO annotation source (any organism) ─────────────────────────────
+#
+# GO annotations are fetched for the quantified accessions only. enricher()
+# drops every TERM2GENE gene outside `universe` (the quantified proteins), so
+# this gives the same result as downloading the whole organism proteome.
+
+uniprot_go_cache_dir <- function() {
+  getOption("proteOmni.cache_dir") %||% tools::R_user_dir("proteOmni", "cache")
+}
+
+# In-memory mirror of the disk cache (`dir`, `entries`), shared by all sessions
+# of this R process.
+.uniprot_go_cache <- new.env(parent = emptyenv())
+
+# Cache table: one row per canonical accession. Accessions UniProt does not
+# return (obsolete, secondary/merged) are kept with found = FALSE so they are
+# not re-queried.
+uniprot_go_empty_entries <- function() {
+  data.frame(
+    accession = character(0),
+    found = logical(0),
+    gene = character(0),
+    organism = character(0),
+    go_p = character(0),
+    go_c = character(0),
+    go_f = character(0),
+    release = character(0),
+    fetched = as.Date(character(0)),
+    stringsAsFactors = FALSE
+  )
+}
+
+read_uniprot_go_cache <- function(cache_dir = uniprot_go_cache_dir()) {
+  if (
+    identical(.uniprot_go_cache$dir, cache_dir) &&
+      !is.null(.uniprot_go_cache$entries)
+  ) {
+    return(.uniprot_go_cache$entries)
+  }
+  empty <- uniprot_go_empty_entries()
+  path <- file.path(cache_dir, "uniprot_go_cache.rds")
+  entries <- tryCatch(
+    if (file.exists(path)) readRDS(path)$entries else empty,
+    error = function(e) empty
+  )
+  # An unreadable or outdated-format file is treated as an empty cache.
+  if (!is.data.frame(entries) || !identical(names(entries), names(empty))) {
+    entries <- empty
+  }
+  .uniprot_go_cache$dir <- cache_dir
+  .uniprot_go_cache$entries <- entries
+  entries
+}
+
+# Adds/replaces `new_rows` in the cache. The disk copy is best effort: when it
+# cannot be written, the in-memory mirror still serves this R process.
+write_uniprot_go_cache <- function(
+  new_rows,
+  cache_dir = uniprot_go_cache_dir()
+) {
+  merge_rows <- function(old) {
+    rbind(old[!old$accession %in% new_rows$accession, , drop = FALSE], new_rows)
+  }
+  entries <- merge_rows(read_uniprot_go_cache(cache_dir))
+  .uniprot_go_cache$entries <- entries
+  path <- file.path(cache_dir, "uniprot_go_cache.rds")
+  tryCatch(
+    {
+      dir.create(cache_dir, recursive = TRUE, showWarnings = FALSE)
+      # Re-read the file so rows written by another R process are kept.
+      on_disk <- tryCatch(
+        if (file.exists(path)) readRDS(path)$entries else NULL,
+        error = function(e) NULL
+      )
+      if (is.data.frame(on_disk) && identical(names(on_disk), names(entries))) {
+        extra <- on_disk[
+          !on_disk$accession %in% entries$accession,
+          ,
+          drop = FALSE
+        ]
+        entries <- rbind(entries, extra)
+        .uniprot_go_cache$entries <- entries
+      }
+      # Written beside the target and renamed, so a concurrent reader never
+      # sees a half-written file.
+      tmp <- tempfile("uniprot_go_cache_", tmpdir = cache_dir, fileext = ".rds")
+      saveRDS(list(version = 1L, entries = entries), tmp)
+      if (!file.rename(tmp, path)) {
+        unlink(tmp)
+      }
+    },
+    error = function(e) {
+      message("UniProt GO cache not written to disk: ", conditionMessage(e))
+    }
+  )
+  invisible(entries)
+}
+
+# Default fetcher for fetch_uniprot_go(): one request to UniProt for a chunk
+# of canonical accessions. Returns list(table, release); `table` has the
+# columns accession, gene, organism, go_p, go_c, go_f in that order.
+uniprot_go_http_fetcher <- function(accessions) {
+  resp <- httr::GET(
+    "https://rest.uniprot.org/uniprotkb/accessions",
+    query = list(
+      accessions = paste(accessions, collapse = ","),
+      fields = "accession,gene_primary,organism_name,go_p,go_c,go_f",
+      format = "tsv"
+    ),
+    httr::timeout(60)
+  )
+  if (httr::status_code(resp) != 200) {
+    stop("UniProt returned HTTP ", httr::status_code(resp))
+  }
+  txt <- httr::content(resp, as = "text", encoding = "UTF-8")
+  tbl <- if (is.null(txt) || !nzchar(trimws(txt))) {
+    NULL
+  } else {
+    utils::read.delim(
+      text = txt,
+      colClasses = "character",
+      quote = "",
+      na.strings = character(0),
+      check.names = FALSE
+    )
+  }
+  list(
+    table = tbl,
+    release = httr::headers(resp)[["x-uniprot-release"]] %||% NA_character_
+  )
+}
+
+# GO annotations of UniProt accessions, from the disk-backed cache where
+# possible and otherwise from UniProt (chunked). Isoform suffixes are stripped
+# and non-accession IDs ignored (UniProt rejects a whole request containing a
+# malformed accession). Returns the cache rows of the requested accessions.
+#
+# `fetcher` is injectable for tests; see uniprot_go_http_fetcher(). Entries
+# older than `ttl_days` are fetched again (NULL/NA/Inf: never expire).
+fetch_uniprot_go <- function(
+  accessions,
+  fetcher = uniprot_go_http_fetcher,
+  chunk_size = 300L,
+  cache_dir = uniprot_go_cache_dir(),
+  ttl_days = getOption("proteOmni.uniprot_go_ttl_days", 60),
+  refresh = FALSE
+) {
+  acc <- unique(strip_uniprot_isoform(accessions[!is.na(accessions)]))
+  acc <- acc[is_uniprot_accession(acc)]
+  entries <- read_uniprot_go_cache(cache_dir)
+  if (length(acc) == 0) {
+    return(entries[0, , drop = FALSE])
+  }
+  today <- Sys.Date()
+  expired <- if (is.null(ttl_days) || is.na(ttl_days)) {
+    rep(FALSE, nrow(entries))
+  } else {
+    as.numeric(today - entries$fetched) > ttl_days
+  }
+  missing <- if (isTRUE(refresh)) {
+    acc
+  } else {
+    setdiff(acc, entries$accession[!expired])
+  }
+
+  fetch_error <- NULL
+  new_rows <- list()
+  for (chunk in split(missing, ceiling(seq_along(missing) / chunk_size))) {
+    res <- tryCatch(fetcher(chunk), error = function(e) {
+      fetch_error <<- conditionMessage(e)
+      NULL
+    })
+    if (is.null(res)) {
+      break
+    }
+    tbl <- res$table
+    field <- function(j) {
+      if (is.null(tbl) || ncol(tbl) < j) {
+        return(rep("", length(chunk)))
+      }
+      x <- as.character(tbl[[j]])[match(chunk, tbl[[1]])]
+      ifelse(is.na(x), "", x)
+    }
+    new_rows[[length(new_rows) + 1L]] <- data.frame(
+      accession = chunk,
+      found = !is.null(tbl) & chunk %in% tbl[[1]],
+      gene = field(2),
+      organism = field(3),
+      go_p = field(4),
+      go_c = field(5),
+      go_f = field(6),
+      release = as.character(res$release %||% NA_character_),
+      fetched = today,
+      stringsAsFactors = FALSE
+    )
+  }
+  # Chunks fetched before a failure are still cached.
+  if (length(new_rows) > 0) {
+    entries <- write_uniprot_go_cache(do.call(rbind, new_rows), cache_dir)
+  }
+  if (!is.null(fetch_error)) {
+    uncached <- setdiff(acc, entries$accession)
+    if (length(uncached) > 0) {
+      stop(
+        "Could not download GO annotations from UniProt (",
+        fetch_error,
+        "); ",
+        length(uncached),
+        " of ",
+        length(acc),
+        " accessions are not in the local cache. Check your internet ",
+        "connection and try again, or use the Bioconductor OrgDb annotation ",
+        "source, which works offline.",
+        call. = FALSE
+      )
+    }
+    message(
+      "UniProt could not be reached (",
+      fetch_error,
+      "); using expired cache entries."
+    )
+  }
+  out <- entries[match(acc, entries$accession), , drop = FALSE]
+  rownames(out) <- NULL
+  out
+}
+
+# Splits UniProt's "term name [GO:0005737]; ..." fields into a long table.
+parse_uniprot_go_field <- function(accession, field, ontology) {
+  field[is.na(field)] <- ""
+  parts <- strsplit(field, "(?<=\\]); ", perl = TRUE)
+  term <- unlist(parts, use.names = FALSE)
+  out <- data.frame(
+    accession = rep(accession, lengths(parts)),
+    go_id = str_extract(term, "GO:[0-9]{7}(?=\\]$)"),
+    term_name = sub(" \\[GO:[0-9]{7}\\]$", "", term),
+    ontology = rep(ontology, length(term)),
+    stringsAsFactors = FALSE
+  )
+  out[!is.na(out$go_id), , drop = FALSE]
+}
+
+# GO.db's term -> all-ancestors map of one ontology, read once per R process.
+.go_ancestor_cache <- new.env(parent = emptyenv())
+
+go_ancestor_map <- function(ont) {
+  if (is.null(.go_ancestor_cache[[ont]])) {
+    assign(
+      ont,
+      AnnotationDbi::as.list(
+        getExportedValue("GO.db", paste0("GO", ont, "ANCESTOR"))
+      ),
+      envir = .go_ancestor_cache
+    )
+  }
+  .go_ancestor_cache[[ont]]
+}
+
+# GO gene sets from fetch_uniprot_go() rows, in the shape of
+# orgdb_go_term2gene(). UniProt lists only direct annotations, so each is
+# propagated to its GO.db ancestors, matching the OrgDb route's GOALL.
+#
+# GO IDs newer than the installed GO.db keep UniProt's term name and get no
+# ancestors; they are returned in `missing_from_go_db`. `labels` maps accession
+# -> primary gene name (the accession itself when UniProt has none).
+uniprot_go_term2gene <- function(entries, ont = "ALL") {
+  fields <- c(BP = "go_p", CC = "go_c", MF = "go_f")
+  if (!identical(ont, "ALL")) {
+    fields <- fields[ont]
+  }
+  direct <- do.call(
+    rbind,
+    lapply(names(fields), function(o) {
+      parse_uniprot_go_field(entries$accession, entries[[fields[[o]]]], o)
+    })
+  )
+  if (is.null(direct) || nrow(direct) == 0) {
+    stop(
+      "None of the quantified UniProt accessions have GO annotations in ",
+      "UniProt for the requested category.",
+      call. = FALSE
+    )
+  }
+  expanded <- do.call(
+    rbind,
+    lapply(names(fields), function(o) {
+      d <- unique(direct[direct$ontology == o, c("accession", "go_id")])
+      if (nrow(d) == 0) {
+        return(NULL)
+      }
+      anc <- go_ancestor_map(o)[d$go_id]
+      inherited <- data.frame(
+        accession = rep(d$accession, lengths(anc)),
+        go_id = as.character(unlist(anc, use.names = FALSE)),
+        stringsAsFactors = FALSE
+      )
+      d <- rbind(d, inherited)
+      # GO.db's ancestor maps end in the pseudo-root "all".
+      d <- unique(d[!is.na(d$go_id) & d$go_id != "all", , drop = FALSE])
+      d$ontology <- o
+      d
+    })
+  )
+  term_ids <- unique(expanded$go_id)
+  in_go_db <- intersect(term_ids, AnnotationDbi::keys(GO.db::GO.db))
+  term_names <- setNames(rep(NA_character_, length(term_ids)), term_ids)
+  if (length(in_go_db) > 0) {
+    go_db_names <- suppressMessages(AnnotationDbi::select(
+      GO.db::GO.db,
+      keys = in_go_db,
+      keytype = "GOID",
+      columns = "TERM"
+    ))
+    term_names[go_db_names$GOID] <- go_db_names$TERM
+  }
+  unnamed <- names(term_names)[is.na(term_names)]
+  uniprot_names <- direct$term_name[match(unnamed, direct$go_id)]
+  term_names[unnamed] <- ifelse(
+    is.na(uniprot_names) | !nzchar(uniprot_names),
+    unnamed,
+    uniprot_names
+  )
+  has_gene <- !is.na(entries$gene) & nzchar(entries$gene)
+  list(
+    term2gene = data.frame(
+      term = expanded$go_id,
+      gene = expanded$accession,
+      stringsAsFactors = FALSE
+    ),
+    term2name = data.frame(
+      term = term_ids,
+      name = unname(term_names),
+      stringsAsFactors = FALSE
+    ),
+    ontology = setNames(expanded$ontology, expanded$go_id)[term_ids],
+    labels = setNames(
+      ifelse(has_gene, entries$gene, entries$accession),
+      entries$accession
+    ),
+    missing_from_go_db = setdiff(term_ids, in_go_db)
+  )
+}
+
+# Everything the enrichment tabs need for the UniProt annotation source:
+# GO gene sets, the background universe and a lookup-ID -> accession map (same
+# role as resolve_go_ids()$map, so to_go_keys() works on the result). Emits the
+# reproducibility block for the session log.
+prepare_uniprot_go <- function(
+  protein_ids,
+  ont = "ALL",
+  fetcher = uniprot_go_http_fetcher,
+  ...
+) {
+  lookup <- unique(extract_uniprot_lookup_id(protein_ids))
+  lookup <- lookup[!is.na(lookup) & nzchar(lookup)]
+  is_acc <- is_uniprot_accession(lookup)
+  if (length(lookup) == 0 || mean(is_acc) < 0.5) {
+    stop(
+      "The UniProt annotation source needs UniProt accessions (e.g. P12345 ",
+      "or sp|P12345|NAME_ORG), but only ",
+      sum(is_acc),
+      " of ",
+      length(lookup),
+      " protein identifiers look like accessions. Supply a matrix keyed by ",
+      "UniProt accession, or switch the annotation source to Bioconductor ",
+      "OrgDb for gene-symbol matrices.",
+      call. = FALSE
+    )
+  }
+  map <- setNames(rep(NA_character_, length(lookup)), lookup)
+  map[is_acc] <- strip_uniprot_isoform(lookup[is_acc])
+  universe <- unique(unname(map[is_acc]))
+
+  entries <- fetch_uniprot_go(universe, fetcher = fetcher, ...)
+  go_sets <- uniprot_go_term2gene(entries, ont)
+
+  organisms <- sort(
+    table(entries$organism[entries$found & nzchar(entries$organism)]),
+    decreasing = TRUE
+  )
+  shown <- utils::head(organisms, 5)
+  collapse_or_na <- function(x) {
+    x <- sort(unique(x[!is.na(x)]))
+    if (length(x) == 0) "n/a" else paste(x, collapse = ", ")
+  }
+  log <- c(
+    "── GO annotation source ──",
+    "Annotation source: UniProt REST API",
+    paste0("UniProt release(s): ", collapse_or_na(entries$release)),
+    paste0(
+      "Annotations fetched on: ",
+      collapse_or_na(format(entries$fetched))
+    ),
+    paste0("GO category: ", ont),
+    sprintf("Quantified accessions queried: %d", length(universe)),
+    sprintf("Found in UniProt: %d", sum(entries$found)),
+    sprintf(
+      "Annotated with GO terms: %d",
+      length(unique(go_sets$term2gene$gene))
+    ),
+    paste0(
+      "Organism(s): ",
+      if (length(shown) == 0) {
+        "n/a"
+      } else {
+        paste(sprintf("%s (%d)", names(shown), shown), collapse = "; ")
+      },
+      if (length(organisms) > length(shown)) {
+        sprintf("; and %d more", length(organisms) - length(shown))
+      }
+    ),
+    sprintf(
+      "GO IDs absent from the installed GO.db (UniProt term names used, no ancestors): %d",
+      length(go_sets$missing_from_go_db)
+    )
+  )
+  message(paste(log, collapse = "\n"))
+  list(go_sets = go_sets, map = map, universe = universe, entries = entries)
+}
+
+# Runs GO over-representation per gene cluster and stacks the results.
+#
+# With `go_sets = NULL` the OrgDb route is used: enrichGO(), or enricher() on
+# the OrgDb's own GO annotations when the OrgDb cannot serve ENTREZID. Passing
+# pre-built `go_sets` (list(term2gene, term2name, ontology[, labels]), as from
+# uniprot_go_term2gene()) uses enricher() and makes `orgdb`/`keytype` optional.
 run_per_contrast_enrichment <- function(
   gene_clusters,
-  orgdb,
-  keytype,
+  orgdb = NULL,
+  keytype = NULL,
   universe = NULL,
   ont = "ALL",
   pvalue_cutoff = 0.05,
   qvalue_cutoff = 0.2,
-  labels = NULL
+  labels = NULL,
+  go_sets = NULL
 ) {
   gene_clusters <- gene_clusters[
     vapply(gene_clusters, function(g) length(g) > 0, logical(1))
@@ -2517,16 +2949,57 @@ run_per_contrast_enrichment <- function(
   if (length(gene_clusters) == 0) {
     return(NULL)
   }
-  # enrichGO() converts every ID to ENTREZID, which some OrgDbs cannot serve;
-  # those are tested with enricher() on GO annotations read from the OrgDb.
-  go_sets <- if (orgdb_serves_entrez(orgdb)) {
-    NULL
-  } else {
-    orgdb_go_term2gene(orgdb, keytype, ont)
+  if (is.null(go_sets)) {
+    if (is.null(orgdb)) {
+      stop("Supply either `orgdb` or pre-built `go_sets`.", call. = FALSE)
+    }
+    # enrichGO() converts every ID to ENTREZID, which some OrgDbs cannot serve;
+    # those are tested with enricher() on GO annotations read from the OrgDb.
+    if (!orgdb_serves_entrez(orgdb)) {
+      go_sets <- orgdb_go_term2gene(orgdb, keytype, ont)
+    }
+  } else if (is.null(labels)) {
+    labels <- go_sets$labels
+  }
+  # Like enrichGO(ont = "ALL"), each ontology is tested on its own, with its
+  # own annotated background and BH adjustment, and the results are stacked.
+  # One pooled enricher() call would inflate both.
+  enrich_go_sets <- function(genes) {
+    onts <- if (identical(ont, "ALL")) c("BP", "CC", "MF") else ont
+    term_ont <- unname(go_sets$ontology[as.character(go_sets$term2gene$term)])
+    per_ont <- lapply(onts, function(sub_ont) {
+      t2g <- go_sets$term2gene[
+        !is.na(term_ont) & term_ont == sub_ont,
+        ,
+        drop = FALSE
+      ]
+      if (nrow(t2g) == 0) {
+        return(NULL)
+      }
+      eg <- clusterProfiler::enricher(
+        gene = genes,
+        TERM2GENE = t2g,
+        TERM2NAME = go_sets$term2name,
+        universe = universe,
+        pvalueCutoff = pvalue_cutoff,
+        qvalueCutoff = qvalue_cutoff
+      )
+      if (is.null(eg) || nrow(as.data.frame(eg)) == 0) {
+        return(NULL)
+      }
+      d <- as.data.frame(eg)
+      if (identical(ont, "ALL")) {
+        # Same leading column enrichGO(ont = "ALL") returns.
+        d <- cbind(ONTOLOGY = sub_ont, d, stringsAsFactors = FALSE)
+      }
+      d
+    })
+    per_ont <- per_ont[!vapply(per_ont, is.null, logical(1))]
+    if (length(per_ont) == 0) NULL else dplyr::bind_rows(per_ont)
   }
   per <- lapply(names(gene_clusters), function(cmp) {
-    eg <- if (is.null(go_sets)) {
-      clusterProfiler::enrichGO(
+    if (is.null(go_sets)) {
+      eg <- clusterProfiler::enrichGO(
         gene = gene_clusters[[cmp]],
         OrgDb = orgdb,
         keyType = keytype,
@@ -2535,33 +3008,21 @@ run_per_contrast_enrichment <- function(
         pvalueCutoff = pvalue_cutoff,
         qvalueCutoff = qvalue_cutoff
       )
+      if (is.null(eg) || nrow(as.data.frame(eg)) == 0) {
+        return(NULL)
+      }
+      if (is.null(labels) && !identical(keytype, "SYMBOL")) {
+        eg <- tryCatch(
+          clusterProfiler::setReadable(eg, OrgDb = orgdb, keyType = keytype),
+          error = function(e) eg
+        )
+      }
+      d <- as.data.frame(eg)
     } else {
-      clusterProfiler::enricher(
-        gene = gene_clusters[[cmp]],
-        TERM2GENE = go_sets$term2gene,
-        TERM2NAME = go_sets$term2name,
-        universe = universe,
-        pvalueCutoff = pvalue_cutoff,
-        qvalueCutoff = qvalue_cutoff
-      )
-    }
-    if (is.null(eg) || nrow(as.data.frame(eg)) == 0) {
-      return(NULL)
-    }
-    if (is.null(go_sets) && is.null(labels) && !identical(keytype, "SYMBOL")) {
-      eg <- tryCatch(
-        clusterProfiler::setReadable(eg, OrgDb = orgdb, keyType = keytype),
-        error = function(e) eg
-      )
-    }
-    d <- as.data.frame(eg)
-    if (!is.null(go_sets) && identical(ont, "ALL")) {
-      # Same leading column enrichGO(ont = "ALL") returns.
-      d <- cbind(
-        ONTOLOGY = unname(go_sets$ontology[d$ID]),
-        d,
-        stringsAsFactors = FALSE
-      )
+      d <- enrich_go_sets(gene_clusters[[cmp]])
+      if (is.null(d)) {
+        return(NULL)
+      }
     }
     if (!is.null(labels)) {
       # setReadable() needs a SYMBOL keytype, which these OrgDbs may lack.
@@ -3838,15 +4299,44 @@ PwrQuant_body_ui <- function(id) {
           status = "primary",
           solidHeader = TRUE,
           width = 12,
+          radioButtons(
+            ns("go_source"),
+            "Annotation source",
+            choices = c(
+              "Bioconductor OrgDb (pinned, offline)" = "orgdb",
+              "UniProt REST API (any organism, requires UniProt accessions)" = "uniprot"
+            ),
+            selected = "orgdb",
+            inline = TRUE
+          ),
+          conditionalPanel(
+            condition = "input.go_source == 'uniprot'",
+            ns = ns,
+            tags$div(
+              style = "padding:8px 14px;margin-bottom:10px;background:#2a3f54;border-radius:6px;color:#ddd;font-size:13px;",
+              icon("info-circle", style = "color:#5bc0de;"),
+              " GO annotations are fetched from UniProt for the quantified ",
+              "UniProt accessions and tested against the quantified proteome ",
+              "as background; no organism needs to be selected. Downloads are ",
+              "cached locally, so only new accessions need a connection. This ",
+              "source also applies to the heatmap's Cluster Enrichment. The ",
+              "Interaction Network tab keeps using the organism chosen under ",
+              "the OrgDb source."
+            )
+          ),
           fluidRow(
             column(
               3,
-              selectInput(
-                ns("uniprot_taxon"),
-                "Organism (OrgDb)",
-                choices = pwrquant_orgdb_choices,
-                selected = "9606",
-                width = "100%"
+              conditionalPanel(
+                condition = "input.go_source != 'uniprot'",
+                ns = ns,
+                selectInput(
+                  ns("uniprot_taxon"),
+                  "Organism (OrgDb)",
+                  choices = pwrquant_orgdb_choices,
+                  selected = "9606",
+                  width = "100%"
+                )
               )
             ),
             column(
@@ -4357,7 +4847,8 @@ PwrQuant_body_ui <- function(id) {
           p(
             "Runs enrichGO on the proteins of the chosen clusters, one gene set per ",
             "cluster, against all quantified proteins as the background universe. ",
-            "The organism (OrgDb) is the one selected in the Enrichment tab."
+            "The annotation source and organism (OrgDb) are the ones selected in ",
+            "the Enrichment tab."
           ),
           fluidRow(
             column(
@@ -5959,22 +6450,39 @@ PwrQuant_server <- function(id) {
           }
           fdr_cutoff <- min(fdr_cutoff, 1)
 
-          # 1. Resolve the OrgDb annotation package for this organism (installed
-          #    on demand). Cached across runs unless the taxon changes.
-          incProgress(0.2, detail = "Resolving organism annotation (OrgDb)")
-          cached <- go_background_cache()
-          if (!is.null(cached) && identical(cached$taxon, taxon_id)) {
-            orgdb <- cached$orgdb
-          } else {
-            orgdb <- ensure_orgdb(taxon_id)
-            go_background_cache(list(taxon = taxon_id, orgdb = orgdb))
-          }
-
-          # 2. Build the background universe (all quantified proteins) and pick
-          #    the keyType from the resolved lookup IDs.
-          incProgress(0.35, detail = "Resolving protein identifiers")
+          use_uniprot <- identical(input$go_source, "uniprot")
           all_ids <- unique(lr$Protein)
-          id_res <- resolve_go_ids(extract_uniprot_lookup_id(all_ids), orgdb)
+          go_sets <- NULL
+          if (use_uniprot) {
+            # 1-2 (UniProt source). GO annotations of the quantified accessions
+            #    straight from UniProt; no OrgDb or organism needed.
+            incProgress(0.2, detail = "Fetching GO annotations from UniProt")
+            up <- prepare_uniprot_go(all_ids, ont)
+            orgdb <- NULL
+            go_sets <- up$go_sets
+            id_res <- list(
+              keytype = "UNIPROT",
+              map = up$map,
+              labels = go_sets$labels
+            )
+          } else {
+            # 1. Resolve the OrgDb annotation package for this organism
+            #    (installed on demand). Cached across runs unless the taxon
+            #    changes.
+            incProgress(0.2, detail = "Resolving organism annotation (OrgDb)")
+            cached <- go_background_cache()
+            if (!is.null(cached) && identical(cached$taxon, taxon_id)) {
+              orgdb <- cached$orgdb
+            } else {
+              orgdb <- ensure_orgdb(taxon_id)
+              go_background_cache(list(taxon = taxon_id, orgdb = orgdb))
+            }
+
+            # 2. Build the background universe (all quantified proteins) and
+            #    pick the keyType from the resolved lookup IDs.
+            incProgress(0.35, detail = "Resolving protein identifiers")
+            id_res <- resolve_go_ids(extract_uniprot_lookup_id(all_ids), orgdb)
+          }
           keytype <- id_res$keytype
           universe <- unique(unname(id_res$map[!is.na(id_res$map)]))
 
@@ -6032,6 +6540,13 @@ PwrQuant_server <- function(id) {
             vapply(gene_clusters, length, integer(1)) > 0
           ]
           if (length(gene_clusters) == 0) {
+            if (use_uniprot) {
+              stop(
+                "None of the significant protein identifiers are UniProt ",
+                "accessions, which the UniProt annotation source requires.",
+                call. = FALSE
+              )
+            }
             stop(
               "None of the significant protein identifiers could be matched to ",
               "the selected organism's annotation package. Check that the ",
@@ -6039,22 +6554,35 @@ PwrQuant_server <- function(id) {
               call. = FALSE
             )
           }
-          annotated <- tryCatch(
-            suppressWarnings(suppressMessages(
-              AnnotationDbi::keys(orgdb, keytype = keytype)
-            )),
-            error = function(e) character(0)
-          )
+          annotated <- if (use_uniprot) {
+            unique(go_sets$term2gene$gene)
+          } else {
+            tryCatch(
+              suppressWarnings(suppressMessages(
+                AnnotationDbi::keys(orgdb, keytype = keytype)
+              )),
+              error = function(e) character(0)
+            )
+          }
           if (length(annotated) > 0) {
             n_ann <- sum(!is.na(query_keys) & query_keys %in% annotated)
             coverage_pct <- 100 * n_ann / length(query_ids)
-            coverage_msg <- sprintf(
-              "GO annotation coverage: %d of %d significant IDs (%.1f%%) map to the OrgDb (keyType = %s).",
-              n_ann,
-              length(query_ids),
-              coverage_pct,
-              keytype
-            )
+            coverage_msg <- if (use_uniprot) {
+              sprintf(
+                "GO annotation coverage: %d of %d significant accessions (%.1f%%) have GO annotations in UniProt.",
+                n_ann,
+                length(query_ids),
+                coverage_pct
+              )
+            } else {
+              sprintf(
+                "GO annotation coverage: %d of %d significant IDs (%.1f%%) map to the OrgDb (keyType = %s).",
+                n_ann,
+                length(query_ids),
+                coverage_pct,
+                keytype
+              )
+            }
             showNotification(
               coverage_msg,
               type = if (coverage_pct < 50) "warning" else "message",
@@ -6073,7 +6601,8 @@ PwrQuant_server <- function(id) {
               ont = ont,
               pvalue_cutoff = fdr_cutoff,
               qvalue_cutoff = fdr_cutoff,
-              labels = id_res$labels
+              labels = id_res$labels,
+              go_sets = go_sets
             ),
             error = function(e) {
               stop(
@@ -9323,20 +9852,34 @@ PwrQuant_server <- function(id) {
           }
           fdr_cutoff <- min(fdr_cutoff, 1)
 
-          incProgress(0.2, detail = "Resolving organism annotation (OrgDb)")
-          cached <- go_background_cache()
-          if (!is.null(cached) && identical(cached$taxon, taxon_id)) {
-            orgdb <- cached$orgdb
+          use_uniprot <- identical(input$go_source, "uniprot")
+          go_sets <- NULL
+          if (use_uniprot) {
+            incProgress(0.2, detail = "Fetching GO annotations from UniProt")
+            up <- prepare_uniprot_go(rownames(raw_matrix()), ont)
+            orgdb <- NULL
+            go_sets <- up$go_sets
+            id_res <- list(
+              keytype = "UNIPROT",
+              map = up$map,
+              labels = go_sets$labels
+            )
           } else {
-            orgdb <- ensure_orgdb(taxon_id)
-            go_background_cache(list(taxon = taxon_id, orgdb = orgdb))
-          }
+            incProgress(0.2, detail = "Resolving organism annotation (OrgDb)")
+            cached <- go_background_cache()
+            if (!is.null(cached) && identical(cached$taxon, taxon_id)) {
+              orgdb <- cached$orgdb
+            } else {
+              orgdb <- ensure_orgdb(taxon_id)
+              go_background_cache(list(taxon = taxon_id, orgdb = orgdb))
+            }
 
-          incProgress(0.35, detail = "Resolving protein identifiers")
-          id_res <- resolve_go_ids(
-            extract_uniprot_lookup_id(rownames(raw_matrix())),
-            orgdb
-          )
+            incProgress(0.35, detail = "Resolving protein identifiers")
+            id_res <- resolve_go_ids(
+              extract_uniprot_lookup_id(rownames(raw_matrix())),
+              orgdb
+            )
+          }
           keytype <- id_res$keytype
           universe <- unique(unname(id_res$map[!is.na(id_res$map)]))
 
@@ -9356,6 +9899,22 @@ PwrQuant_server <- function(id) {
             stop("The selected clusters contain no proteins.", call. = FALSE)
           }
 
+          if (use_uniprot) {
+            cluster_keys <- unique(unlist(gene_clusters))
+            n_ann <- sum(cluster_keys %in% go_sets$term2gene$gene)
+            coverage_pct <- 100 * n_ann / length(cluster_keys)
+            showNotification(
+              sprintf(
+                "GO annotation coverage: %d of %d cluster accessions (%.1f%%) have GO annotations in UniProt.",
+                n_ann,
+                length(cluster_keys),
+                coverage_pct
+              ),
+              type = if (coverage_pct < 50) "warning" else "message",
+              duration = 10
+            )
+          }
+
           incProgress(0.6, detail = "Running enrichGO per cluster...")
           enrich_df <- tryCatch(
             run_per_contrast_enrichment(
@@ -9366,7 +9925,8 @@ PwrQuant_server <- function(id) {
               ont = ont,
               pvalue_cutoff = fdr_cutoff,
               qvalue_cutoff = fdr_cutoff,
-              labels = id_res$labels
+              labels = id_res$labels,
+              go_sets = go_sets
             ),
             error = function(e) {
               stop(
