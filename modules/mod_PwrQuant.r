@@ -5087,11 +5087,39 @@ PwrQuant_server <- function(id) {
     # the same matrix minus the samples removed in the Metadata tab.
     raw_matrix_full <- reactive({
       req(input$matrix_file)
-      df <- data.table::fread(
-        input$matrix_file$datapath,
-        header = TRUE,
-        quote = ""
+      # fread() only warns when it stops at a row with an unexpected number of
+      # fields (e.g. an unquoted comma inside an ID of a comma-separated
+      # file), returning the rows above it. A truncated matrix must not
+      # reach the analysis, so that warning is turned into an error.
+      read_warnings <- character(0)
+      df <- withCallingHandlers(
+        data.table::fread(
+          input$matrix_file$datapath,
+          header = TRUE,
+          quote = ""
+        ),
+        warning = function(w) {
+          read_warnings <<- c(read_warnings, conditionMessage(w))
+          invokeRestart("muffleWarning")
+        }
       )
+      truncated <- grepl("Stopped early|Discarded", read_warnings)
+      if (any(truncated)) {
+        msg <- paste0(
+          "The matrix file is malformed and was not loaded: only the first ",
+          nrow(df),
+          " rows could be read. A protein ID probably contains the column ",
+          "separator. Re-export the matrix as tab-separated or fix the row. ",
+          "Details: ",
+          paste(read_warnings[truncated], collapse = " ")
+        )
+        message("PwrQuant matrix not loaded: ", msg)
+        showNotification(msg, type = "error", duration = NULL)
+        req(FALSE)
+      }
+      for (w in read_warnings[!truncated]) {
+        warning(w, call. = FALSE)
+      }
 
       # Drop rows without a protein ID.
       df <- df[!is.na(df[[1]]), ]
