@@ -2822,3 +2822,20 @@ run_seq_digest <- function(sequence, enzyme_id = "trypsin", params = list()) {
     )
   )
 }
+
+# ── Shared Plot Aesthetics Helpers ───────────────────────────────────────────
+
+get_da_theme <- function(theme_name = "bw", base_size = 16) {
+  if (is.null(theme_name) || !nzchar(theme_name)) {
+    theme_name <- "bw"
+  }
+  switch(
+    theme_name,
+    classic = ggplot2::theme_classic(base_size = base_size),
+    minimal = ggplot2::theme_minimal(base_size = base_size),
+    light = ggplot2::theme_light(base_size = base_size),
+    linedraw = ggplot2::theme_linedraw(base_size = base_size),
+    grey = ggplot2::theme_grey(base_size = base_size),
+    ggplot2::theme_bw(base_size = base_size)
+  )
+}
