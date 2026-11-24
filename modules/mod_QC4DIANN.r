@@ -2482,7 +2482,9 @@ QC4DIANN_server <- function(id) {
           as.data.frame(unique_genes()) %>%
             tibble::rownames_to_column(id_header),
           file = file,
-          sep = ",",
+          # Tab-separated: IDs can contain commas (e.g. the yeast gene
+          # "ARG5,6"), which would add a field to an unquoted CSV row.
+          sep = "\t",
           na = "NA",
           # fwrite()'s default quote = "auto" wraps every character column
           # (including the ID column) in double quotes even when unnecessary;
