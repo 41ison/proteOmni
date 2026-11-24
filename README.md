@@ -45,7 +45,7 @@
 - **Sequence Profiling & *In Silico* Digestion** — Paste any protein or peptide sequence to get sliding-window profiles (charge, hydropathy, hydrophilicity, amphiphilicity, surface accessibility, beta-turn propensity, B-cell antigenicity, MHC-I T-cell immunogenicity), or digest it with a preset or custom enzyme rule to see the theoretical peptides, the sequence coverage reachable in a given length and m/z window, and theoretical b/y spectra.
 - **Differential Abundance Analysis** — Full limma-based workflow (or the permutation-based SAM of Tusher et al. 2001 as an alternative test) with normalization (limma between-array methods or edgeR TMM), batch correction (ComBat/SVA), flexible missing value imputation (KNN, MinProb, BPCA or missForest), MA plots, volcano plots, and a simulation-based prospective power analysis.
 - **Prospective Power / Sensitivity Analysis** — Minimum detectable difference (MDD) estimated by simulating fresh datasets from the fitted empirical Bayes priors, spiking in known fold changes, and re-running the real design through `lmFit` → `eBayes` → BH — optionally including intensity-dependent missingness and imputation. A replicate sweep answers "how many replicates would I need?".
-- **Functional Enrichment** — GO over-representation analysis (ORA) with `clusterProfiler::enrichGO`, run per contrast and split by regulation direction, using Bioconductor OrgDb annotation packages for 20 supported organisms.
+- **Functional Enrichment** — GO over-representation analysis (ORA) with `clusterProfiler::enrichGO`, run per contrast and split by regulation direction, using Bioconductor OrgDb annotation packages for 20 supported organisms, or GO annotations fetched from UniProt for any organism.
 - **Protein-Protein Interaction Networks** — STRING interaction networks for the significant proteins of any contrast via the `STRINGdb` package, with nodes halo-coloured by up/down regulation and confidence-score edge filtering.
 - **Publication-Ready Output** — Download filtered result matrices and universally formatted plots (PNG/ZIP) ready for reporting and publication.
 - **Session Logging** — Automatic session and console logging with a one-click log download for full reproducibility.
@@ -245,7 +245,7 @@ End-to-end differential abundance and statistical power analysis pipeline. Accep
 | **Differential Abundance** | MA/Bland-Altman plots, volcano plots with user-selected protein labels, top-20 DAP bar mirror chart, raw p-value histograms per contrast. After a SAM run: the SAM plot (observed vs expected relative difference with the Δ band) and a per-contrast summary |
 | **Correlation** | Inter-contrast logFC scatter with Spearman ρ and concordant/inverse/mismatch classification, with a downloadable table |
 | **Power Statistics** | limma runs: prospective MDD power curve from simulated data (with summary table), an MDD-vs-replicates design sweep, and a conditional per-protein sensitivity map (diagnostic only). SAM runs: *d(i)* vs *s(i)* scatter and the Δ table (called, falsely called, FDR per Δ) |
-| **Enrichment** | GO over-representation analysis with `clusterProfiler::enrichGO`, run per contrast and split by up/down direction; results shown as a dotplot (top terms per contrast) and a Manhattan plot (all enriched terms), across 20 supported OrgDb organisms |
+| **Enrichment** | GO over-representation analysis with `clusterProfiler::enrichGO`, run per contrast and split by up/down direction; results shown as a dotplot (top terms per contrast) and a Manhattan plot (all enriched terms), across 20 supported OrgDb organisms or, with the UniProt annotation source, any organism in UniProt |
 | **Interaction Network** | STRING protein-protein interaction network (`STRINGdb`) for a selected contrast, with nodes halo-coloured by regulation and edges filtered by a confidence score; unmapped proteins are listed for transparency |
 | **Selected Proteins** | Abundance profiles for a user-selected set of proteins across conditions (adjustable grid columns) |
 | **UpSet — Proteins by Condition** | Intersections of detected proteins across conditions, with a downloadable membership table |
@@ -623,7 +623,12 @@ GO over-representation analysis is performed with `clusterProfiler::enrichGO()`.
 - a **dotplot** — top terms per contrast (count on the x-axis, size = gene count, colour = adjusted p-value), and
 - a **Manhattan plot** — every enriched term per contrast, height = −log10 adjusted p-value.
 
-Annotations come from a Bioconductor OrgDb (`org.*`) package rather than a live web lookup, so no per-run network fetch is required once the package is installed. The **Organism (OrgDb)** dropdown selects the package and its NCBI taxon ID; the matching package is auto-installed from the pinned snapshot on first use. 20 organisms are supported, including:
+The **Annotation source** selector at the top of the tab chooses where the GO annotations come from:
+
+- **Bioconductor OrgDb (pinned, offline)** — the default, described below.
+- **UniProt REST API (any organism, requires UniProt accessions)** — for organisms without an OrgDb package; see [UniProt annotation source](#uniprot-annotation-source-any-organism).
+
+With the OrgDb source, annotations come from a Bioconductor OrgDb (`org.*`) package rather than a live web lookup, so no per-run network fetch is required once the package is installed. The **Organism (OrgDb)** dropdown selects the package and its NCBI taxon ID; the matching package is auto-installed from the pinned snapshot on first use. 20 organisms are supported, including:
 
 | Organism | OrgDb package | Taxon |
 |---|---|---|
@@ -645,8 +650,27 @@ Protein identifiers are auto-parsed from three common formats:
 2. UniProt FASTA header with `GN=SYMBOL` tag (e.g. `sp|P04637|P53_HUMAN GN=TP53`)
 3. Plain gene symbols (e.g. `TP53`)
 
+#### UniProt annotation source (any organism)
+
+Selecting **UniProt REST API** removes the need for an OrgDb package, so enrichment works for any organism in UniProt (e.g. *Trypanosoma cruzi*) and for multi-organism matrices such as host–pathogen samples. No organism, taxon ID or proteome ID has to be chosen: the **Organism (OrgDb)** dropdown is hidden, and the choice also applies to the per-cluster GO enrichment of the Z-Score Heatmap. The *Interaction Network* tab is unaffected and keeps using the organism chosen under the OrgDb source.
+
+How it works:
+
+1. **Download.** GO annotations are requested from `https://rest.uniprot.org/uniprotkb/accessions` for the UniProt accessions in the quantified matrix only, in chunks of 300. Because the background is the quantified proteome, this gives the same result as downloading the organism's whole proteome.
+2. **Ancestor propagation.** UniProt lists only the terms a protein is directly annotated with. Each one is propagated to all of its ancestors with `GO.db`, matching what the OrgDb route tests.
+3. **Test.** `clusterProfiler::enricher()` is run on the resulting gene sets. With **GO Category = ALL**, BP, CC and MF are tested separately, each with its own background and BH adjustment, as `enrichGO` does. Gene IDs in the results are shown as UniProt primary gene names, or the accession where UniProt has none.
+
+Things to know:
+
+- **UniProt accessions are required.** At least half of the protein identifiers must be accessions (`P04637`, `sp|P04637|P53_HUMAN`); otherwise the run stops with a message. Use the OrgDb source for gene-symbol matrices. Isoform accessions (`P04637-2`) are matched to their canonical entry.
+- **Caching.** Downloads are stored in `uniprot_go_cache.rds` under `tools::R_user_dir("proteOmni", "cache")` (override with `options(proteOmni.cache_dir = ...)`), so a second run on the same matrix makes no requests and works offline. Entries are fetched again after 60 days (`options(proteOmni.uniprot_go_ttl_days = ...)`); to force a fresh download, delete the file and restart proteOmni.
+- **Not version-pinned.** Unlike the OrgDb packages, UniProt annotations change with every UniProt release. The session log records the UniProt release, the fetch date, the number of accessions queried, found and annotated, and the organisms detected — keep it with your results.
+- **Sparse annotation.** Many proteins of non-model organisms have no GO terms, or only electronically inferred ones. The coverage notification reports how many significant accessions are annotated.
+- **Obsolete and secondary accessions** are not returned by UniProt and are treated as unannotated.
+- **Differences from the OrgDb route.** Results for the same data are close but not identical, because the two sources hold different annotation sets and the installed `GO.db` may lag UniProt. GO terms newer than the installed `GO.db` keep UniProt's term name and are not propagated to ancestors.
+
 ### Step 10 — Protein-protein interaction network (STRING)
-The *Interaction Network* tab maps the significant proteins of a chosen contrast onto the [STRING](https://string-db.org/) database (v12.0) with the `STRINGdb` package and renders the network via `plot_network()`. The organism reuses the taxon selected for GO enrichment in Step 9.
+The *Interaction Network* tab maps the significant proteins of a chosen contrast onto the [STRING](https://string-db.org/) database (v12.0) with the `STRINGdb` package and renders the network via `plot_network()`. The organism reuses the taxon selected in the **Organism (OrgDb)** dropdown in Step 9, including when the UniProt annotation source is used for GO enrichment.
 
 Controls:
 - **Protein Set** — build the network from all significant proteins (*Combined*), or restrict to *Increased only* or *Decreased only*.
@@ -864,11 +888,13 @@ This can happen for a few reasons:
 
 1. **Protein identifiers aren't annotated in the OrgDb.** `enrichGO` needs UniProt accessions or gene symbols (e.g. `TP53`, `EGFR`) that exist in the selected `org.*` package. proteOmni parses them from UniProt FASTA headers (`GN=` tag), pipe-separated IDs, or accessions automatically, but non-standard identifiers won't map. Check the annotation-coverage notification shown when ORA runs — a low percentage means most IDs weren't recognised.
 
-2. **Wrong organism selected.** Pick the organism that matches your data in the **Organism (OrgDb)** dropdown. A mismatched OrgDb will annotate few or no proteins.
+2. **Wrong organism selected.** Pick the organism that matches your data in the **Organism (OrgDb)** dropdown. A mismatched OrgDb will annotate few or no proteins. If your organism is not in the list, switch the **Annotation source** to **UniProt REST API**, which needs UniProt accessions but no organism.
 
 3. **Too few significant proteins.** If a contrast × direction gene set has only a handful of proteins, the over-representation test is underpowered and may return nothing. Try relaxing the minimum valid-value threshold, loosening the GO term FDR cutoff, or checking whether the experiment is adequately powered.
 
 4. **OrgDb package couldn't be installed.** The first use of a new organism installs its `org.*` package from the snapshot pinned in `proteOmni.lock` — check your internet connection and the session log if enrichment fails to start.
+
+5. **UniProt source: few proteins are annotated, or UniProt can't be reached.** Non-model organisms are often sparsely annotated; the coverage notification shows the annotated fraction. Accessions not yet in the local cache need an internet connection, and the run stops with a message if UniProt is unreachable.
 
 </details>
 
@@ -876,7 +902,7 @@ This can happen for a few reasons:
 
 <summary><b>STRING network is empty or the organism is unsupported</b></summary>
 
-The *Interaction Network* tab reuses the organism selected for GO enrichment. If STRING (v12.0) does not cover that taxon, proteOmni reports it explicitly and suggests closely related organisms that *are* covered — this is a coverage limitation of STRING, not an app error. Try a more commonly studied organism, or use a species-level taxon ID instead of a strain-specific one.
+The *Interaction Network* tab reuses the organism selected in the **Organism (OrgDb)** dropdown of the Enrichment tab. If STRING (v12.0) does not cover that taxon, proteOmni reports it explicitly and suggests closely related organisms that *are* covered — this is a coverage limitation of STRING, not an app error. Try a more commonly studied organism, or use a species-level taxon ID instead of a strain-specific one.
 
 An empty network with a covered organism usually means too few proteins mapped to STRING identifiers (see the "could not be mapped" list under the plot) or that the **Min. combined score** threshold is too high — lower it toward STRING's default of 400 to retain more edges.
 
