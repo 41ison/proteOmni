@@ -68,28 +68,69 @@ prep_seqlogo_instanovo <- function(seqs, width) {
   seqs[grepl("^[ACDEFGHIKLMNPQRSTVWY]+$", seqs)]
 }
 
-theme_ins <- function(...) {
-  theme_bw(...) +
+INS_THEME_CHOICES <- c(
+  "Black & White (theme_bw)" = "bw",
+  "Classic (theme_classic)" = "classic",
+  "Minimal (theme_minimal)" = "minimal",
+  "Light (theme_light)" = "light",
+  "Linedraw (theme_linedraw)" = "linedraw",
+  "Grey (theme_grey)" = "grey"
+)
+
+theme_ins <- function(theme_name = "bw", font_size = 13) {
+  base_th <- if (exists("get_da_theme", mode = "function")) {
+    get_da_theme(theme_name = theme_name, base_size = font_size)
+  } else {
+    switch(
+      theme_name,
+      classic = ggplot2::theme_classic(base_size = font_size),
+      minimal = ggplot2::theme_minimal(base_size = font_size),
+      light = ggplot2::theme_light(base_size = font_size),
+      linedraw = ggplot2::theme_linedraw(base_size = font_size),
+      grey = ggplot2::theme_grey(base_size = font_size),
+      ggplot2::theme_bw(base_size = font_size)
+    )
+  }
+  base_th +
     theme(
-      plot.title = element_text(size = 14, face = "bold", hjust = 0.5),
-      axis.text = element_text(size = 10, face = "bold", color = "black"),
-      axis.title = element_text(size = 11, face = "bold"),
-      legend.title = element_text(size = 10, face = "bold", hjust = 0.5),
+      text = element_text(size = font_size),
+      plot.title = element_text(
+        size = round(font_size * 1.15),
+        face = "bold",
+        hjust = 0.5
+      ),
+      axis.text = element_text(
+        size = round(font_size * 0.85),
+        face = "bold",
+        color = "black"
+      ),
+      axis.title = element_text(size = font_size, face = "bold"),
+      legend.title = element_text(
+        size = round(font_size * 0.9),
+        face = "bold",
+        hjust = 0.5
+      ),
+      legend.text = element_text(size = round(font_size * 0.85)),
       legend.title.position = "top",
       legend.position = "bottom",
       strip.background = element_blank(),
-      strip.text = element_text(color = "black", face = "bold"),
-      panel.border = element_rect(color = "black", fill = NA)
+      strip.text = element_text(
+        size = round(font_size * 0.95),
+        color = "black",
+        face = "bold"
+      )
     )
 }
 
 sp_wrap_ins <- function(sid, ui_el) {
   div(
     class = "plot-wrap",
-    tags$div(
-      class = "spinner-overlay",
-      id = sid,
-      icon("spinner", class = "fa-spin")
+    shinyjs::hidden(
+      tags$div(
+        class = "spinner-overlay",
+        id = sid,
+        icon("spinner", class = "fa-spin")
+      )
     ),
     ui_el
   )
@@ -129,74 +170,6 @@ InstaNovo_sidebar_ui <- function(id) {
       value = -100,
       step = 0.5
     ),
-    sliderInput(
-      ns("rt_tolerance"),
-      "ΔRT artifact threshold (min)",
-      min = 0,
-      max = 5,
-      value = 0.5,
-      step = 0.1
-    ),
-    colourpicker::colourInput(
-      ns("plot_color"),
-      "Plot colour",
-      value = "#27ae60"
-    ),
-    tags$hr(style = "border-color:#2d3741;margin:6px 0;"),
-    tags$div(
-      style = "padding:4px 16px;color:#adb5bd;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:1px;",
-      "SeqLogo options"
-    ),
-    numericInput(
-      ns("nterm_width"),
-      "N-terminus width (AA)",
-      value = 5,
-      min = 2,
-      max = 15
-    ),
-    numericInput(
-      ns("cterm_width"),
-      "C-terminus width (AA)",
-      value = 5,
-      min = 2,
-      max = 15
-    ),
-    tags$hr(style = "border-color:#2d3741;margin:6px 0;"),
-    tags$hr(style = "border-color:#2d3741;margin:6px 0;"),
-    selectInput(
-      ns("plot_select"),
-      "Select Graphic",
-      choices = c(
-        "Score distribution (log_probs)" = "plot_score",
-        "Peptide length distribution" = "plot_length",
-        "Charge state distribution" = "plot_charge",
-        "Mass error distribution (ppm)" = "plot_mz_error",
-        "Retained PSMs vs. score threshold" = "plot_elbow",
-        "Median score by peptide length" = "plot_score_length",
-        "ppm error vs score" = "plot_mz_score",
-        "GRAVY Index Distribution" = "plot_gravy",
-        "Isoelectric Point (pI) Distribution" = "plot_pi",
-        "Amino acid frequencies" = "plot_aa_freq",
-        "N-terminus SeqLogo" = "plot_nterm",
-        "C-terminus SeqLogo" = "plot_cterm"
-      )
-    ),
-    actionButton(
-      ns("run_plot"),
-      "Plot Selected Graphic",
-      icon = icon("chart-bar"),
-      class = "btn-primary",
-      style = "width:80%;margin-bottom:8px;"
-    ),
-    div(
-      style = "padding:0 8px;",
-      downloadButton(
-        ns("download_plot"),
-        "⬇ Download Plot (.png)",
-        class = "dl-btn",
-        style = "width:100%;text-align:left;"
-      )
-    ),
     Fasta_sidebar_ui(ns("fasta"))
   )
 }
@@ -222,6 +195,124 @@ InstaNovo_body_ui <- function(id) {
             solidHeader = TRUE,
             width = 12,
             collapsible = TRUE,
+            fluidRow(
+              column(
+                4,
+                selectInput(
+                  ns("plot_select"),
+                  "Select Graphic",
+                  choices = c(
+                    "Score distribution (log_probs)" = "plot_score",
+                    "Peptide length distribution" = "plot_length",
+                    "Charge state distribution" = "plot_charge",
+                    "Mass error distribution (ppm)" = "plot_mz_error",
+                    "Retained PSMs vs. score threshold" = "plot_elbow",
+                    "Median score by peptide length" = "plot_score_length",
+                    "ppm error vs score" = "plot_mz_score",
+                    "GRAVY Index Distribution" = "plot_gravy",
+                    "Isoelectric Point (pI) Distribution" = "plot_pi",
+                    "Amino acid frequencies" = "plot_aa_freq",
+                    "N-terminus SeqLogo" = "plot_nterm",
+                    "C-terminus SeqLogo" = "plot_cterm"
+                  ),
+                  width = "100%"
+                )
+              ),
+              column(
+                2,
+                colourpicker::colourInput(
+                  ns("plot_color"),
+                  "Plot colour",
+                  value = "#27ae60"
+                )
+              ),
+              column(
+                3,
+                tags$div(
+                  style = "margin-top:25px;",
+                  actionButton(
+                    ns("run_plot"),
+                    "Plot Selected Graphic",
+                    icon = icon("chart-bar"),
+                    class = "btn-primary",
+                    style = "width:100%;"
+                  )
+                )
+              ),
+              column(
+                3,
+                tags$div(
+                  style = "margin-top:25px;",
+                  downloadButton(
+                    ns("download_plot"),
+                    tagList(icon("download"), " Download Plot (.png)"),
+                    class = "dl-btn",
+                    style = "width:100%;margin:0;padding:7px 12px;"
+                  )
+                )
+              )
+            ),
+            fluidRow(
+              column(
+                2,
+                numericInput(
+                  ns("facet_ncol"),
+                  "Facet columns",
+                  value = 3,
+                  min = 1,
+                  max = 12,
+                  step = 1,
+                  width = "100%"
+                )
+              ),
+              column(
+                2,
+                numericInput(
+                  ns("font_size"),
+                  "Font size",
+                  value = 13,
+                  min = 8,
+                  max = 28,
+                  step = 1,
+                  width = "100%"
+                )
+              ),
+              column(
+                4,
+                selectInput(
+                  ns("plot_theme"),
+                  "Theme",
+                  choices = INS_THEME_CHOICES,
+                  selected = "bw",
+                  width = "100%"
+                )
+              ),
+              column(
+                2,
+                numericInput(
+                  ns("nterm_width"),
+                  "N-terminus width (AA)",
+                  value = 5,
+                  min = 2,
+                  max = 15,
+                  step = 1,
+                  width = "100%"
+                )
+              ),
+              column(
+                2,
+                numericInput(
+                  ns("cterm_width"),
+                  "C-terminus width (AA)",
+                  value = 5,
+                  min = 2,
+                  max = 15,
+                  step = 1,
+                  width = "100%"
+                )
+              )
+            ),
+            tags$hr(style = "margin:8px 0 12px;"),
             sp_wrap_ins(ns("spi_main"), uiOutput(ns("dynamic_plot_ui")))
           )
         )
@@ -248,15 +339,69 @@ InstaNovo_body_ui <- function(id) {
             status = "primary",
             solidHeader = TRUE,
             width = 12,
-            div(
-              class = "plot-wrap",
-              tags$div(
-                class = "spinner-overlay",
-                id = ns("sp_moddiag"),
-                icon("spinner", class = "fa-spin")
+            collapsible = TRUE,
+            fluidRow(
+              column(
+                3,
+                sliderInput(
+                  ns("rt_tolerance"),
+                  "ΔRT artifact threshold (min)",
+                  min = 0,
+                  max = 5,
+                  value = 0.5,
+                  step = 0.1,
+                  width = "100%"
+                )
               ),
-              uiOutput(ns("mod_diag_plot_ui"))
-            )
+              column(
+                2,
+                numericInput(
+                  ns("mod_facet_ncol"),
+                  "Facet columns",
+                  value = 2,
+                  min = 1,
+                  max = 12,
+                  step = 1,
+                  width = "100%"
+                )
+              ),
+              column(
+                2,
+                numericInput(
+                  ns("mod_font_size"),
+                  "Font size",
+                  value = 13,
+                  min = 8,
+                  max = 28,
+                  step = 1,
+                  width = "100%"
+                )
+              ),
+              column(
+                3,
+                selectInput(
+                  ns("mod_plot_theme"),
+                  "Theme",
+                  choices = INS_THEME_CHOICES,
+                  selected = "bw",
+                  width = "100%"
+                )
+              ),
+              column(
+                2,
+                tags$div(
+                  style = "margin-top:25px;",
+                  downloadButton(
+                    ns("download_mod_diag_plot"),
+                    tagList(icon("download"), " Download (.png)"),
+                    class = "dl-btn",
+                    style = "width:100%;margin:0;padding:7px 12px;"
+                  )
+                )
+              )
+            ),
+            tags$hr(style = "margin:8px 0 12px;"),
+            sp_wrap_ins(ns("sp_moddiag"), uiOutput(ns("mod_diag_plot_ui")))
           )
         ),
         fluidRow(
@@ -282,13 +427,55 @@ InstaNovo_server <- function(id) {
     ns <- session$ns
     fasta_digest <- Fasta_server("fasta")
 
-    spin_ids <- paste0("spi", sprintf("%02d", 1:10))
-    show_all <- function() lapply(spin_ids, function(s) shinyjs::show(id = s))
     hide_sp <- function(s) shinyjs::hide(id = s)
-    rh <- function(fn, sid) {
-      on.exit(hide_sp(sid), add = TRUE)
-      fn()
-    }
+
+    active_plot_id <- reactiveVal("plot_score")
+
+    observeEvent(input$run_plot, {
+      req(input$plot_select)
+      active_plot_id(input$plot_select)
+    })
+
+    ins_aesthetics <- reactive({
+      ncol_val <- suppressWarnings(as.integer(input$facet_ncol %||% 3L))
+      if (is.na(ncol_val) || ncol_val < 1L) {
+        ncol_val <- 3L
+      }
+      font_size <- suppressWarnings(as.numeric(input$font_size %||% 13))
+      if (is.na(font_size) || font_size < 6) {
+        font_size <- 13
+      }
+      theme_name <- input$plot_theme %||% "bw"
+      plot_col <- input$plot_color %||% "#27ae60"
+
+      list(
+        ncol = ncol_val,
+        font_size = font_size,
+        label_size = max(2.5, round(font_size * 0.3, 2)),
+        theme_name = theme_name,
+        theme_obj = theme_ins(theme_name = theme_name, font_size = font_size),
+        plot_color = plot_col
+      )
+    })
+
+    mod_aesthetics <- reactive({
+      ncol_val <- suppressWarnings(as.integer(input$mod_facet_ncol %||% 2L))
+      if (is.na(ncol_val) || ncol_val < 1L) {
+        ncol_val <- 2L
+      }
+      font_size <- suppressWarnings(as.numeric(input$mod_font_size %||% 13))
+      if (is.na(font_size) || font_size < 6) {
+        font_size <- 13
+      }
+      theme_name <- input$mod_plot_theme %||% "bw"
+
+      list(
+        ncol = ncol_val,
+        font_size = font_size,
+        theme_name = theme_name,
+        theme_obj = theme_ins(theme_name = theme_name, font_size = font_size)
+      )
+    })
 
     # ── Load raw data ───────────────────────────────────────────────────────────
     raw_data_rv <- reactiveValues(psm = NULL)
@@ -299,7 +486,8 @@ InstaNovo_server <- function(id) {
         showNotification("Please enter a valid directory path.", type = "error")
         return()
       }
-      show_all()
+      shinyjs::show(id = "spi_main")
+      on.exit(hide_sp("spi_main"), add = TRUE)
       withProgress(message = "Parsing InstaNovo results...", value = 0, {
         csv_files <- list.files(
           dir_path,
@@ -313,7 +501,6 @@ InstaNovo_server <- function(id) {
             type = "warning"
           )
           setProgress(1)
-          hide_sp("spi01")
           return()
         }
 
@@ -370,7 +557,8 @@ InstaNovo_server <- function(id) {
     data <- reactive({
       rd <- raw_data()
       req(rd, rd$psm)
-      rd$psm |> filter(is.na(score) | score >= input$score_filter)
+      sc_min <- input$score_filter %||% -100
+      rd$psm |> filter(is.na(score) | score >= sc_min)
     })
 
     mapped_data <- reactive({
@@ -415,7 +603,7 @@ InstaNovo_server <- function(id) {
       )
     })
 
-    plot_annotated_density <- function(d, col_sym, title, xlab, color) {
+    plot_annotated_density <- function(d, col_sym, title, xlab, color, aes_cfg) {
       d <- d |> filter(!is.na(!!sym(col_sym)))
       if (nrow(d) == 0) {
         return(
@@ -443,25 +631,27 @@ InstaNovo_server <- function(id) {
           vjust = 2,
           hjust = -0.1,
           color = "red",
-          fontface = "bold"
+          fontface = "bold",
+          size = aes_cfg$label_size
         ) +
         labs(title = title, x = xlab, y = "Density") +
-        facet_wrap(~filename, ncol = 3) +
-        theme_ins()
+        facet_wrap(~filename, ncol = aes_cfg$ncol) +
+        aes_cfg$theme_obj
     }
 
     plot_score_obj <- reactive({
       d <- data()
       req(nrow(d) > 0)
+      aes_cfg <- ins_aesthetics()
       ggplot(d, aes(x = score)) +
         geom_histogram(
           bins = 80,
-          fill = input$plot_color,
+          fill = aes_cfg$plot_color,
           color = "black",
           alpha = 0.85
         ) +
         geom_vline(
-          xintercept = input$score_filter,
+          xintercept = input$score_filter %||% -100,
           color = "red",
           linetype = "dashed",
           linewidth = 0.8
@@ -471,18 +661,19 @@ InstaNovo_server <- function(id) {
           x = "InstaNovo Score (log_prob)",
           y = "Count"
         ) +
-        facet_wrap(~filename, ncol = 3) +
-        theme_ins()
+        facet_wrap(~filename, ncol = aes_cfg$ncol) +
+        aes_cfg$theme_obj
     })
 
     plot_length_obj <- reactive({
       d <- data()
       req(nrow(d) > 0)
+      aes_cfg <- ins_aesthetics()
       len_range <- range(d$peptide_length, na.rm = TRUE)
       ggplot(d, aes(x = peptide_length)) +
         geom_histogram(
           bins = max(1, len_range[2] - len_range[1] + 1),
-          fill = input$plot_color,
+          fill = aes_cfg$plot_color,
           color = "black",
           alpha = 0.85
         ) +
@@ -491,36 +682,44 @@ InstaNovo_server <- function(id) {
           x = "Length (AA)",
           y = "Count"
         ) +
-        facet_wrap(~filename, ncol = 3) +
-        theme_ins()
+        facet_wrap(~filename, ncol = aes_cfg$ncol) +
+        aes_cfg$theme_obj
     })
 
     plot_charge_obj <- reactive({
       d <- data()
       req(nrow(d) > 0)
+      aes_cfg <- ins_aesthetics()
       d |>
         dplyr::count(filename, charge) |>
         mutate(charge = factor(charge)) |>
         ggplot(aes(x = charge, y = n, fill = charge)) +
         geom_col(color = "black", show.legend = FALSE) +
-        geom_text(aes(label = n), vjust = -0.4, fontface = "bold", size = 4.5) +
+        geom_text(
+          aes(label = n),
+          vjust = -0.4,
+          fontface = "bold",
+          size = aes_cfg$label_size
+        ) +
+        scale_y_continuous(expand = expansion(mult = c(0, 0.12))) +
         scale_fill_viridis_d(option = "D") +
         labs(
           title = "Charge state distribution",
           x = "Charge (z)",
           y = "Count"
         ) +
-        facet_wrap(~filename, ncol = 3) +
-        theme_ins()
+        facet_wrap(~filename, ncol = aes_cfg$ncol) +
+        aes_cfg$theme_obj
     })
 
     plot_mz_error_obj <- reactive({
       d <- data()
       req(nrow(d) > 0)
+      aes_cfg <- ins_aesthetics()
       ggplot(d, aes(x = mz_error_ppm)) +
         geom_histogram(
           bins = 80,
-          fill = input$plot_color,
+          fill = aes_cfg$plot_color,
           color = "black",
           alpha = 0.85
         ) +
@@ -530,13 +729,14 @@ InstaNovo_server <- function(id) {
           x = "delta_mass_ppm",
           y = "Count"
         ) +
-        facet_wrap(~filename, ncol = 3) +
-        theme_ins()
+        facet_wrap(~filename, ncol = aes_cfg$ncol) +
+        aes_cfg$theme_obj
     })
 
     plot_elbow_obj <- reactive({
       rd <- raw_data()
       req(rd, rd$psm)
+      aes_cfg <- ins_aesthetics()
       td <- rd$psm |> dplyr::filter(!is.na(score), !is.na(filename))
       if (nrow(td) < 10) {
         return(
@@ -564,9 +764,9 @@ InstaNovo_server <- function(id) {
         ungroup()
 
       ggplot(df_curve, aes(x = Score_Threshold, y = PSMs_Retained)) +
-        geom_line(color = input$plot_color, linewidth = 1.2) +
+        geom_line(color = aes_cfg$plot_color, linewidth = 1.2) +
         geom_vline(
-          xintercept = input$score_filter,
+          xintercept = input$score_filter %||% -100,
           color = "red",
           linetype = "dashed",
           linewidth = 1
@@ -576,13 +776,14 @@ InstaNovo_server <- function(id) {
           x = "Minimum log_probs threshold",
           y = "Number of retained PSMs"
         ) +
-        facet_wrap(~filename, ncol = 3) +
-        theme_ins()
+        facet_wrap(~filename, ncol = aes_cfg$ncol) +
+        aes_cfg$theme_obj
     })
 
     plot_score_length_obj <- reactive({
       d <- data()
       req(nrow(d) > 0)
+      aes_cfg <- ins_aesthetics()
       d |>
         dplyr::filter(!is.na(peptide_length)) |>
         group_by(filename, peptide_length) |>
@@ -592,7 +793,7 @@ InstaNovo_server <- function(id) {
           .groups = "drop"
         ) |>
         ggplot(aes(x = peptide_length, y = med, size = n)) +
-        geom_point(color = input$plot_color, alpha = 0.8) +
+        geom_point(color = aes_cfg$plot_color, alpha = 0.8) +
         geom_smooth(
           method = "loess",
           se = TRUE,
@@ -607,14 +808,15 @@ InstaNovo_server <- function(id) {
           x = "Peptide length (AA)",
           y = "Median InstaNovo score"
         ) +
-        facet_wrap(~filename, ncol = 3) +
-        theme_ins() +
+        facet_wrap(~filename, ncol = aes_cfg$ncol) +
+        aes_cfg$theme_obj +
         theme(legend.position = "bottom")
     })
 
     plot_mz_score_obj <- reactive({
       d <- data()
       req(nrow(d) > 0)
+      aes_cfg <- ins_aesthetics()
       ggplot(d, aes(x = score, y = mz_error_ppm)) +
         ggpointdensity::geom_pointdensity(size = 0.5, alpha = 0.5) +
         viridis::scale_color_viridis(option = "plasma", name = "Density") +
@@ -624,14 +826,15 @@ InstaNovo_server <- function(id) {
           x = "InstaNovo score",
           y = "delta_mass_ppm"
         ) +
-        facet_wrap(~filename, ncol = 3) +
-        theme_ins() +
+        facet_wrap(~filename, ncol = aes_cfg$ncol) +
+        aes_cfg$theme_obj +
         theme(legend.position = "bottom")
     })
 
     plot_aa_freq_obj <- reactive({
       d <- data()
       req(nrow(d) > 0)
+      aes_cfg <- ins_aesthetics()
       base_aas <- c(
         "A",
         "C",
@@ -701,31 +904,34 @@ InstaNovo_server <- function(id) {
       obs_freq$AA <- factor(obs_freq$AA, levels = base_aas)
 
       ggplot(obs_freq, aes(x = AA, y = Frequency)) +
-        geom_col(fill = input$plot_color, color = "black", alpha = 0.85) +
+        geom_col(fill = aes_cfg$plot_color, color = "black", alpha = 0.85) +
         labs(
           title = "Amino acid frequencies",
           x = "Amino acid",
           y = "Frequency (%)"
         ) +
-        facet_wrap(~filename, ncol = 3) +
-        theme_ins()
+        facet_wrap(~filename, ncol = aes_cfg$ncol) +
+        aes_cfg$theme_obj
     })
 
     plot_gravy_obj <- reactive({
       d <- mapped_data()
       req(nrow(d) > 0, "gravy" %in% names(d))
+      aes_cfg <- ins_aesthetics()
       plot_annotated_density(
         d,
         "gravy",
         "GRAVY Index Distribution",
         "GRAVY Index",
-        input$plot_color
+        aes_cfg$plot_color,
+        aes_cfg
       )
     })
 
     plot_pi_obj <- reactive({
       d <- mapped_data()
       req(nrow(d) > 0, "pI" %in% names(d))
+      aes_cfg <- ins_aesthetics()
       if (all(is.na(d$pI))) {
         return(
           ggplot() +
@@ -743,14 +949,26 @@ InstaNovo_server <- function(id) {
         pi_col = "pI",
         mw_col = "MW",
         title = "Virtual 2D Gel",
-        facet_col = "filename"
-      )
+        facet_col = "filename",
+        ncol = aes_cfg$ncol
+      ) +
+        aes_cfg$theme_obj +
+        theme(
+          legend.key.height = ggplot2::unit(0.25, "cm"),
+          legend.key.width = ggplot2::unit(1, "cm"),
+          legend.position = "bottom"
+        )
     })
 
     plot_nterm_obj <- reactive({
       d <- data()
       req(nrow(d) > 0)
-      w <- max(2, min(15, input$nterm_width))
+      aes_cfg <- ins_aesthetics()
+      w_raw <- suppressWarnings(as.integer(input$nterm_width %||% 5L))
+      if (is.na(w_raw)) {
+        w_raw <- 5L
+      }
+      w <- max(2L, min(15L, w_raw))
       df <- d |>
         filter(!is.na(stripped_sequence), nchar(stripped_sequence) >= w)
       if (nrow(df) == 0) {
@@ -786,20 +1004,29 @@ InstaNovo_server <- function(id) {
             theme_void()
         )
       }
-      ggseqlogo::ggseqlogo(seq_lst, method = "bits", seq_type = "AA") +
+      ggseqlogo::ggseqlogo(
+        seq_lst,
+        method = "bits",
+        seq_type = "AA",
+        ncol = aes_cfg$ncol
+      ) +
         labs(
           title = paste0("N-terminus SeqLogo (first ", w, " AA)"),
           x = "Position",
           y = "Bits"
         ) +
-        theme_bw() +
-        theme(plot.title = element_text(size = 14, face = "bold", hjust = 0.5))
+        aes_cfg$theme_obj
     })
 
     plot_cterm_obj <- reactive({
       d <- data()
       req(nrow(d) > 0)
-      w <- max(2, min(15, input$cterm_width))
+      aes_cfg <- ins_aesthetics()
+      w_raw <- suppressWarnings(as.integer(input$cterm_width %||% 5L))
+      if (is.na(w_raw)) {
+        w_raw <- 5L
+      }
+      w <- max(2L, min(15L, w_raw))
       df <- d |>
         filter(!is.na(stripped_sequence), nchar(stripped_sequence) >= w)
       if (nrow(df) == 0) {
@@ -835,35 +1062,69 @@ InstaNovo_server <- function(id) {
             theme_void()
         )
       }
-      ggseqlogo::ggseqlogo(seq_lst, method = "bits", seq_type = "AA") +
+      ggseqlogo::ggseqlogo(
+        seq_lst,
+        method = "bits",
+        seq_type = "AA",
+        ncol = aes_cfg$ncol
+      ) +
         labs(
           title = paste0("C-terminus SeqLogo (last ", w, " AA)"),
           x = "Position",
           y = "Bits"
         ) +
-        theme_bw() +
-        theme(plot.title = element_text(size = 14, face = "bold", hjust = 0.5))
+        aes_cfg$theme_obj
     })
 
-    # ── Dynamic plot height ───────────────────────────────────────────────
-    ins_plot_h <- reactive({
-      d <- data()
-      n <- dplyr::n_distinct(d$filename)
-      max(400L, ceiling(n / 3L) * 350L)
+    # ── Dynamic plot dimensions ───────────────────────────────────────────
+    ins_plot_dims <- reactive({
+      rd <- raw_data()
+      req(rd, rd$psm)
+      aes_cfg <- ins_aesthetics()
+      n_files <- max(1L, dplyr::n_distinct(rd$psm$filename))
+      eff_ncol <- min(aes_cfg$ncol, n_files)
+      eff_nrow <- ceiling(n_files / aes_cfg$ncol)
+      row_h <- max(280L, as.integer(round(aes_cfg$font_size * 24)))
+      list(
+        px = max(420L, eff_nrow * row_h),
+        w_in = max(8, eff_ncol * 3.8),
+        h_in = max(6, eff_nrow * 3.2 + 1.2)
+      )
     })
 
     # ── Dynamic UI & Master Plot Routing ─────────────────────────────────────
     output$dynamic_plot_ui <- renderUI({
-      req(data())
-      plotOutput(ns("dynamic_plot_out"), height = paste0(ins_plot_h(), "px"))
+      if (is.null(raw_data_rv$psm)) {
+        return(div(
+          class = "plot-placeholder",
+          "Load an InstaNovo results directory from the sidebar to view plots."
+        ))
+      }
+      dims <- ins_plot_dims()
+      plotOutput(ns("dynamic_plot_out"), height = paste0(dims$px, "px"))
     })
 
-    current_plot_obj <- eventReactive(input$run_plot, {
-      req(input$plot_select)
-      shinyjs::show(id = "spi_main")
+    current_plot_obj <- reactive({
+      req(raw_data_rv$psm, active_plot_id())
+      pl <- active_plot_id()
+      if (pl != "plot_elbow" && nrow(data()) == 0L) {
+        return(
+          ggplot() +
+            annotate(
+              "text",
+              x = 0.5,
+              y = 0.5,
+              label = "No PSMs pass the current score filter.",
+              size = 5,
+              fontface = "bold",
+              color = "#6c757d"
+            ) +
+            theme_void()
+        )
+      }
 
       switch(
-        input$plot_select,
+        pl,
         "plot_score" = plot_score_obj(),
         "plot_length" = plot_length_obj(),
         "plot_charge" = plot_charge_obj(),
@@ -880,6 +1141,7 @@ InstaNovo_server <- function(id) {
     })
 
     output$dynamic_plot_out <- renderPlot({
+      shinyjs::show(id = "spi_main")
       on.exit(hide_sp("spi_main"), add = TRUE)
       req(current_plot_obj())
       current_plot_obj()
@@ -915,15 +1177,17 @@ InstaNovo_server <- function(id) {
     # ── Download Plots
     output$download_plot <- downloadHandler(
       filename = function() {
-        paste0("InstaNovo_", input$plot_select, "_", Sys.Date(), ".png")
+        paste0("InstaNovo_", active_plot_id(), "_", Sys.Date(), ".png")
       },
       content = function(file) {
         req(current_plot_obj())
+        dims <- ins_plot_dims()
         ggsave(
           file,
           current_plot_obj(),
-          width = 11,
-          height = 8,
+          width = dims$w_in,
+          height = dims$h_in,
+          dpi = 300,
           bg = "white",
           device = "png"
         )
@@ -941,6 +1205,7 @@ InstaNovo_server <- function(id) {
       req(d, nrow(d) > 0)
       req("retention_time" %in% names(d))
       req(all(c("predictions", "stripped_sequence", "filename") %in% names(d)))
+      rt_tol <- input$rt_tolerance %||% 0.5
 
       d_mod <- d |>
         dplyr::filter(predictions != stripped_sequence) |>
@@ -970,7 +1235,7 @@ InstaNovo_server <- function(id) {
         dplyr::mutate(
           delta_rt = abs(rt_mod - rt_unmod),
           classification = dplyr::if_else(
-            delta_rt <= input$rt_tolerance,
+            delta_rt <= rt_tol,
             "Suspected Artifact",
             "Sample-Derived"
           )
@@ -980,6 +1245,8 @@ InstaNovo_server <- function(id) {
     mod_diag_plot_obj <- reactive({
       paired <- mod_diag_data()
       req(paired, nrow(paired) > 0)
+      mod_aes <- mod_aesthetics()
+      rt_tol <- input$rt_tolerance %||% 0.5
 
       top_peptides <- paired |>
         dplyr::group_by(sample_name, peptide) |>
@@ -1020,17 +1287,37 @@ InstaNovo_server <- function(id) {
           y = "Peptide sequence (stripped)",
           caption = paste0(
             "\u0394RT threshold: ",
-            input$rt_tolerance,
+            rt_tol,
             " min | Artifact if |\u0394RT| \u2264 threshold"
           )
         ) +
-        facet_wrap(~sample_name, ncol = 2, scales = "free") +
-        theme_ins() +
+        facet_wrap(~sample_name, ncol = mod_aes$ncol, scales = "free") +
+        mod_aes$theme_obj +
         theme(
-          axis.text.y = element_text(size = 7),
+          axis.text.y = element_text(
+            size = max(6, round(mod_aes$font_size * 0.6))
+          ),
           legend.position = "bottom",
-          plot.caption = element_text(size = 12, face = "bold")
+          plot.caption = element_text(
+            size = round(mod_aes$font_size * 0.9),
+            face = "bold"
+          )
         )
+    })
+
+    mod_diag_dims <- reactive({
+      paired <- mod_diag_data()
+      req(paired, nrow(paired) > 0)
+      mod_aes <- mod_aesthetics()
+      n_samples <- max(1L, dplyr::n_distinct(paired$sample_name))
+      eff_ncol <- min(mod_aes$ncol, n_samples)
+      eff_nrow <- ceiling(n_samples / mod_aes$ncol)
+      row_h <- max(400L, as.integer(round(mod_aes$font_size * 35)))
+      list(
+        px = max(420L, min(eff_nrow * row_h, 2400L)),
+        w_in = max(9, eff_ncol * 5.0),
+        h_in = max(6, eff_nrow * 4.5 + 1.2)
+      )
     })
 
     output$mod_diag_plot_ui <- renderUI({
@@ -1042,14 +1329,34 @@ InstaNovo_server <- function(id) {
           "No paired modified/unmodified peptides found. A 'retention_time' column is required in the InstaNovo CSV (available when input spectra carry RT metadata)."
         ))
       }
-      n_samples <- dplyr::n_distinct(paired$sample_name)
-      dynamic_h <- max(400L, min(n_samples * 500L, 2000L))
-      plotOutput(ns("mod_diag_plot"), height = paste0(dynamic_h, "px"))
+      dims <- mod_diag_dims()
+      plotOutput(ns("mod_diag_plot"), height = paste0(dims$px, "px"))
     })
 
     output$mod_diag_plot <- renderPlot({
+      shinyjs::show("sp_moddiag")
+      on.exit(hide_sp("sp_moddiag"), add = TRUE)
       mod_diag_plot_obj()
     })
+
+    output$download_mod_diag_plot <- downloadHandler(
+      filename = function() {
+        paste0("InstaNovo_mod_diagnostic_", Sys.Date(), ".png")
+      },
+      content = function(file) {
+        req(mod_diag_plot_obj())
+        dims <- mod_diag_dims()
+        ggsave(
+          file,
+          mod_diag_plot_obj(),
+          width = dims$w_in,
+          height = dims$h_in,
+          dpi = 300,
+          bg = "white",
+          device = "png"
+        )
+      }
+    )
 
     output$mod_diag_table <- DT::renderDataTable({
       paired <- mod_diag_data()
