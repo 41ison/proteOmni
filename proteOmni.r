@@ -190,6 +190,7 @@ source("modules/mod_EncyclopeDIA.r")
 source("modules/mod_Sage.r")
 source("modules/mod_MaxQuantMSMS.r")
 source("modules/mod_SeqProfile.r")
+source("modules/mod_TargetDesign.r")
 
 
 # ── Global options ────────────────────────────────────────────────────────────
@@ -371,6 +372,7 @@ ui <- dashboardPage(
       menuItem("EncyclopeDIA", tabName = "enc_tab", icon = icon("book-open")),
       menuItem("Sage", tabName = "sag_tab", icon = icon("leaf")),
       menuItem("SeqProfile", tabName = "seq_tab", icon = icon("wave-square")),
+      menuItem("TargetDesign", tabName = "tgd_tab", icon = icon("bullseye")),
       menuItem("Documentation", tabName = "doc_tab", icon = icon("book"))
     ),
     tags$hr(style = "border-color:#2d3741;margin:4px 0;"),
@@ -518,6 +520,20 @@ ui <- dashboardPage(
               )
             ),
             fluidRow(
+              column(
+                4,
+                div(
+                  class = "tool-card",
+                  id = "card_tgd",
+                  onclick = "Shiny.setInputValue('select_tool','tgd',{priority:'event'})",
+                  div(class = "tool-icon", icon("bullseye")),
+                  tags$h3("TargetDesign"),
+                  tags$p(
+                    "Surrogate peptide selection and transition design for targeted proteomics."
+                  ),
+                  tags$span("SRM / MRM / PRM", class = "tool-badge")
+                )
+              ),
               column(
                 4,
                 div(
@@ -709,6 +725,23 @@ ui <- dashboardPage(
         SeqProfile_body_ui("seq")
       ),
 
+      # ── TargetDesign ──────────────────────────────────────────────────────
+      tabItem(
+        tabName = "tgd_tab",
+        fluidRow(column(
+          12,
+          div(
+            class = "back-btn",
+            actionButton(
+              "back_to_home_tgd",
+              "← Home",
+              class = "btn btn-default btn-sm"
+            )
+          )
+        )),
+        TargetDesign_body_ui("tgd")
+      ),
+
       # ── Documentation ─────────────────────────────────────────────────────
       tabItem(
         tabName = "doc_tab",
@@ -758,6 +791,7 @@ server <- function(input, output, session) {
       sag = "sag_tab",
       mqt = "mqt_tab",
       seq = "seq_tab",
+      tgd = "tgd_tab",
       doc = "doc_tab"
     )
     if (!is.null(tab)) updateTabItems(session, "main_menu", selected = tab)
@@ -800,6 +834,7 @@ server <- function(input, output, session) {
     back_to_home_sag = "home",
     back_to_home_mqt = "home",
     back_to_home_seq = "home",
+    back_to_home_tgd = "home",
     back_to_home_doc = "home"
   )
   for (btn in names(back_buttons)) {
@@ -833,6 +868,7 @@ server <- function(input, output, session) {
         icon("wave-square", style = "margin-right:6px;"),
         "Sequence, algorithm and parameters are set in the main panel."
       ),
+      tgd_tab = TargetDesign_sidebar_ui("tgd"),
       doc_tab = tags$div(
         style = "padding:16px;color:#adb5bd;font-size:13px;",
         icon("book", style = "margin-right:6px;"),
@@ -857,6 +893,7 @@ server <- function(input, output, session) {
   Sage_server("sag")
   MaxQuantMSMS_server("mqt")
   SeqProfile_server("seq")
+  TargetDesign_server("tgd")
 }
 
 shinyApp(ui = ui, server = server)
