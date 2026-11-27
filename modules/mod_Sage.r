@@ -1012,7 +1012,7 @@ Sage_body_ui <- function(id) {
 # ═══════════════════════════════════════════════════════════════════════════════
 # MODULE — SERVER
 # ═══════════════════════════════════════════════════════════════════════════════
-Sage_server <- function(id, fasta_digest) {
+Sage_server <- function(id) {
   moduleServer(id, function(input, output, session) {
     ns <- session$ns
 
@@ -1234,36 +1234,6 @@ Sage_server <- function(id, fasta_digest) {
       d
     })
 
-    fasta_digest <- reactive({
-      req(input$fasta_file)
-      showNotification(
-        "Reading and digesting FASTA...",
-        id = "fasta_notif_sage",
-        duration = NULL
-      )
-      seqs <- read_fasta_custom(input$fasta_file$datapath)
-      df <- in_silico_digest(seqs, max_missed = input$missed_cleavages)
-      removeNotification("fasta_notif_sage")
-      df
-    })
-
-    mapped_data <- reactive({
-      d <- filtered_data()
-      if (isTruthy(input$fasta_file)) {
-        dig <- fasta_digest()
-        classes <- classify_peptides(d$stripped_peptide, dig)
-        d <- dplyr::left_join(
-          d,
-          classes,
-          by = c("stripped_peptide" = "peptide")
-        )
-      } else {
-        d$classification <- "Unmapped"
-        d$mapped_proteins <- NA_character_
-      }
-      d
-    })
-
     output$info_box <- renderInfoBox({
       req(sage_data())
       total <- nrow(sage_data())
@@ -1470,7 +1440,7 @@ Sage_server <- function(id, fasta_digest) {
     })
 
     plot_gravy_obj <- reactive({
-      d <- mapped_data()
+      d <- filtered_data()
       req(nrow(d) > 0, "gravy" %in% names(d))
       plot_annotated_density_faceted(
         d,
@@ -1482,7 +1452,7 @@ Sage_server <- function(id, fasta_digest) {
     })
 
     plot_pi_obj <- reactive({
-      d <- mapped_data()
+      d <- filtered_data()
       req(nrow(d) > 0, "pI" %in% names(d))
       if (all(is.na(d$pI))) {
         return(
