@@ -293,14 +293,14 @@ Visualiser for [InstaNovo](https://github.com/instadeepai/InstaNovo) *de novo* s
 
 ### 6. EncyclopeDIA — *EncyclopeDIA / DIA*
 
-Aggregates and explores EncyclopeDIA DIA results. Reads all `*.encyclopedia2.txt` result files from a user-specified directory; optionally maps peptides to a protein FASTA uploaded in the module sidebar. Sidebar controls: q-value filter, bar/line colours, and optional FASTA mapping.
+Aggregates and explores EncyclopeDIA DIA results. Automatically discovers `*.encyclopedia2.txt`, `*.encyclopedia.txt`, and `*.mzML.features.txt` (`*.features.txt`) files from a user-specified directory (joining feature-level metrics onto Percolator PSMs in `Auto` mode, or loading PSM or feature tables independently); optionally maps peptides to a protein FASTA uploaded in the module sidebar. Sidebar controls: input table mode, q-value filter, and optional FASTA mapping. Plot selection, colours, faceting (`Facet by file` & `Facet columns`), font size, and ggplot2 theme controls live in the **Plot Controls** box at the top of the plot tab.
 
 **Tabs:**
 
 | Tab | Content |
 |---|---|
-| **Interactive Plot Viewer** | Single-plot builder with 11 graphics: protein and peptide identifications per file, score distribution, posterior error probability (PEP), q-value distribution, peptide yield vs. FDR, charge state, modifications, peptide length, GRAVY index, pI distribution, amino acid frequencies |
-| **Data Table** | Aggregated results table |
+| **Interactive Plot Viewer** | Single-plot builder with 17 graphics across Identifications & FDR (identifications per file, score, PEP, q-value, peptide yield vs. FDR), Peptide Properties (charge state, modifications, peptide length, GRAVY index, virtual 2D gel pI vs. MW, amino acid frequencies), and Feature Metrics from `*.features.txt` (precursor *m/z* vs. RT, ΔRT, MS1 & MS2 mass error, missed cleavages, feature scores, isotope dot product) |
+| **Data Table** | Aggregated and filtered results table |
 
 ---
 
@@ -447,7 +447,7 @@ Each digested peptide starts at **100 points** (`evaluate_targeted_candidates()`
 | **PwrQuant** | Protein abundance matrix (`.tsv` / `.txt` / `.csv`, proteins × samples) | — |
 | **Casanovo** | Directory path containing `.mztab` files | — |
 | **InstaNovo** | Directory path containing InstaNovo `.csv` result files | FASTA file (module sidebar) |
-| **EncyclopeDIA** | Directory path containing `*.encyclopedia2.txt` result files | FASTA file (module sidebar) |
+| **EncyclopeDIA** | Directory path containing `*.encyclopedia2.txt`, `*.encyclopedia.txt`, and/or `*.mzML.features.txt` (`*.features.txt`) files | FASTA file (module sidebar) |
 | **Sage** | `results.sage.tsv` or `results.sage.parquet` | FASTA file (iBAQ tab, or auto-read from `results.json`) |
 | **MaxQuant** | Path to the MaxQuant `combined` directory (`txt/` subfolder is located automatically) | — |
 | **SeqProfile** | None; a protein or peptide sequence (raw or FASTA) pasted into the module | — |
