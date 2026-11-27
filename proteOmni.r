@@ -374,8 +374,7 @@ ui <- dashboardPage(
       menuItem("Documentation", tabName = "doc_tab", icon = icon("book"))
     ),
     tags$hr(style = "border-color:#2d3741;margin:4px 0;"),
-    uiOutput("active_sidebar_controls"),
-    Fasta_sidebar_ui("global_fasta")
+    uiOutput("active_sidebar_controls")
   ),
   dashboardBody(
     tags$head(
@@ -853,12 +852,9 @@ server <- function(input, output, session) {
   QC4DIANN_server("qc4")
   deNovo_server("dnv")
   PwrQuant_server("pwr")
-
-  global_fasta_digest <- Fasta_server("global_fasta")
-
-  InstaNovo_server("ins", global_fasta_digest)
-  EncyclopeDIA_server("enc", global_fasta_digest)
-  Sage_server("sag", global_fasta_digest)
+  InstaNovo_server("ins")
+  EncyclopeDIA_server("enc")
+  Sage_server("sag")
   MaxQuantMSMS_server("mqt")
   SeqProfile_server("seq")
 }
