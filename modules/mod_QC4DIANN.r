@@ -593,6 +593,57 @@ QC4DIANN_ui <- function(id) {
           uiOutput(ns("ibaq_summary"))
         )),
         fluidRow(box(
+          title = "Plot aesthetics",
+          status = "info",
+          solidHeader = TRUE,
+          width = 12,
+          collapsible = TRUE,
+          collapsed = FALSE,
+          fluidRow(
+            column(
+              4,
+              numericInput(
+                ns("ibaq_facet_ncol"),
+                "Facet columns",
+                value = 4,
+                min = 1,
+                max = 12,
+                step = 1,
+                width = "100%"
+              )
+            ),
+            column(
+              4,
+              numericInput(
+                ns("ibaq_font_size"),
+                "Font size",
+                value = 13,
+                min = 8,
+                max = 28,
+                step = 1,
+                width = "100%"
+              )
+            ),
+            column(
+              4,
+              selectInput(
+                ns("ibaq_theme"),
+                "Theme",
+                choices = c(
+                  "Black & White (theme_bw)" = "bw",
+                  "Classic (theme_classic)" = "classic",
+                  "Minimal (theme_minimal)" = "minimal",
+                  "Light (theme_light)" = "light",
+                  "Linedraw (theme_linedraw)" = "linedraw",
+                  "Grey (theme_grey)" = "grey"
+                ),
+                selected = "bw",
+                width = "100%"
+              )
+            )
+          )
+        )),
+        fluidRow(box(
           title = "iBAQ Distribution per Sample",
           status = "primary",
           solidHeader = TRUE,
@@ -649,13 +700,169 @@ QC4DIANN_server <- function(id) {
       green1 = "#2D6A4F"
     )
 
-    heatmap_theme <- theme(
-      text = element_text(size = 14),
-      axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5),
-      axis.text.y = element_text(hjust = 1),
-      legend.position = "bottom",
-      legend.key.width = unit(2.5, "cm")
-    )
+    # ── Shared helper: save a plot-like object (ggplot / ggmatrix / grob) ──
+    # ── Adaptive theme & export sizing helpers ──────────────────────────────
+    make_heatmap_theme <- function(n) {
+      axis_sz <- if (n <= 20) 12 else if (n <= 50) 9 else 7.5
+      theme(
+        text = element_text(size = 12),
+        axis.text.x = element_text(
+          size = axis_sz,
+          angle = 90,
+          hjust = 1,
+          vjust = 0.5
+        ),
+        axis.text.y = element_text(size = axis_sz, hjust = 1),
+        legend.position = "bottom",
+        legend.key.width = unit(2.5, "cm")
+      )
+    }
+
+    # Adjust ggplot text sizes for exported canvases without clobbering angles
+    apply_export_theme <- function(obj, n = 1L, kind = "standard") {
+      if (!inherits(obj, "ggplot")) {
+        return(obj)
+      }
+      if (kind == "facet") {
+        txt_sz <- if (n <= 16) 10 else if (n <= 49) 8.5 else 7.5
+        strip_sz <- if (n <= 16) 10 else if (n <= 49) 8.5 else 7
+        obj +
+          theme(
+            axis.text = element_text(size = txt_sz),
+            strip.text = element_text(size = strip_sz),
+            axis.title = element_text(size = 11),
+            legend.text = element_text(size = 10)
+          )
+      } else if (kind == "hbar") {
+        y_sz <- if (n <= 25) 10 else if (n <= 60) 8.5 else 7.5
+        obj +
+          theme(
+            axis.text.y = element_text(size = y_sz),
+            axis.text.x = element_text(size = 10),
+            axis.title = element_text(size = 11)
+          )
+      } else if (kind == "vbar") {
+        x_sz <- if (n <= 25) 10 else if (n <= 60) 8.5 else 7.5
+        obj +
+          theme(
+            axis.text.x = element_text(size = x_sz),
+            axis.text.y = element_text(size = 10),
+            axis.title = element_text(size = 11)
+          )
+      } else {
+        obj
+      }
+    }
+
+    # Memory-safe export: preserves physical inches (limitsize = FALSE) and
+    # keeps 300 dpi unless pixel bounds would risk Cairo/RAM failure.
+    save_plot_obj <- function(
+      fp,
+      obj,
+      w,
+      h,
+      base_dpi = 300L,
+      n = 1L,
+      kind = "standard"
+    ) {
+      if (is.null(obj)) {
+        return(FALSE)
+      }
+      MAX_DIM_PX <- 16000
+      MAX_TOTAL_PX <- 1.5e8
+
+      eff_dpi <- base_dpi
+      if (max(w, h) * eff_dpi > MAX_DIM_PX) {
+        eff_dpi <- floor(MAX_DIM_PX / max(w, h))
+      }
+      if ((w * eff_dpi) * (h * eff_dpi) > MAX_TOTAL_PX) {
+        eff_dpi <- floor(sqrt(MAX_TOTAL_PX / (w * h)))
+      }
+      eff_dpi <- max(96L, as.integer(eff_dpi))
+
+      if (inherits(obj, "Heatmap") || inherits(obj, "HeatmapList")) {
+        png(fp, width = w, height = h, units = "in", res = eff_dpi)
+        on.exit(dev.off(), add = TRUE)
+        ComplexHeatmap::draw(obj)
+      } else {
+        obj_out <- apply_export_theme(obj, n = n, kind = kind)
+        ggsave(
+          fp,
+          obj_out,
+          width = w,
+          height = h,
+          dpi = eff_dpi,
+          bg = "white",
+          device = "png",
+          limitsize = FALSE
+        )
+      }
+      TRUE
+    }
+
+    # Dynamic physical dimensions (inches) for Tab 1 QC plots (plot1–plot15)
+    calc_qc_plot_dims <- function(plot_id, n_runs, n_mat, max_lbl = 15L) {
+      n_runs <- max(1L, as.integer(n_runs))
+      n_mat <- max(1L, as.integer(n_mat))
+      max_lbl <- max(8L, as.integer(max_lbl))
+
+      if (
+        plot_id %in%
+          c(
+            "plot1",
+            "plot2",
+            "plot3",
+            "plot4",
+            "plot5",
+            "plot12",
+            "plot13",
+            "plot14",
+            "plot15"
+          )
+      ) {
+        ncols <- ceiling(sqrt(n_runs))
+        nrows <- ceiling(n_runs / ncols)
+        list(
+          w = max(11, ncols * 3.2 + 1.5),
+          h = max(8, nrows * 2.4 + 1.8),
+          n = n_runs,
+          kind = "facet"
+        )
+      } else if (plot_id %in% c("plot6", "plot7", "plot11")) {
+        list(
+          w = max(11, min(20, 8.5 + max_lbl * 0.08)),
+          h = max(8, n_runs * 0.26 + 2.0),
+          n = n_runs,
+          kind = "hbar"
+        )
+      } else if (plot_id == "plot8") {
+        list(
+          w = max(11, n_mat * 0.28 + 2.5),
+          h = max(8, min(14, 6.0 + max_lbl * 0.07)),
+          n = n_mat,
+          kind = "vbar"
+        )
+      } else if (plot_id == "plot10") {
+        if (n_mat > 20L) {
+          list(
+            w = max(11, n_mat * 0.28 + 2.5),
+            h = max(10, min(18, 9.0 + max_lbl * 0.07)),
+            n = n_mat,
+            kind = "vbar"
+          )
+        } else {
+          list(
+            w = max(12, n_mat * 0.50 + 2.5),
+            h = max(8, min(14, 6.0 + max_lbl * 0.07)),
+            n = n_mat,
+            kind = "vbar"
+          )
+        }
+      } else {
+        # plot9 (2-facet scatter)
+        list(w = 12, h = 7, n = n_mat, kind = "standard")
+      }
+    }
 
     # ── Dynamic-height helper for Run-faceted plots ─────────────────────────
     qc_plot_h <- reactive({
@@ -868,11 +1075,13 @@ QC4DIANN_server <- function(id) {
       scores <- as.data.frame(pca_res$x)
       scores$Sample <- rownames(scores)
       ve <- summary(pca_res)$importance[2, ] * 100
+      n_samp <- nrow(scores)
+      lbl_sz <- if (n_samp > 60) 2.5 else if (n_samp > 25) 3.2 else 4
       ggplot(scores, aes(x = PC1, y = PC2, colour = Sample)) +
-        geom_point(size = 3, alpha = 0.6) +
+        geom_point(size = if (n_samp > 60) 2 else 3, alpha = 0.6) +
         ggrepel::geom_text_repel(
           aes(label = Sample),
-          size = 4,
+          size = lbl_sz,
           max.overlaps = Inf,
           min.segment.length = 0
         ) +
@@ -1226,14 +1435,14 @@ QC4DIANN_server <- function(id) {
 
     plot6_obj <- reactive({
       req(peptides_per_run())
-      peptides_per_run() %>%
-        as.data.frame() %>%
-        ggplot(aes(y = reorder(Run, n_peptides), x = n_peptides)) +
+      df <- as.data.frame(peptides_per_run())
+      txt_sz <- if (nrow(df) > 50) 2.5 else if (nrow(df) > 25) 3.2 else 4.5
+        ggplot(df, aes(y = reorder(Run, n_peptides), x = n_peptides)) +
         geom_bar(stat = "identity", fill = pal["blue1"], alpha = 0.85) +
         geom_text(
           aes(label = scales::comma(n_peptides)),
           color = "white",
-          size = 5,
+          size = txt_sz,
           hjust = 1.08
         ) +
         labs(y = NULL, x = "Number of peptides")
@@ -1241,32 +1450,46 @@ QC4DIANN_server <- function(id) {
 
     plot7_obj <- reactive({
       req(proteins())
-      proteins() %>%
-        as.data.frame() %>%
-        ggplot(aes(y = reorder(Run, n_proteins), x = n_proteins)) +
+      df <- as.data.frame(proteins())
+      txt_sz <- if (nrow(df) > 50) 2.5 else if (nrow(df) > 25) 3.2 else 4.5
+        ggplot(df, aes(y = reorder(Run, n_proteins), x = n_proteins)) +
         geom_bar(stat = "identity", fill = pal["green1"], alpha = 0.85) +
         geom_text(
           aes(label = scales::comma(n_proteins)),
           color = "white",
-          size = 5,
+          size = txt_sz,
           hjust = 1.08
         ) +
         labs(y = NULL, x = "Number of proteins")
     })
 
-    plot8_obj <- reactive({
+plot8_obj <- reactive({
       req(unique_genes())
-      unique_genes() %>%
+      df <- unique_genes() %>%
         as.data.frame(check.names = FALSE) %>%
         tidyr::gather("Sample", "Intensity") %>%
         dplyr::mutate(missing = is.na(Intensity)) %>%
         dplyr::group_by(Sample) %>%
-        dplyr::summarise(missing = mean(missing) * 100) %>%
-        ggplot(aes(x = reorder(Sample, -missing), y = missing)) +
+        dplyr::summarise(missing = mean(missing) * 100)
+      n_s <- nrow(df)
+      p <- ggplot(df, aes(x = reorder(Sample, -missing), y = missing)) +
         geom_col(fill = pal["blue1"], alpha = 0.85) +
-        geom_text(aes(label = round(missing, 1)), vjust = -0.4, size = 4.5) +
+        scale_y_continuous(expand = expansion(mult = c(0, 0.16))) +
         labs(x = NULL, y = "Missing values (%)") +
         theme(axis.text.x = element_text(angle = 45, hjust = 1))
+      if (n_s > 25) {
+        p +
+          geom_text(
+            aes(label = round(missing, 1)),
+            angle = 90,
+            hjust = -0.15,
+            vjust = 0.5,
+            size = if (n_s > 60) 2.2 else 2.8
+          )
+      } else {
+        p +
+          geom_text(aes(label = round(missing, 1)), vjust = -0.4, size = 4)
+      }
     })
 
     plot9_obj <- reactive({
@@ -1279,11 +1502,11 @@ QC4DIANN_server <- function(id) {
         facet_wrap(~norm)
     })
 
-    plot10_obj <- reactive({
+plot10_obj <- reactive({
       req(combined_data())
-      combined_data() %>%
-        as.data.frame() %>%
-        ggplot(aes(x = Sample, y = Intensity, fill = norm)) +
+      df <- as.data.frame(combined_data())
+      n_s <- dplyr::n_distinct(df$Sample)
+      ggplot(df, aes(x = Sample, y = Intensity, fill = norm)) +
         scale_fill_manual(
           values = c(
             "Raw matrix" = pal[["red1"]],
@@ -1296,7 +1519,7 @@ QC4DIANN_server <- function(id) {
           legend.position = "none"
         ) +
         labs(x = NULL, y = "log₂(Intensity)") +
-        facet_wrap(~norm)
+        facet_wrap(~norm, ncol = if (n_s > 20) 1L else 2L)
     })
 
     plot11_obj <- reactive({
@@ -1424,9 +1647,9 @@ QC4DIANN_server <- function(id) {
         facet_wrap(~Run)
     })
 
-    plot15_obj <- reactive({
+plot15_obj <- reactive({
       req(data())
-      data() %>%
+      df <- data() %>%
         as.data.frame() %>%
         dplyr::select(Run, Stripped.Sequence) %>%
         dplyr::distinct() %>%
@@ -1438,15 +1661,21 @@ QC4DIANN_server <- function(id) {
             as.character(cysteine_count)
           )
         ) %>%
-        dplyr::count(Run, cysteine_count_group) %>%
-        ggplot(aes(x = cysteine_count_group, y = n)) +
+        dplyr::count(Run, cysteine_count_group)
+      n_r <- dplyr::n_distinct(df$Run)
+      ggplot(df, aes(x = cysteine_count_group, y = n)) +
         geom_bar(
           stat = "identity",
           position = "dodge",
           fill = pal["blue1"],
           color = "black"
         ) +
-        geom_text(aes(label = n), vjust = -0.5, size = 4) +
+        geom_text(
+          aes(label = n),
+          vjust = -0.4,
+          size = if (n_r > 25) 2.4 else 3.5
+        ) +
+        scale_y_continuous(expand = expansion(mult = c(0, 0.18))) +
         labs(x = "Cysteine counts in peptides", y = "Count") +
         facet_wrap(~Run, scales = "free_y")
     })
@@ -1722,7 +1951,9 @@ QC4DIANN_server <- function(id) {
           theme_void() +
           theme(
             plot.margin = margin(5, 5, 5, 5),
-            legend.position = if (li == 1) "right" else "none"
+            legend.position = if (li == 1) "top" else "none",
+            legend.text = element_text(size = if (nr_runs > 30) 7 else 9),
+            legend.title = element_text(size = if (nr_runs > 30) 8 else 10)
           )
         p <- p +
           geom_tile(
@@ -1765,7 +1996,12 @@ QC4DIANN_server <- function(id) {
               color = "black",
               linewidth = 0.1
             ) +
-            scale_fill_manual(values = run_colors, drop = FALSE)
+            scale_fill_manual(values = run_colors, drop = FALSE) +
+            guides(fill = guide_legend(
+              nrow = min(8L, ceiling(nr_runs / 10)),
+              keyheight = unit(0.35, "cm"),
+              keywidth = unit(0.35, "cm")
+            ))
         }
         plots[[li]] <- p +
           labs(fill = "Sample", title = paste0("AA ", sp, "-", ep)) +
@@ -1811,7 +2047,7 @@ QC4DIANN_server <- function(id) {
         ggplot(aes(x = Sample, y = Match, fill = value)) +
         geom_tile() +
         viridis::scale_fill_viridis(option = "E") +
-        heatmap_theme +
+        make_heatmap_theme(ncol(unique_genes())) +
         labs(x = NULL, y = NULL, fill = "Cosine similarity")
     })
 
@@ -1832,7 +2068,7 @@ QC4DIANN_server <- function(id) {
         ggplot(aes(x = Sample, y = Match, fill = value)) +
         geom_tile() +
         viridis::scale_fill_viridis(option = "E") +
-        heatmap_theme +
+        make_heatmap_theme(ncol(unique_genes())) +
         labs(x = NULL, y = NULL, fill = "Euclidean distance")
     })
 
@@ -1866,7 +2102,7 @@ QC4DIANN_server <- function(id) {
         ggplot(aes(x = Sample, y = Match, fill = value)) +
         geom_tile() +
         viridis::scale_fill_viridis(option = "E", limits = c(0, 1)) +
-        heatmap_theme +
+        make_heatmap_theme(ncol(unique_genes())) +
         labs(x = NULL, y = NULL, fill = "Jaccard similarity (gene ID)")
     })
 
@@ -1885,16 +2121,19 @@ QC4DIANN_server <- function(id) {
       req(unique_genes())
       d_mat <- unique_genes() %>% log2()
       d_mat[is.na(d_mat)] <- 0
-      if (ncol(d_mat) < 2) {
+      n_s <- ncol(d_mat)
+      if (n_s < 2) {
         return(NULL)
       }
+      cor_sz <- if (n_s <= 10) 4 else if (n_s <= 25) 3 else 2.2
+      strip_sz <- if (n_s <= 10) 10 else if (n_s <= 25) 8 else 6.5
       GGally::ggpairs(
         d_mat,
         lower = list(
           continuous = GGally::wrap(
             "points",
             alpha = 0.3,
-            size = 0.8,
+            size = if (n_s > 25) 0.4 else 0.8,
             color = "#1B4965"
           )
         ),
@@ -1908,7 +2147,7 @@ QC4DIANN_server <- function(id) {
         upper = list(
           continuous = GGally::wrap(
             "cor",
-            size = 4,
+            size = cor_sz,
             color = "black",
             stars = FALSE
           )
@@ -1917,7 +2156,7 @@ QC4DIANN_server <- function(id) {
         theme_bw() +
         theme(
           strip.background = element_blank(),
-          strip.text = element_text(face = "bold", size = 10)
+          strip.text = element_text(face = "bold", size = strip_sz)
         )
     })
 
@@ -2026,7 +2265,7 @@ QC4DIANN_server <- function(id) {
         geom_text(
           aes(label = n),
           position = position_stack(vjust = 0.5),
-          size = 3,
+          size = if (dplyr::n_distinct(peptide_summary()$Run) > 60) 2.2 else 3,
           color = "white",
           fontface = "bold"
         ) +
@@ -2051,7 +2290,7 @@ QC4DIANN_server <- function(id) {
         geom_text(
           aes(label = sprintf("%.1f%%", prop)),
           position = position_stack(vjust = 0.5),
-          size = 3,
+          size = if (dplyr::n_distinct(peptide_summary()$Run) > 60) 2.2 else 3,
           color = "white",
           fontface = "bold"
         ) +
@@ -2281,16 +2520,37 @@ QC4DIANN_server <- function(id) {
         dplyr::ungroup()
     })
 
-    # Facet layout and pixel heights for the per-sample plots
-    IBAQ_RANK_NCOL <- 5L
-    IBAQ_TOP_NCOL <- 4L
+    # Plot aesthetics (facet columns, font size, ggplot2 theme) for iBAQ tab
+    ibaq_aesthetics <- reactive({
+      ncol_val <- suppressWarnings(as.integer(input$ibaq_facet_ncol %||% 4L))
+      if (is.na(ncol_val) || ncol_val < 1L) {
+        ncol_val <- 4L
+      }
+      font_size <- suppressWarnings(as.numeric(input$ibaq_font_size %||% 13))
+      if (is.na(font_size) || font_size < 6) {
+        font_size <- 13
+      }
+      theme_name <- input$ibaq_theme %||% "bw"
+      list(
+        ncol = ncol_val,
+        font_size = font_size,
+        theme_name = theme_name,
+        theme_obj = get_da_theme(theme_name, base_size = font_size)
+      )
+    })
+
+    # Dynamic pixel heights for the faceted per-sample plots
     ibaq_rank_h <- reactive({
       n <- dplyr::n_distinct(ibaq_per_sample()$sample)
-      max(500L, ceiling(n / IBAQ_RANK_NCOL) * 260L)
+      aes_cfg <- ibaq_aesthetics()
+      row_h <- max(260L, as.integer(round(aes_cfg$font_size * 20)))
+      max(500L, ceiling(n / aes_cfg$ncol) * row_h)
     })
     ibaq_top_h <- reactive({
       n <- dplyr::n_distinct(ibaq_per_sample()$sample)
-      max(500L, ceiling(n / IBAQ_TOP_NCOL) * (ibaq_top_n() * 14L + 70L))
+      aes_cfg <- ibaq_aesthetics()
+      row_px <- max(14L, as.integer(round(aes_cfg$font_size * 1.15)))
+      max(500L, ceiling(n / aes_cfg$ncol) * (ibaq_top_n() * row_px + 70L))
     })
 
     output$ibaq_rank_plot_ui <- renderUI({
@@ -2336,30 +2596,47 @@ QC4DIANN_server <- function(id) {
     ibaq_dist_obj <- reactive({
       d <- ibaq_long()
       req(d, nrow(d) > 0)
+      aes_cfg <- ibaq_aesthetics()
       ggplot(d, aes(x = sample, y = log2(iBAQ + 1))) +
         geom_boxplot(fill = pal[["blue2"]], alpha = 0.75) +
         labs(x = NULL, y = "log₂(iBAQ + 1)") +
-        theme(axis.text.x = element_text(angle = 45, hjust = 1))
+        aes_cfg$theme_obj +
+        theme(
+          text = element_text(size = aes_cfg$font_size),
+          axis.title = element_text(face = "bold"),
+          axis.text = element_text(color = "black", face = "bold"),
+          axis.text.x = element_text(angle = 45, hjust = 1)
+        )
     })
 
     ibaq_rank_obj <- reactive({
       s <- ibaq_per_sample()
+      aes_cfg <- ibaq_aesthetics()
       ggplot(s, aes(x = rank, y = log2(iBAQ + 1))) +
         geom_point(color = pal[["blue1"]], alpha = 0.6, size = 0.8) +
         ggrepel::geom_text_repel(
           data = dplyr::filter(s, rank <= ibaq_rank_labels()),
           aes(label = label),
-          size = 3,
+          size = max(2, round(aes_cfg$font_size * 0.65 / ggplot2::.pt, 2)),
           max.overlaps = Inf,
           min.segment.length = 0
         ) +
         labs(x = "Protein rank", y = "log₂(iBAQ + 1)") +
-        facet_wrap(~sample, ncol = IBAQ_RANK_NCOL)
+        facet_wrap(~sample, ncol = aes_cfg$ncol) +
+        aes_cfg$theme_obj +
+        theme(
+          text = element_text(size = aes_cfg$font_size),
+          strip.text = element_text(color = "black", face = "bold"),
+          strip.background = element_blank(),
+          axis.title = element_text(face = "bold"),
+          axis.text = element_text(color = "black", face = "bold")
+        )
     })
 
     ibaq_top_obj <- reactive({
       top <- ibaq_per_sample() %>%
         dplyr::filter(rank <= ibaq_top_n())
+      aes_cfg <- ibaq_aesthetics()
       ggplot(
         top,
         aes(y = tidytext::reorder_within(label, riBAQ, sample), x = riBAQ)
@@ -2367,7 +2644,15 @@ QC4DIANN_server <- function(id) {
         geom_col(fill = pal[["blue1"]], alpha = 0.85) +
         tidytext::scale_y_reordered() +
         labs(y = NULL, x = "Relative iBAQ (% of sample total)") +
-        facet_wrap(~sample, ncol = IBAQ_TOP_NCOL, scales = "free_y")
+        facet_wrap(~sample, ncol = aes_cfg$ncol, scales = "free_y") +
+        aes_cfg$theme_obj +
+        theme(
+          text = element_text(size = aes_cfg$font_size),
+          strip.text = element_text(color = "black", face = "bold"),
+          strip.background = element_blank(),
+          axis.title = element_text(face = "bold"),
+          axis.text = element_text(color = "black", face = "bold")
+        )
     })
 
     output$ibaq_dist_plot <- renderPlot({
@@ -2418,32 +2703,58 @@ QC4DIANN_server <- function(id) {
       content = function(file) {
         td <- tempdir()
         fps <- character()
-        save_p <- function(nm, fn, w = 10, h = 8) {
+        save_p <- function(nm, fn, w = 10, h = 8, n = 1L, kind = "standard") {
           fp <- file.path(td, nm)
           tryCatch(
             {
-              if (save_plot_obj(fp, fn(), w, h)) fps <<- c(fps, fp)
+              if (save_plot_obj(fp, fn(), w, h, n = n, kind = kind)) {
+                fps <<- c(fps, fp)
+              }
             },
             error = function(e) message("Skip ", nm, ": ", conditionMessage(e))
           )
         }
 
+        d_ibaq <- ibaq_long()
+        req(d_ibaq, nrow(d_ibaq) > 0)
+        aes_cfg <- ibaq_aesthetics()
+        samps <- unique(as.character(d_ibaq$sample))
+        n_s <- max(1L, length(samps))
+        max_lbl <- max(c(10L, nchar(samps)), na.rm = TRUE)
+        facet_ncol <- aes_cfg$ncol
+        eff_ncol <- min(facet_ncol, n_s)
+        eff_nrow <- ceiling(n_s / facet_ncol)
+        font_scale <- max(1, aes_cfg$font_size / 13)
+
         withProgress(message = "Saving plots...", value = 0, {
-          save_p("iBAQ_distribution.png", function() ibaq_dist_obj(), w = 12)
+          save_p(
+            "iBAQ_distribution.png",
+            function() ibaq_dist_obj(),
+            w = max(12, n_s * 0.28 * font_scale + 2.5),
+            h = max(8, min(16, 6.0 + max_lbl * 0.07 * font_scale)),
+            n = n_s,
+            kind = "standard"
+          )
           incProgress(1 / 3)
-          # Same proportions as on screen (px / 80), capped for ggsave
           save_p(
             "iBAQ_ranked_abundance.png",
             function() ibaq_rank_obj(),
-            w = 16,
-            h = min(45, ibaq_rank_h() / 80)
+            w = max(14, eff_ncol * (3.4 * max(1, font_scale * 0.9)) + 1.5),
+            h = max(8, eff_nrow * (3.0 * max(1, font_scale * 0.9)) + 1.5),
+            n = n_s,
+            kind = "standard"
           )
           incProgress(1 / 3)
           save_p(
             "iBAQ_top_proteins.png",
             function() ibaq_top_obj(),
-            w = 16,
-            h = min(45, ibaq_top_h() / 80)
+            w = max(14, eff_ncol * (4.2 * max(1, font_scale * 0.9)) + 1.5),
+            h = max(
+              8,
+              eff_nrow * (ibaq_top_n() * 0.20 * font_scale + 1.2) + 1.5
+            ),
+            n = n_s,
+            kind = "standard"
           )
           incProgress(1 / 3)
         })
@@ -2501,32 +2812,23 @@ QC4DIANN_server <- function(id) {
       content = function(file) {
         obj <- current_qc_plot_obj()
         req(obj)
-        if (inherits(obj, "Heatmap") || inherits(obj, "HeatmapList")) {
-          png(file, width = 11, height = 8, units = "in", res = 300)
-          ComplexHeatmap::draw(obj)
-          dev.off()
-        } else {
-          ggsave(
-            file,
-            obj,
-            width = 11,
-            height = 8,
-            bg = "white",
-            device = "png",
-            dpi = 300
-          )
-        }
+        runs <- tryCatch(unique(as.character(data()$Run)), error = function(e) character())
+        n_runs <- max(1L, length(runs))
+        mat_cols <- tryCatch(colnames(unique_genes()), error = function(e) runs)
+        n_mat <- max(1L, length(mat_cols))
+        max_lbl <- max(c(10L, nchar(runs), nchar(mat_cols)), na.rm = TRUE)
+
+        dims <- calc_qc_plot_dims(input$qc_plot_select, n_runs, n_mat, max_lbl)
+        save_plot_obj(
+          file,
+          obj,
+          w = dims$w,
+          h = dims$h,
+          n = dims$n,
+          kind = dims$kind
+        )
       }
     )
-
-    # ── Shared helper: save a plot-like object (ggplot / ggmatrix / grob) ──
-    save_plot_obj <- function(fp, obj, w, h) {
-      if (is.null(obj)) {
-        return(FALSE)
-      }
-      ggsave(fp, obj, width = w, height = h, dpi = 300, bg = "white")
-      TRUE
-    }
 
     # ── Download All Plots — Interactive Viewer tab (.zip) ──
     output$download_all_viewer_plots <- downloadHandler(
@@ -2536,48 +2838,44 @@ QC4DIANN_server <- function(id) {
       content = function(file) {
         td <- tempdir()
         fps <- character()
-        save_p <- function(nm, fn, w = 10, h = 8) {
+        save_p <- function(nm, fn, w = 10, h = 8, n = 1L, kind = "standard") {
           fp <- file.path(td, nm)
           tryCatch(
             {
-              if (save_plot_obj(fp, fn(), w, h)) fps <<- c(fps, fp)
+              if (save_plot_obj(fp, fn(), w, h, n = n, kind = kind)) {
+                fps <<- c(fps, fp)
+              }
             },
             error = function(e) message("Skip ", nm, ": ", conditionMessage(e))
           )
         }
 
+        cn <- tryCatch(colnames(unique_genes()), error = function(e) character())
+        n_s <- max(1L, length(cn))
+        max_lbl <- max(c(10L, nchar(cn)), na.rm = TRUE)
+
+        # N x N heatmaps: scale tile size smoothly so 100x100 remains legible
+        tile_in <- if (n_s <= 20) 0.45 else if (n_s <= 50) 0.26 else 0.20
+        hm_dim <- max(10, n_s * tile_in + 2.5 + max_lbl * 0.06)
+        pca_w <- max(10, min(22, 9 + sqrt(n_s) * 1.1))
+        pca_h <- max(8, min(18, 7 + sqrt(n_s) * 0.9))
+        ggp_dim <- max(12, n_s * 1.3 + 2.0)
+        efa_f <- if (is.null(input$efa_factors)) 6L else as.integer(input$efa_factors)
+        efa_w <- max(10, efa_f * 1.4 + 3.0)
+        efa_h <- max(8, min(16, 7 + sqrt(n_s) * 0.6))
+
         withProgress(message = "Saving plots...", value = 0, {
-          save_p(
-            "cosine_similarity.png",
-            function() cosine_obj(),
-            w = 10,
-            h = 10
-          )
+          save_p("cosine_similarity.png", function() cosine_obj(), w = hm_dim, h = hm_dim)
           incProgress(1 / 6)
-          save_p(
-            "euclidean_distance.png",
-            function() euclidean_obj(),
-            w = 10,
-            h = 10
-          )
+          save_p("euclidean_distance.png", function() euclidean_obj(), w = hm_dim, h = hm_dim)
           incProgress(1 / 6)
-          save_p(
-            "jaccard_similarity.png",
-            function() jaccard_obj(),
-            w = 10,
-            h = 10
-          )
+          save_p("jaccard_similarity.png", function() jaccard_obj(), w = hm_dim, h = hm_dim)
           incProgress(1 / 6)
-          save_p("PCA.png", function() pca_data(), w = 10, h = 8)
+          save_p("PCA.png", function() pca_data(), w = pca_w, h = pca_h)
           incProgress(1 / 6)
-          save_p(
-            "sample_correlation_matrix.png",
-            function() plot_ggpairs_obj(),
-            w = 14,
-            h = 14
-          )
+          save_p("sample_correlation_matrix.png", function() plot_ggpairs_obj(), w = ggp_dim, h = ggp_dim)
           incProgress(1 / 6)
-          save_p("EFA.png", function() plot_efa_obj(), w = 10, h = 8)
+          save_p("EFA.png", function() plot_efa_obj(), w = efa_w, h = efa_h)
           incProgress(1 / 6)
         })
 
@@ -2595,41 +2893,70 @@ QC4DIANN_server <- function(id) {
       content = function(file) {
         td <- tempdir()
         fps <- character()
-        save_p <- function(nm, fn, w = 10, h = 8) {
+        save_p <- function(nm, fn, w = 10, h = 8, n = 1L, kind = "standard") {
           fp <- file.path(td, nm)
           tryCatch(
             {
-              if (save_plot_obj(fp, fn(), w, h)) fps <<- c(fps, fp)
+              if (save_plot_obj(fp, fn(), w, h, n = n, kind = kind)) {
+                fps <<- c(fps, fp)
+              }
             },
             error = function(e) message("Skip ", nm, ": ", conditionMessage(e))
           )
         }
 
+        runs <- tryCatch(unique(as.character(data()$Run)), error = function(e) character())
+        n_r <- max(1L, length(runs))
+        max_lbl <- max(c(10L, nchar(runs)), na.rm = TRUE)
+        aa_ncol <- ceiling(sqrt(n_r))
+        aa_nrow <- ceiling(n_r / aa_ncol)
+
         withProgress(message = "Saving plots...", value = 0, {
           if (!is.null(input$fasta_file)) {
-            save_p(
-              "protein_coverage.png",
-              function() protein_coverage_grob_obj(),
-              w = 12,
-              h = 8
-            )
+            pd_cov <- tryCatch(coverage_plot_data_qc4(), error = function(e) NULL)
+            if (
+              !is.null(pd_cov) &&
+                is.null(pd_cov$error) &&
+                !is.null(pd_cov$protein_sequence)
+            ) {
+              apl <- max(
+                10,
+                min(200, ifelse(is.na(input$aa_per_line), 50, input$aa_per_line))
+              )
+              nl <- max(1, ceiling(nchar(pd_cov$protein_sequence) / apl))
+              nr_cov <- length(unique(pd_cov$peptides_data$Run))
+              cov_w <- max(12, min(28, apl * 0.22 + 2.5))
+              cov_h <- max(8, nl * (0.65 + 0.25 * nr_cov) + 2.5)
+              save_p(
+                "protein_coverage.png",
+                function() protein_coverage_grob_obj(),
+                w = cov_w,
+                h = cov_h
+              )
+            }
             save_p(
               "aa_frequency.png",
               function() plot_aa_freq_obj(),
-              w = 12,
-              h = 8
+              w = max(12, aa_ncol * 4.2 + 1.5),
+              h = max(8, aa_nrow * 2.6 + 1.8),
+              n = n_r,
+              kind = "facet"
             )
             save_p(
               "peptide_type_counts.png",
               function() plot_pep_count_obj(),
-              w = 10,
-              h = 8
+              w = max(11, min(20, 8.5 + max_lbl * 0.08)),
+              h = max(8, n_r * 0.26 + 2.0),
+              n = n_r,
+              kind = "hbar"
             )
             save_p(
               "peptide_type_proportions.png",
               function() plot_pep_prop_obj(),
-              w = 10,
-              h = 8
+              w = max(11, min(20, 8.5 + max_lbl * 0.08)),
+              h = max(8, n_r * 0.26 + 2.0),
+              n = n_r,
+              kind = "hbar"
             )
           }
           incProgress(1)
@@ -2689,6 +3016,24 @@ QC4DIANN_server <- function(id) {
       contentType = "application/zip"
     )
 
+    # ── Tab 5: Modification Diagnostic Downloads ──
+    calc_mod_diag_dims <- function() {
+      paired <- mod_diag_data()
+      n_samp <- max(1L, dplyr::n_distinct(paired$sample_name))
+      n_pepts <- max(1L, length(mod_diag_visible_peptides()))
+      ncol_md <- if (n_samp <= 4L) {
+        2L
+      } else {
+        min(5L, as.integer(ceiling(sqrt(n_samp / 2))))
+      }
+      nrows_md <- ceiling(n_samp / ncol_md)
+      list(
+        w = max(14, ncol_md * 6.5),
+        h = max(6, nrows_md * max(2.5, n_pepts * 0.18 + 1.2) + 1.5),
+        n = n_samp
+      )
+    }
+
     output$download_mod_diag_plot <- downloadHandler(
       filename = function() {
         paste0("mod_diagnostic_", Sys.Date(), ".png")
@@ -2696,23 +3041,11 @@ QC4DIANN_server <- function(id) {
       content = function(file) {
         obj <- mod_diag_plot_obj()
         req(obj)
-        paired <- mod_diag_data()
-        n_samp <- dplyr::n_distinct(paired$sample_name)
-        n_pepts <- length(mod_diag_visible_peptides())
-        h_in <- max(6, n_samp * 3 + n_pepts * 0.18)
-        ggsave(
-          file,
-          obj,
-          width = 14,
-          height = min(h_in, 30),
-          bg = "white",
-          device = "png",
-          dpi = 300
-        )
+        dims <- calc_mod_diag_dims()
+        save_plot_obj(file, obj, w = dims$w, h = dims$h, n = dims$n)
       }
     )
 
-    # ── Download All Plots — Modification Diagnostic tab (.zip) ──
     output$download_all_mod_diag_plots <- downloadHandler(
       filename = function() {
         paste0("QC4DIANN_ModDiagnostic_plots_", Sys.Date(), ".zip")
@@ -2720,23 +3053,18 @@ QC4DIANN_server <- function(id) {
       content = function(file) {
         td <- tempdir()
         fps <- character()
-        save_p <- function(nm, fn, w = 14, h = 10) {
-          fp <- file.path(td, nm)
+        withProgress(message = "Saving plot...", value = 0, {
+          fp <- file.path(td, "mod_diagnostic.png")
           tryCatch(
             {
-              if (save_plot_obj(fp, fn(), w, h)) fps <<- c(fps, fp)
+              obj <- mod_diag_plot_obj()
+              dims <- calc_mod_diag_dims()
+              if (save_plot_obj(fp, obj, w = dims$w, h = dims$h, n = dims$n)) {
+                fps <<- c(fps, fp)
+              }
             },
-            error = function(e) message("Skip ", nm, ": ", conditionMessage(e))
+            error = function(e) message("Skip mod_diagnostic.png: ", conditionMessage(e))
           )
-        }
-
-        withProgress(message = "Saving plot...", value = 0, {
-          obj <- mod_diag_plot_obj()
-          paired <- mod_diag_data()
-          n_samp <- dplyr::n_distinct(paired$sample_name)
-          n_pepts <- length(mod_diag_visible_peptides())
-          h_in <- min(max(6, n_samp * 3 + n_pepts * 0.18), 30)
-          save_p("mod_diagnostic.png", function() obj, w = 14, h = h_in)
           incProgress(1)
         })
 
@@ -2830,6 +3158,13 @@ QC4DIANN_server <- function(id) {
         )
       req(nrow(plot_data) > 0)
 
+      n_samp <- dplyr::n_distinct(plot_data$sample_name)
+      ncol_md <- if (n_samp <= 4L) {
+        2L
+      } else {
+        min(5L, as.integer(ceiling(sqrt(n_samp / 2))))
+      }
+
       ggplot(plot_data, aes(y = peptide)) +
         geom_segment(
           aes(
@@ -2859,7 +3194,7 @@ QC4DIANN_server <- function(id) {
             " min | Artifact if |\u0394RT| \u2264 threshold"
           )
         ) +
-        facet_wrap(~sample_name, ncol = 2, scales = "free") +
+        facet_wrap(~sample_name, ncol = ncol_md, scales = "free") +
         theme_bw() +
         theme(
           plot.title = element_text(size = 14, face = "bold", hjust = 0.5),
