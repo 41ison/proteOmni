@@ -121,7 +121,8 @@ EncyclopeDIA_sidebar_ui <- function(id) {
         class = "dl-btn",
         style = "width:100%;text-align:left;"
       )
-    )
+    ),
+    Fasta_sidebar_ui(ns("fasta"))
   )
 }
 
@@ -166,9 +167,10 @@ EncyclopeDIA_body_ui <- function(id) {
 # ═══════════════════════════════════════════════════════════════════════════════
 # MODULE — SERVER
 # ═══════════════════════════════════════════════════════════════════════════════
-EncyclopeDIA_server <- function(id, fasta_digest) {
+EncyclopeDIA_server <- function(id) {
   moduleServer(id, function(input, output, session) {
     ns <- session$ns
+    fasta_digest <- Fasta_server("fasta")
 
     spin_ids <- paste0("spi", sprintf("%02d", 1:10))
     show_all <- function() lapply(spin_ids, function(s) shinyjs::show(id = s))
@@ -536,7 +538,7 @@ EncyclopeDIA_server <- function(id, fasta_digest) {
     })
 
     plot_gravy_obj <- reactive({
-      d <- mapped_data()
+      d <- filtered_data()
       req(nrow(d) > 0, "gravy" %in% names(d))
       plot_annotated_density_faceted_enc(
         d,
@@ -548,7 +550,7 @@ EncyclopeDIA_server <- function(id, fasta_digest) {
     })
 
     plot_pi_obj <- reactive({
-      d <- mapped_data()
+      d <- filtered_data()
       req(nrow(d) > 0, "pI" %in% names(d))
       plot_2d_gel(
         d,
@@ -560,7 +562,7 @@ EncyclopeDIA_server <- function(id, fasta_digest) {
     })
 
     plot_aa_freq_obj <- reactive({
-      d <- mapped_data()
+      d <- filtered_data()
       req(nrow(d) > 0)
       base_aas <- c(
         "A",
