@@ -196,7 +196,8 @@ InstaNovo_sidebar_ui <- function(id) {
         class = "dl-btn",
         style = "width:100%;text-align:left;"
       )
-    )
+    ),
+    Fasta_sidebar_ui(ns("fasta"))
   )
 }
 
@@ -276,9 +277,10 @@ InstaNovo_body_ui <- function(id) {
 # ═══════════════════════════════════════════════════════════════════════════════
 # MODULE — SERVER
 # ═══════════════════════════════════════════════════════════════════════════════
-InstaNovo_server <- function(id, fasta_digest) {
+InstaNovo_server <- function(id) {
   moduleServer(id, function(input, output, session) {
     ns <- session$ns
+    fasta_digest <- Fasta_server("fasta")
 
     spin_ids <- paste0("spi", sprintf("%02d", 1:10))
     show_all <- function() lapply(spin_ids, function(s) shinyjs::show(id = s))
