@@ -412,11 +412,9 @@ A complete digest always covers the whole sequence, so coverage counts only the 
 
 ### 10. TargetDesign — *Targeted Proteomics (SRM / MRM / PRM)*
 
-Surrogate peptide candidate ranking, *in silico* FASTA proteotypicity verification, and precursor-to-product transition selection for targeted mass spectrometry (**SRM / MRM / PRM**), implemented in `modules/mod_TargetDesign.r` (UI and reactive wiring) and `modules/utils_fasta.r` (digestion, scoring, and transition helpers).
+Surrogate peptide candidate ranking, *in silico* FASTA proteotypicity verification, and precursor-to-product transition selection for targeted mass spectrometry (**SRM / MRM / PRM**). Paste a raw or FASTA-formatted target protein sequence (header lines, whitespace, digits, and line breaks are stripped and uppercased automatically), load one of the built-in clinical/reference examples (`P02647` Human Apolipoprotein A-I, `P01034` Human Cystatin-C, `Q07730` *Candida albicans* ECE1), or fetch any canonical entry by accession via the UniProt REST API (`rest.uniprot.org/uniprotkb/{accession}.fasta`).
 
-Paste a raw or FASTA-formatted target protein sequence (header lines, whitespace, digits, and line breaks are stripped and uppercased automatically), load one of the built-in clinical/reference examples (`P02647` Human Apolipoprotein A-I, `P01034` Human Cystatin-C, `Q07730` *Candida albicans* ECE1), or fetch any canonical entry by accession via the UniProt REST API (`rest.uniprot.org/uniprotkb/{accession}.fasta`). Live sequence feedback reports the sanitized length (e.g. `Length: 267 aa`) and warns immediately if non-canonical residue codes (`B`, `Z`, `X`, `U`, `O`, `*`, etc.) or unsupported characters are present.
-
-In the sidebar, optionally upload a **Background Proteome FASTA** to digest the full reference proteome *in silico* with the selected enzyme rule (Trypsin, GluC, LysN, AspN, Chymotrypsin, Elastase, or a custom cleavage rule) and classify each candidate as `Proteotypic` (1 protein match), `Shared` (≥ 2 proteins), or `Not in FASTA`, with optional isobaric `Ile = Leu` (`I = L`) equivalence. When no FASTA is uploaded, intra-sequence uniqueness is checked instead.
+In the sidebar, optionally upload a **Background Proteome FASTA** (recommended) to digest the full reference proteome *in silico* with the selected enzyme rule (Trypsin, GluC, LysN, AspN, Chymotrypsin, Elastase, or a custom cleavage rule) and classify each candidate as `Proteotypic` (1 protein match), `Shared` (≥ 2 proteins), or `Not in FASTA`, with optional isobaric `Ile = Leu` (`I = L`) equivalence. When no FASTA is uploaded, intra-sequence uniqueness is checked instead (maybe it make sense for *in gel* diestion).
 
 #### Candidate Scoring System
 
