@@ -161,7 +161,7 @@ compute_protein_abundance <- function(
 }
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# GLOBAL FASTA MODULE
+# REUSABLE MODULE-SCOPED FASTA MAPPING SUBMODULE (used by InstaNovo & EncyclopeDIA)
 # ═══════════════════════════════════════════════════════════════════════════════
 
 Fasta_sidebar_ui <- function(id) {
@@ -171,33 +171,38 @@ Fasta_sidebar_ui <- function(id) {
     tags$div(
       style = "padding:4px 16px;color:#adb5bd;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:1px;",
       icon("dna"),
-      " Global FASTA Mapping"
+      " FASTA Mapping (optional)"
     ),
-    fileInput(
-      ns("fasta_file"),
-      "Protein FASTA File",
-      accept = c(".fasta", ".fa")
-    ),
-    numericInput(
-      ns("missed_cleavages"),
-      "Max missed cleavages",
-      value = 2,
-      min = 0,
-      max = 5
+    tags$div(
+      style = "padding:0 16px;",
+      fileInput(
+        ns("fasta_file"),
+        "Protein FASTA File",
+        accept = c(".fasta", ".fa", ".faa"),
+        placeholder = "proteome.fasta"
+      ),
+      numericInput(
+        ns("missed_cleavages"),
+        "Max missed cleavages",
+        value = 2,
+        min = 0,
+        max = 5
+      )
     )
   )
 }
 
 Fasta_server <- function(id) {
   moduleServer(id, function(input, output, session) {
+    notif_id <- session$ns("fasta_notif")
     reactive({
       if (!isTruthy(input$fasta_file)) {
         return(NULL)
       }
 
       showNotification(
-        "Reading and digesting FASTA globally...",
-        id = "fasta_global_notif",
+        "Reading and digesting FASTA...",
+        id = notif_id,
         duration = NULL
       )
       seqs <- tryCatch(
@@ -208,12 +213,18 @@ Fasta_server <- function(id) {
         }
       )
       if (is.null(seqs)) {
-        removeNotification("fasta_global_notif")
+        removeNotification(notif_id)
         return(NULL)
       }
 
-      df <- in_silico_digest(seqs, max_missed = input$missed_cleavages)
-      removeNotification("fasta_global_notif")
+      mc <- suppressWarnings(as.integer(
+        if (is.null(input$missed_cleavages)) 2L else input$missed_cleavages
+      ))
+      if (is.na(mc) || mc < 0L) {
+        mc <- 2L
+      }
+      df <- in_silico_digest(seqs, max_missed = mc)
+      removeNotification(notif_id)
       df
     })
   })
@@ -2757,6 +2768,9 @@ run_seq_digest <- function(sequence, enzyme_id = "trypsin", params = list()) {
   p <- lapply(p, as.integer)
   p$carbamidomethyl <- isTRUE(params$carbamidomethyl)
   p$oxidation <- isTRUE(params$oxidation)
+  p$residues <- paste(residues, collapse = "")
+  p$terminus <- spec$terminus
+  p$blocked_by <- paste(blocked_by, collapse = "")
   one_number <- function(x) {
     if (length(x) == 1) suppressWarnings(as.numeric(x)) else NA_real_
   }
@@ -2838,4 +2852,786 @@ get_da_theme <- function(theme_name = "bw", base_size = 16) {
     grey = ggplot2::theme_grey(base_size = base_size),
     ggplot2::theme_bw(base_size = base_size)
   )
+}
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# TARGETED PROTEOMICS ASSAY DESIGN (SRM / MRM / PRM)
+# ═══════════════════════════════════════════════════════════════════════════════
+# Surrogate peptide evaluation and product-ion transition selection following
+# CPTAC / Hoofnagle et al., Clin. Chem. 2016;62(1):48-69 (PMC4830481).
+
+#' Enzyme-aware in silico digestion of a FASTA proteome for proteotypicity checks.
+#'
+#' @param fasta_seqs Named character vector of protein sequences (e.g. from
+#'   `read_fasta_custom()`).
+#' @param residues,blocked_by Cleavage and blocking residue strings/vectors.
+#' @param terminus `"C"` (cleave after `residues`) or `"N"` (cleave before).
+#' @param max_missed Maximum missed cleavages generated per protein.
+#' @param min_len,max_len Peptide length bounds retained in the lookup table.
+#' @return `data.frame(protein, peptide)` with distinct `(protein, peptide)` rows.
+digest_proteome_fasta <- function(
+  fasta_seqs,
+  residues = "KR",
+  terminus = "C",
+  blocked_by = "P",
+  max_missed = 1L,
+  min_len = 5L,
+  max_len = 50L
+) {
+  empty <- data.frame(
+    protein = character(0),
+    peptide = character(0),
+    stringsAsFactors = FALSE
+  )
+  if (is.null(fasta_seqs) || length(fasta_seqs) == 0) {
+    return(empty)
+  }
+  seqs <- toupper(gsub("[^A-Z*]", "", as.character(fasta_seqs)))
+  prot_ids <- names(fasta_seqs)
+  if (is.null(prot_ids)) {
+    prot_ids <- paste0("prot_", seq_along(seqs))
+  }
+  max_missed <- max(0L, as.integer(max_missed)[1])
+  min_len <- max(1L, as.integer(min_len)[1])
+  max_len <- max(min_len, as.integer(max_len)[1])
+
+  rx <- protease_regex_from_rule(
+    cut = paste(residues, collapse = ""),
+    nocut = paste(blocked_by, collapse = ""),
+    sense = terminus
+  )
+  frags_list <- if (is.null(rx)) {
+    as.list(seqs)
+  } else {
+    strsplit(seqs, rx, perl = TRUE)
+  }
+
+  pep_list <- lapply(frags_list, function(fr) {
+    fr <- fr[!is.na(fr) & nzchar(fr)]
+    k <- length(fr)
+    if (k == 0L) {
+      return(character(0))
+    }
+    out <- fr
+    if (max_missed > 0L && k > 1L) {
+      for (m in seq_len(min(max_missed, k - 1L))) {
+        idx <- seq_len(k - m)
+        joined <- vapply(
+          idx,
+          function(i) paste0(fr[i:(i + m)], collapse = ""),
+          character(1)
+        )
+        out <- c(out, joined)
+      }
+    }
+    len <- nchar(out)
+    unique(out[len >= min_len & len <= max_len])
+  })
+
+  lens <- lengths(pep_list)
+  if (sum(lens) == 0L) {
+    return(empty)
+  }
+  data.frame(
+    protein = rep(prot_ids, lens),
+    peptide = unlist(pep_list, use.names = FALSE),
+    stringsAsFactors = FALSE
+  )
+}
+
+#' Classify candidate peptides for proteotypicity against a digested FASTA.
+#'
+#' When `digest_df` is `NULL`, only intra-sequence multiplicity within
+#' `peptides` is checked. When `equate_il = TRUE`, Ile (`I`) and Leu (`L`) are
+#' treated as indistinguishable (isobaric in standard SRM/MRM/PRM).
+#'
+#' @return `data.frame(peptide, key, proteotypicity, n_proteins, mapped_proteins)`
+#'   aligned 1:1 with `peptides`.
+classify_targeted_proteotypicity <- function(
+  peptides,
+  digest_df = NULL,
+  equate_il = TRUE
+) {
+  peptides <- toupper(as.character(peptides))
+  norm_il <- function(x) if (isTRUE(equate_il)) chartr("I", "L", x) else x
+  pep_key <- norm_il(peptides)
+
+  if (is.null(digest_df)) {
+    counts <- table(pep_key)
+    n_occ <- as.integer(counts[pep_key])
+    return(data.frame(
+      peptide = peptides,
+      proteotypicity = ifelse(
+        n_occ <= 1L,
+        "Unique (in sequence)",
+        "Repeated in sequence"
+      ),
+      n_proteins = n_occ,
+      mapped_proteins = NA_character_,
+      stringsAsFactors = FALSE
+    ))
+  }
+
+  if (nrow(digest_df) == 0L) {
+    return(data.frame(
+      peptide = peptides,
+      proteotypicity = rep("Not in FASTA", length(peptides)),
+      n_proteins = rep(0L, length(peptides)),
+      mapped_proteins = rep(NA_character_, length(peptides)),
+      stringsAsFactors = FALSE
+    ))
+  }
+
+  db_key <- norm_il(toupper(as.character(digest_df$peptide)))
+  keep <- db_key %in% unique(pep_key)
+  if (!any(keep)) {
+    return(data.frame(
+      peptide = peptides,
+      proteotypicity = rep("Not in FASTA", length(peptides)),
+      n_proteins = rep(0L, length(peptides)),
+      mapped_proteins = rep(NA_character_, length(peptides)),
+      stringsAsFactors = FALSE
+    ))
+  }
+
+  sub_df <- unique(data.frame(
+    key = db_key[keep],
+    protein = as.character(digest_df$protein[keep]),
+    stringsAsFactors = FALSE
+  ))
+  by_key <- split(sub_df$protein, sub_df$key)
+  grouped <- data.frame(
+    key = names(by_key),
+    n_proteins = vapply(by_key, function(p) length(unique(p)), integer(1)),
+    mapped_proteins = vapply(
+      by_key,
+      function(p) paste(unique(p), collapse = "; "),
+      character(1)
+    ),
+    stringsAsFactors = FALSE
+  )
+
+  idx <- match(pep_key, grouped$key)
+  n_prot <- ifelse(is.na(idx), 0L, grouped$n_proteins[idx])
+  mapped <- ifelse(is.na(idx), NA_character_, grouped$mapped_proteins[idx])
+  status <- ifelse(
+    n_prot == 0L,
+    "Not in FASTA",
+    ifelse(n_prot == 1L, "Proteotypic", "Shared")
+  )
+
+  data.frame(
+    peptide = peptides,
+    proteotypicity = status,
+    n_proteins = as.integer(n_prot),
+    mapped_proteins = mapped,
+    stringsAsFactors = FALSE
+  )
+}
+
+#' Candidate product-ion transitions for one peptide in SRM / MRM / PRM.
+#'
+#' Ranks singly charged `y`-ions (`y3`..`y_{n-1}`) that sit above the doubly
+#' charged precursor `m/z` (`mz > mz_2`, up to `product_mz_max`) to minimise
+#' chemical noise and preserve C-terminal heavy-isotope labels. Proline-N-side
+#' cleavages (`X-P`, i.e. `y`-fragment starting with `P`) receive a small boost.
+#'
+#' @return `seqprofile_fragment_ions()` data frame with added logical columns
+#'   `above_precursor_2`, `proline_enhanced`, `recommended`, and integer
+#'   `transition_rank` (`NA` when not recommended).
+select_targeted_transitions <- function(
+  peptide,
+  carbamidomethyl = TRUE,
+  oxidation = FALSE,
+  charge = 1L,
+  max_transitions = 5L,
+  product_mz_max = 1500
+) {
+  ions <- seqprofile_fragment_ions(
+    peptide,
+    carbamidomethyl = carbamidomethyl,
+    oxidation = oxidation,
+    charge = charge
+  )
+  masses <- seqprofile_residue_masses(carbamidomethyl, oxidation)
+  mono <- seqprofile_mono_mass(peptide, masses)
+  mz_2 <- (mono + 2 * SEQPROFILE_PROTON_MONO) / 2
+
+  ions$above_precursor_2 <- ions$type == "y" &
+    ions$number >= 3L &
+    ions$mz > mz_2 &
+    ions$mz <= product_mz_max
+  ions$proline_enhanced <- ions$type == "y" & startsWith(ions$fragment, "P")
+  ions$recommended <- FALSE
+  ions$transition_rank <- NA_integer_
+
+  cand_idx <- which(ions$above_precursor_2)
+  if (length(cand_idx) > 0L && max_transitions > 0L) {
+    # Prefer proline-enhanced y-ions first, then higher-mass y-ions
+    ord <- cand_idx[order(
+      !ions$proline_enhanced[cand_idx],
+      -ions$mz[cand_idx]
+    )]
+    pick <- head(ord, as.integer(max_transitions))
+    ions$recommended[pick] <- TRUE
+    ions$transition_rank[pick] <- seq_along(pick)
+  }
+  attr(ions, "mz_2") <- mz_2
+  ions
+}
+
+#' Stick spectrum highlighting recommended SRM / MRM / PRM transitions.
+plot_targeted_spectrum <- function(ions, mz_2 = attr(ions, "mz_2"), title = NULL) {
+  ions$series <- ifelse(
+    isTRUE(ions$recommended) | ions$recommended,
+    "Recommended y-transition",
+    ifelse(ions$type == "y", "Other y-ion", "b-ion")
+  )
+  ions$series <- factor(
+    ions$series,
+    levels = c("Recommended y-transition", "Other y-ion", "b-ion")
+  )
+  ions$hover <- sprintf(
+    "%s (%s)<br>m/z: %.4f%s",
+    ions$ion,
+    ions$fragment,
+    ions$mz,
+    ifelse(
+      ions$recommended,
+      sprintf("<br><b>Transition #%d</b>", ions$transition_rank),
+      ""
+    )
+  )
+  ions$label_y <- ions$intensity + ifelse(ions$type == "b", 0.04, 0.09)
+
+  p <- ggplot2::ggplot(ions, ggplot2::aes(x = mz, colour = series)) +
+    ggplot2::geom_segment(
+      ggplot2::aes(
+        xend = mz,
+        y = 0,
+        yend = intensity,
+        linewidth = ifelse(recommended, 1.15, 0.55)
+      )
+    ) +
+    ggplot2::scale_linewidth_identity() +
+    suppressWarnings(ggplot2::geom_point(
+      ggplot2::aes(y = intensity, text = hover),
+      size = 1.4
+    )) +
+    ggplot2::geom_text(
+      ggplot2::aes(y = label_y, label = ion),
+      size = 3,
+      show.legend = FALSE
+    ) +
+    ggplot2::scale_colour_manual(
+      values = c(
+        "Recommended y-transition" = "#2D6A4F",
+        "Other y-ion" = "#E76F51",
+        "b-ion" = "#5FA8D3"
+      ),
+      name = "Ion class",
+      drop = FALSE
+    ) +
+    ggplot2::labs(title = title, x = "Product m/z", y = "Relative intensity")
+
+  if (!is.null(mz_2) && length(mz_2) == 1L && is.finite(mz_2)) {
+    p <- p +
+      ggplot2::geom_vline(
+        xintercept = mz_2,
+        linetype = "dashed",
+        colour = "#1B4965",
+        linewidth = 0.6
+      )
+  }
+  p
+}
+
+#' Evaluate and rank in silico digested peptides for SRM / MRM / PRM assays.
+#'
+#' Applies sequence, cleavage-context, chemical-stability, chromatographic,
+#' proteotypicity, and transition-count criteria from Hoofnagle et al. (2016,
+#' PMC4830481) and CPTAC targeted proteomics guidelines.
+#'
+#' @param digest_res Output list from `run_seq_digest()`.
+#' @param digest_df Optional `data.frame(protein, peptide)` from
+#'   `digest_proteome_fasta()`. `NULL` falls back to intra-sequence uniqueness.
+#' @param opts Optional named list overriding rule thresholds/toggles:
+#'   `opt_min_len` (8), `opt_max_len` (22), `hard_min_len` (7),
+#'   `hard_max_len` (25), `mz_min` (350), `mz_max` (1250),
+#'   `min_transitions` (3), `max_transitions` (5), `allow_alkylated_cys` (TRUE),
+#'   `penalize_met` (TRUE), `penalize_trp` (TRUE), `gravy_min` (-2.0),
+#'   `gravy_max` (1.0), `equate_il` (TRUE).
+#' @return `data.frame` of evaluated peptides ordered from best to worst, with
+#'   `attr(out, "tier_residue_state")` giving per-residue coverage tier
+#'   (`"Recommended"`, `"Conditional"`, or `"None"`).
+evaluate_targeted_candidates <- function(
+  digest_res,
+  digest_df = NULL,
+  opts = list()
+) {
+  defaults <- list(
+    opt_min_len = 8L,
+    opt_max_len = 22L,
+    hard_min_len = 7L,
+    hard_max_len = 25L,
+    mz_min = 350,
+    mz_max = 1250,
+    min_transitions = 3L,
+    max_transitions = 5L,
+    allow_alkylated_cys = TRUE,
+    penalize_met = TRUE,
+    penalize_trp = TRUE,
+    gravy_min = -2.0,
+    gravy_max = 1.0,
+    equate_il = TRUE
+  )
+  for (nm in intersect(names(opts), names(defaults))) {
+    val <- opts[[nm]]
+    if (!is.null(val) && length(val) == 1L && !is.na(val)) {
+      defaults[[nm]] <- val
+    }
+  }
+  cfg <- defaults
+
+  pep <- digest_res$peptides
+  full_seq <- digest_res$sequence
+  seq_len <- nchar(full_seq)
+  aa_full <- strsplit(full_seq, "")[[1]]
+  carbamidomethyl <- isTRUE(digest_res$params$carbamidomethyl)
+  oxidation <- isTRUE(digest_res$params$oxidation)
+
+  # Identify the cleavage residues used in the digest for ragged-end checks
+  spec <- if (identical(digest_res$enzyme_id, "custom")) {
+    list(
+      residues = digest_res$params$residues,
+      terminus = digest_res$params$terminus
+    )
+  } else {
+    SEQPROFILE_ENZYMES[[digest_res$enzyme_id]]
+  }
+  cut_res <- if (!is.null(spec) && !is.null(spec$residues)) {
+    seqprofile_parse_residues(spec$residues)
+  } else {
+    c("K", "R")
+  }
+
+  prot_info <- classify_targeted_proteotypicity(
+    pep$sequence,
+    digest_df = digest_df,
+    equate_il = cfg$equate_il
+  )
+
+  n_pep <- nrow(pep)
+  flanked <- character(n_pep)
+  gravy_vec <- rep(NA_real_, n_pep)
+  n_y_above <- integer(n_pep)
+  top_trans <- character(n_pep)
+  scores <- numeric(n_pep)
+  tiers <- character(n_pep)
+  flags_out <- character(n_pep)
+
+  for (idx in seq_len(n_pep)) {
+    s <- pep$start[idx]
+    e <- pep$end[idx]
+    sq <- pep$sequence[idx]
+    ln <- pep$length[idx]
+    mc <- pep$missed_cleavages[idx]
+    mz2 <- pep$mz_2[idx]
+    mz3 <- pep$mz_3[idx]
+    aa_pep <- strsplit(sq, "")[[1]]
+
+    prev_aa <- if (s > 1L) aa_full[s - 1L] else "-"
+    next_aa <- if (e < seq_len) aa_full[e + 1L] else "-"
+    flanked[idx] <- paste0(prev_aa, ".", sq, ".", next_aa)
+
+    score <- 100
+    critical <- character(0)
+    major <- character(0)
+    minor <- character(0)
+
+    bad_aa <- unique(setdiff(aa_pep, SEQPROFILE_AA))
+    if (length(bad_aa) > 0L) {
+      critical <- c(
+        critical,
+        sprintf("Non-canonical residue (%s)", paste(bad_aa, collapse = ","))
+      )
+      score <- score - 100
+    } else {
+      gravy_val <- GRAVY(sq)
+      gravy_vec[idx] <- gravy_val
+
+      # 1. Proteotypicity
+      p_stat <- prot_info$proteotypicity[idx]
+      if (identical(p_stat, "Shared")) {
+        critical <- c(
+          critical,
+          sprintf("Shared (%d proteins)", prot_info$n_proteins[idx])
+        )
+        score <- score - 60
+      } else if (identical(p_stat, "Repeated in sequence")) {
+        critical <- c(critical, "Repeated within protein")
+        score <- score - 60
+      } else if (identical(p_stat, "Not in FASTA")) {
+        major <- c(major, "Not found in FASTA digest")
+        score <- score - 15
+      }
+
+      # 2. Length & precursor m/z
+      if (ln < cfg$hard_min_len || ln > cfg$hard_max_len) {
+        critical <- c(
+          critical,
+          sprintf(
+            "Length %d aa (outside %d-%d)",
+            ln,
+            cfg$hard_min_len,
+            cfg$hard_max_len
+          )
+        )
+        score <- score - 40
+      } else if (ln < cfg$opt_min_len || ln > cfg$opt_max_len) {
+        minor <- c(
+          minor,
+          sprintf(
+            "Suboptimal length (%d aa; ideal %d-%d)",
+            ln,
+            cfg$opt_min_len,
+            cfg$opt_max_len
+          )
+        )
+        score <- score - 8
+      }
+
+      in_mz2 <- !is.na(mz2) && mz2 >= cfg$mz_min && mz2 <= cfg$mz_max
+      in_mz3 <- !is.na(mz3) && mz3 >= cfg$mz_min && mz3 <= cfg$mz_max
+      if (!in_mz2 && !in_mz3) {
+        critical <- c(
+          critical,
+          sprintf("2+/3+ m/z outside %g-%g", cfg$mz_min, cfg$mz_max)
+        )
+        score <- score - 35
+      }
+
+      # 3. Missed cleavages, ragged ends, and cleavage context
+      if (mc > 0L) {
+        critical <- c(critical, sprintf("Missed cleavages (%d)", mc))
+        score <- score - 45 * mc
+      }
+
+      ragged_n <- (s > 2L &&
+        aa_full[s - 2L] %in% cut_res &&
+        aa_full[s - 1L] %in% cut_res) ||
+        (s > 1L && aa_full[s - 1L] %in% cut_res && aa_pep[1L] %in% cut_res)
+      ragged_c <- (e < seq_len &&
+        aa_pep[ln] %in% cut_res &&
+        aa_full[e + 1L] %in% cut_res) ||
+        (ln >= 2L &&
+          e < seq_len &&
+          aa_pep[ln - 1L] %in% cut_res &&
+          aa_pep[ln] %in% cut_res)
+
+      if (ragged_n) {
+        critical <- c(critical, "Ragged N-end (dibasic)")
+        score <- score - 30
+      }
+      if (ragged_c) {
+        critical <- c(critical, "Ragged C-end (dibasic)")
+        score <- score - 30
+      }
+
+      if (grepl("[KR]P", sq)) {
+        major <- c(major, "Internal KP/RP (slow cleavage)")
+        score <- score - 20
+      }
+
+      if (s <= 2L) {
+        major <- c(major, "Protein N-terminus (Met clip / N-acetyl risk)")
+        score <- score - 20
+      }
+
+      acidic_flank <- (s > 1L && aa_pep[1L] %in% c("D", "E")) ||
+        (ln >= 2L && aa_pep[ln - 1L] %in% c("D", "E")) ||
+        (e < seq_len && aa_full[e + 1L] %in% c("D", "E"))
+      if (acidic_flank) {
+        minor <- c(minor, "Acidic residue near cleavage site")
+        score <- score - 5
+      }
+
+      # 4. Chemical / PTM stability (Hoofnagle et al., PMC4830481)
+      if (grepl("^[QE]", sq)) {
+        critical <- c(critical, "N-term Q/E (pyroglutamate)")
+        score <- score - 35
+      }
+      if (startsWith(sq, "C")) {
+        critical <- c(critical, "N-term Cys (cyclization)")
+        score <- score - 35
+      } else if (grepl("C", sq)) {
+        if (carbamidomethyl && isTRUE(cfg$allow_alkylated_cys)) {
+          major <- c(major, "Contains Cys (alkylated)")
+          score <- score - 12
+        } else {
+          critical <- c(critical, "Unalkylated Cys")
+          score <- score - 30
+        }
+      }
+
+      if (isTRUE(cfg$penalize_met) && grepl("M", sq)) {
+        major <- c(major, "Contains Met (oxidation)")
+        score <- score - 22
+      }
+      if (isTRUE(cfg$penalize_trp) && grepl("W", sq)) {
+        major <- c(major, "Contains Trp (oxidation)")
+        score <- score - 18
+      }
+
+      if (grepl("DP", sq)) {
+        critical <- c(critical, "DP motif (acid cleavage)")
+        score <- score - 30
+      }
+      if (grepl("NG|QG", sq)) {
+        critical <- c(critical, "NG/QG motif (fast deamidation)")
+        score <- score - 25
+      } else if (grepl("NS|DG", sq)) {
+        minor <- c(minor, "NS/DG motif (slow deamidation/isomerization)")
+        score <- score - 8
+      }
+
+      ext_sq <- substring(full_seq, s, min(seq_len, e + 2L))
+      if (grepl("N[^P][ST]", ext_sq)) {
+        major <- c(major, "N-X-S/T sequon (glycosylation)")
+        score <- score - 20
+      }
+
+      # 5. LC retention / solubility (GRAVY)
+      if (!is.na(gravy_val)) {
+        if (gravy_val < cfg$gravy_min) {
+          critical <- c(
+            critical,
+            sprintf("Too hydrophilic (GRAVY %.2f)", gravy_val)
+          )
+          score <- score - 25
+        } else if (gravy_val > cfg$gravy_max) {
+          critical <- c(
+            critical,
+            sprintf("Too hydrophobic (GRAVY %.2f)", gravy_val)
+          )
+          score <- score - 25
+        } else if (gravy_val < -1.5 || gravy_val > 0.8) {
+          minor <- c(minor, sprintf("Borderline GRAVY (%.2f)", gravy_val))
+          score <- score - 5
+        }
+      }
+
+      # 6. Heavy SIS standard compatibility & product transitions
+      if (!grepl("[KR]$", sq)) {
+        minor <- c(minor, "No C-term K/R for standard SIS label")
+        score <- score - 8
+      }
+
+      if (ln >= 2L) {
+        ions <- select_targeted_transitions(
+          sq,
+          carbamidomethyl = carbamidomethyl,
+          oxidation = oxidation,
+          charge = 1L,
+          max_transitions = cfg$max_transitions
+        )
+        n_y <- sum(ions$above_precursor_2)
+        n_y_above[idx] <- n_y
+        rec <- ions[ions$recommended, ]
+        if (nrow(rec) > 0L) {
+          rec <- rec[order(rec$transition_rank), ]
+          top_trans[idx] <- paste(
+            sprintf("%s (%.2f)", rec$ion, rec$mz),
+            collapse = ", "
+          )
+        }
+        if (n_y < cfg$min_transitions) {
+          critical <- c(
+            critical,
+            sprintf("Only %d y-ion(s) > m/z(2+)", n_y)
+          )
+          score <- score - 30
+        }
+      }
+
+      n_internal_pro <- if (ln > 2L) sum(aa_pep[2:(ln - 1L)] == "P") else 0L
+      if (n_internal_pro >= 2L) {
+        minor <- c(minor, "Multiple internal Pro (fragmentation bias)")
+        score <- score - 6
+      }
+    }
+
+    score <- max(0, min(100, round(score)))
+    scores[idx] <- score
+
+    all_flags <- c(critical, major, minor)
+    flags_out[idx] <- if (length(all_flags) == 0L) {
+      "Optimal candidate"
+    } else {
+      paste(all_flags, collapse = "; ")
+    }
+
+    tiers[idx] <- if (
+      length(critical) == 0L && length(major) == 0L && score >= 85
+    ) {
+      "Recommended"
+    } else if (length(critical) == 0L && score >= 55) {
+      "Conditional"
+    } else {
+      "Avoid"
+    }
+  }
+
+  out <- data.frame(
+    peptide_index = seq_len(n_pep),
+    tier = tiers,
+    score = as.integer(scores),
+    sequence = pep$sequence,
+    flanked_sequence = flanked,
+    start = pep$start,
+    end = pep$end,
+    length = pep$length,
+    missed_cleavages = pep$missed_cleavages,
+    mono_mass = pep$mono_mass,
+    mz_2 = pep$mz_2,
+    mz_3 = pep$mz_3,
+    gravy = gravy_vec,
+    proteotypicity = prot_info$proteotypicity,
+    n_proteins = prot_info$n_proteins,
+    mapped_proteins = prot_info$mapped_proteins,
+    n_y_above_mz2 = n_y_above,
+    top_transitions = top_trans,
+    flags = flags_out,
+    stringsAsFactors = FALSE
+  )
+
+  tier_order <- match(out$tier, c("Recommended", "Conditional", "Avoid"))
+  out <- out[order(tier_order, -out$score, out$start, out$end), ]
+  out$rank <- seq_len(nrow(out))
+  rownames(out) <- NULL
+
+  # Per-residue best candidate tier across the protein sequence
+  res_state <- rep("None", seq_len)
+  cond_rows <- out[out$tier == "Conditional", ]
+  for (i in seq_len(nrow(cond_rows))) {
+    res_state[cond_rows$start[i]:cond_rows$end[i]] <- "Conditional"
+  }
+  rec_rows <- out[out$tier == "Recommended", ]
+  for (i in seq_len(nrow(rec_rows))) {
+    res_state[rec_rows$start[i]:rec_rows$end[i]] <- "Recommended"
+  }
+  attr(out, "tier_residue_state") <- res_state
+  out
+}
+
+#' Build a Skyline-compatible SRM / MRM / PRM transition list table.
+#'
+#' Exports recommended transitions (`Recommended` and `Conditional` tiers by
+#' default) with 2+ precursor (or 3+ when 2+ is above `mz_max`) and singly
+#' charged `y`-ion product transitions.
+build_targeted_transition_list <- function(
+  candidates_df,
+  protein_name = "TargetProtein",
+  carbamidomethyl = TRUE,
+  oxidation = FALSE,
+  tiers_keep = c("Recommended", "Conditional"),
+  max_transitions = 5L,
+  mz_min = 350,
+  mz_max = 1250
+) {
+  empty <- data.frame(
+    ProteinName = character(0),
+    PeptideSequence = character(0),
+    ModifiedSequence = character(0),
+    Start = integer(0),
+    End = integer(0),
+    Tier = character(0),
+    CandidateRank = integer(0),
+    CandidateScore = integer(0),
+    Proteotypicity = character(0),
+    PrecursorCharge = integer(0),
+    PrecursorMz = numeric(0),
+    FragmentIon = character(0),
+    FragmentSequence = character(0),
+    ProductCharge = integer(0),
+    ProductMz = numeric(0),
+    TransitionRank = integer(0),
+    stringsAsFactors = FALSE
+  )
+  if (is.null(candidates_df) || nrow(candidates_df) == 0L) {
+    return(empty)
+  }
+  sub_df <- candidates_df[candidates_df$tier %in% tiers_keep, , drop = FALSE]
+  if (nrow(sub_df) == 0L) {
+    return(empty)
+  }
+  if (is.null(protein_name) || is.na(protein_name) || !nzchar(protein_name)) {
+    protein_name <- "TargetProtein"
+  }
+
+  mod_seq <- function(sq) {
+    out <- sq
+    if (isTRUE(carbamidomethyl)) {
+      out <- gsub("C", "C[+57.0215]", out, fixed = TRUE)
+    }
+    if (isTRUE(oxidation)) {
+      out <- gsub("M", "M[+15.9949]", out, fixed = TRUE)
+    }
+    out
+  }
+
+  rows <- lapply(seq_len(nrow(sub_df)), function(i) {
+    r <- sub_df[i, ]
+    if (r$length < 2L || is.na(r$mono_mass)) {
+      return(NULL)
+    }
+    ions <- tryCatch(
+      select_targeted_transitions(
+        r$sequence,
+        carbamidomethyl = carbamidomethyl,
+        oxidation = oxidation,
+        charge = 1L,
+        max_transitions = max_transitions
+      ),
+      error = function(e) NULL
+    )
+    if (is.null(ions)) {
+      return(NULL)
+    }
+    rec <- ions[ions$recommended, , drop = FALSE]
+    if (nrow(rec) == 0L) {
+      return(NULL)
+    }
+    rec <- rec[order(rec$transition_rank), , drop = FALSE]
+
+    in_mz2 <- !is.na(r$mz_2) && r$mz_2 >= mz_min && r$mz_2 <= mz_max
+    prec_z <- if (in_mz2) 2L else 3L
+    prec_mz <- if (prec_z == 2L) r$mz_2 else r$mz_3
+
+    data.frame(
+      ProteinName = rep(protein_name, nrow(rec)),
+      PeptideSequence = rep(r$sequence, nrow(rec)),
+      ModifiedSequence = rep(mod_seq(r$sequence), nrow(rec)),
+      Start = rep(r$start, nrow(rec)),
+      End = rep(r$end, nrow(rec)),
+      Tier = rep(r$tier, nrow(rec)),
+      CandidateRank = rep(r$rank, nrow(rec)),
+      CandidateScore = rep(r$score, nrow(rec)),
+      Proteotypicity = rep(r$proteotypicity, nrow(rec)),
+      PrecursorCharge = rep(prec_z, nrow(rec)),
+      PrecursorMz = rep(round(prec_mz, 4), nrow(rec)),
+      FragmentIon = rec$ion,
+      FragmentSequence = rec$fragment,
+      ProductCharge = rep(1L, nrow(rec)),
+      ProductMz = round(rec$mz, 4),
+      TransitionRank = rec$transition_rank,
+      stringsAsFactors = FALSE
+    )
+  })
+
+  rows <- Filter(Negate(is.null), rows)
+  if (length(rows) == 0L) {
+    return(empty)
+  }
+  do.call(rbind, rows)
 }
