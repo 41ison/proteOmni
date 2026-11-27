@@ -4,7 +4,7 @@
 
 # proteOmni
 
-**proteOmni** is a comprehensive, unified Shiny-based dashboard for visual quality control (QC), diagnostics, and differential abundance analysis of proteomics results from multiple search engines and acquisition strategies. It centralizes nine specialized modules covering DDA, DIA, and *de novo* sequencing workflows, plus single-sequence profiling and *in silico* digestion, into a single interactive application, with an in-app *Documentation* page describing the PwrQuant statistical workflow.
+**proteOmni** is a comprehensive, unified Shiny-based dashboard for visual quality control (QC), diagnostics, and differential abundance analysis of proteomics results from multiple search engines and acquisition strategies. It centralizes ten specialized modules covering DDA, DIA, and *de novo* sequencing workflows, single-sequence profiling and *in silico* digestion, and targeted proteomics assay design (SRM / MRM / PRM) into a single interactive application, with an in-app *Documentation* page describing the PwrQuant statistical workflow.
 
 <p align="center">
 <img src="https://github.com/41ison/proteOmni/blob/main/images/proteomni_interface.png" width="700">
@@ -28,6 +28,7 @@
    - [Sage](#7-sage--sage--ddadia)
    - [MaxQuant](#8-maxquant--maxquant--dda)
    - [SeqProfile](#9-seqprofile--sequence-profiling)
+   - [TargetDesign](#10-targetdesign--targeted-proteomics-srm--mrm--prm)
 6. [Input File Reference](#input-file-reference)
 7. [PwrQuant — Analytical Pipeline](#pwrquant--analytical-pipeline)
 8. [Session Logging](#session-logging)
@@ -43,6 +44,7 @@
 - **Interactive Visualization** — Explore 3D QuantUMS score distributions, interactive PCA plots, sample correlation matrices, cosine/Euclidean/Jaccard similarity heatmaps, and annotated MS/MS fragmentation spectra directly in the browser.
 - **Peptide-to-Protein Mapping** — Map identified peptides onto user-provided FASTA sequences with a colour-coded protein sequence viewer.
 - **Sequence Profiling & *In Silico* Digestion** — Paste any protein or peptide sequence to get sliding-window profiles (charge, hydropathy, hydrophilicity, amphiphilicity, surface accessibility, beta-turn propensity, B-cell antigenicity, MHC-I T-cell immunogenicity), or digest it with a preset or custom enzyme rule to see the theoretical peptides, the sequence coverage reachable in a given length and m/z window, and theoretical b/y spectra.
+- **Targeted Proteomics Assay Design (SRM / MRM / PRM)** — Rank surrogate peptide candidates and product-ion transitions from a pasted or UniProt-fetched protein sequence following CPTAC / Hoofnagle et al. (2016) guidelines, verify proteome-wide proteotypicity against an uploaded FASTA (*in silico* digestion with optional isobaric Ile/Leu equivalence), and export Skyline-ready transition lists.
 - **Differential Abundance Analysis** — Full limma-based workflow (or the permutation-based SAM of Tusher et al. 2001 as an alternative test) with normalization (limma between-array methods or edgeR TMM), batch correction (ComBat/SVA), flexible missing value imputation (KNN, MinProb, BPCA or missForest), MA plots, volcano plots, and a simulation-based prospective power analysis.
 - **Prospective Power / Sensitivity Analysis** — Minimum detectable difference (MDD) estimated by simulating fresh datasets from the fitted empirical Bayes priors, spiking in known fold changes, and re-running the real design through `lmFit` → `eBayes` → BH — optionally including intensity-dependent missingness and imputation. A replicate sweep answers "how many replicates would I need?".
 - **Functional Enrichment** — GO over-representation analysis (ORA) with `clusterProfiler::enrichGO`, run per contrast and split by regulation direction, using Bioconductor OrgDb annotation packages for 20 supported organisms, or GO annotations fetched from UniProt for any organism.
@@ -154,9 +156,10 @@ proteOmni/
 │   ├── mod_Sage.r               # Sage module
 │   ├── mod_MaxQuantMSMS.r       # MaxQuant module
 │   ├── mod_SeqProfile.r         # SeqProfile module (sequence profiles + in silico digestion)
-│   ├── utils_fasta.r            # Shared FASTA parsing / digestion + Global FASTA sidebar
-│   │                            #   + SeqProfile backend (profiling algorithms, single-sequence
-│   │                            #   digestion, peptide masses and b/y fragment ions)
+│   ├── mod_TargetDesign.r       # TargetDesign module (SRM / MRM / PRM peptide & transition design)
+│   ├── utils_fasta.r            # Shared FASTA parsing / digestion + reusable FASTA sidebar submodule
+│   │                            #   + SeqProfile & TargetDesign backends (profiling algorithms,
+│   │                            #   digestion, proteotypicity, SRM/MRM/PRM scoring & transitions)
 │   └── mod_TEMPLATE.r           # Template for adding new modules
 ├── tests/
 │   ├── README.md                # How to run the tests and what they cover
@@ -166,8 +169,9 @@ proteOmni/
 │   │   └── test-*.R             # cv, id-helpers, imputation, ingestion, limma-pipeline,
 │   │                            #   missingness, plot-helpers, power-helpers, server,
 │   │                            #   simulation, tmm
-│   ├── utils_fasta/             # testthat unit tests for utils_fasta.r, including the
-│   │                            #   SeqProfile backend (test-seqprofile.R, test-seqdigest.R)
+│   ├── utils_fasta/             # testthat unit tests for utils_fasta.r, including SeqProfile
+│   │                            #   and TargetDesign (test-seqprofile.R, test-seqdigest.R,
+│   │                            #   test-targetdesign.R)
 │   ├── Sage/                    # testthat unit tests for the Sage iBAQ calculation
 │   ├── imputation_strategies_sim.R  # Simulation behind the imputation FDR / power table
 │   ├── test_mdd.R               # Smoke test of the MDD machinery on a real matrix
@@ -189,7 +193,7 @@ Each module follows the standard Shiny module pattern with three exported functi
 - `<Module>_body_ui(id)` — main panel tabs and plots
 - `<Module>_server(id, ...)` — reactive server logic
 
-The sidebar menu lists the modules in this order: **Home**, **PwrQuant**, **PSManalyst**, **QC4DIANN**, **MaxQuant**, **Casanovo**, **InstaNovo**, **EncyclopeDIA**, **Sage**, **SeqProfile**, **Documentation**. Below the module-specific controls, a **Global FASTA Mapping** panel (FASTA upload + max missed cleavages) is always visible; its *in silico* digest is shared by the InstaNovo, EncyclopeDIA, and Sage modules.
+The sidebar menu lists the modules in this order: **Home**, **PwrQuant**, **PSManalyst**, **QC4DIANN**, **MaxQuant**, **Casanovo**, **InstaNovo**, **EncyclopeDIA**, **Sage**, **SeqProfile**, **TargetDesign**, **Documentation**. Each module renders only its own sidebar controls when selected (including optional FASTA upload controls for modules that support FASTA mapping or iBAQ).
 
 ---
 
@@ -275,7 +279,7 @@ Visualiser for [Casanovo](https://github.com/Noble-Lab/casanovo) *de novo* seque
 
 ### 5. InstaNovo — *de novo*
 
-Visualiser for [InstaNovo](https://github.com/instadeepai/InstaNovo) *de novo* sequencing results. Loads all `.csv` result files from a user-specified directory; optionally uses the **Global FASTA Mapping** digest. Sidebar filters: score (`log_probs`), RT tolerance, plot colour, and N/C-terminus logo widths.
+Visualiser for [InstaNovo](https://github.com/instadeepai/InstaNovo) *de novo* sequencing results. Loads all `.csv` result files from a user-specified directory; optionally maps predicted peptides to a protein FASTA uploaded in the module sidebar. Sidebar filters: score (`log_probs`), RT tolerance, plot colour, N/C-terminus logo widths, and optional FASTA mapping.
 
 **Tabs:**
 
@@ -289,7 +293,7 @@ Visualiser for [InstaNovo](https://github.com/instadeepai/InstaNovo) *de novo* s
 
 ### 6. EncyclopeDIA — *EncyclopeDIA / DIA*
 
-Aggregates and explores EncyclopeDIA DIA results. Reads all `*.encyclopedia2.txt` result files from a user-specified directory; optionally uses the **Global FASTA Mapping** digest. Sidebar controls: q-value filter and bar/line colours.
+Aggregates and explores EncyclopeDIA DIA results. Reads all `*.encyclopedia2.txt` result files from a user-specified directory; optionally maps peptides to a protein FASTA uploaded in the module sidebar. Sidebar controls: q-value filter, bar/line colours, and optional FASTA mapping.
 
 **Tabs:**
 
@@ -406,6 +410,36 @@ A complete digest always covers the whole sequence, so coverage counts only the 
 
 ---
 
+### 10. TargetDesign — *Targeted Proteomics (SRM / MRM / PRM)*
+
+Surrogate peptide candidate ranking, *in silico* FASTA proteotypicity verification, and precursor-to-product transition selection for targeted mass spectrometry (**SRM / MRM / PRM**), implemented in `modules/mod_TargetDesign.r` (UI and reactive wiring) and `modules/utils_fasta.r` (digestion, scoring, and transition helpers).
+
+Paste a raw or FASTA-formatted target protein sequence (header lines, whitespace, digits, and line breaks are stripped and uppercased automatically), load one of the built-in clinical/reference examples (`P02647` Human Apolipoprotein A-I, `P01034` Human Cystatin-C, `Q07730` *Candida albicans* ECE1), or fetch any canonical entry by accession via the UniProt REST API (`rest.uniprot.org/uniprotkb/{accession}.fasta`). Live sequence feedback reports the sanitized length (e.g. `Length: 267 aa`) and warns immediately if non-canonical residue codes (`B`, `Z`, `X`, `U`, `O`, `*`, etc.) or unsupported characters are present.
+
+In the sidebar, optionally upload a **Background Proteome FASTA** to digest the full reference proteome *in silico* with the selected enzyme rule (Trypsin, GluC, LysN, AspN, Chymotrypsin, Elastase, or a custom cleavage rule) and classify each candidate as `Proteotypic` (1 protein match), `Shared` (≥ 2 proteins), or `Not in FASTA`, with optional isobaric `Ile = Leu` (`I = L`) equivalence. When no FASTA is uploaded, intra-sequence uniqueness is checked instead.
+
+#### Candidate Scoring System
+
+Each digested peptide starts at **100 points** (`evaluate_targeted_candidates()` in `modules/utils_fasta.r`), subtracts additive penalties from CPTAC / Hoofnagle et al. (*Clin. Chem.* 2016;62(1):48–69; [PMC4830481](https://pmc.ncbi.nlm.nih.gov/articles/PMC4830481/)) rules, and is clamped to **0–100**. Penalties are grouped into three severity levels so small or constrained proteins still surface viable **Tier 2** options alongside explicit rationale flags, ordered by `Tier` → descending `Score` → protein position:
+
+| Severity | Deductions | Effect on Tier |
+|---|---|---|
+| **Critical** | Non-canonical residue (`−100`); `Shared` in FASTA or repeated in protein (`−60`); missed cleavages (`−45 × n`); length outside 7–25 aa (`−40`); neither 2+ nor 3+ ion in precursor m/z window (`−35`); N-terminal `Q`/`E` or `C` cyclization (`−35`); dibasic ragged N- or C-end (`−30` each); `DP` acid cleavage, unalkylated `Cys`, or `< 3` `y3+` ions above `[M+2H]2+` (`−30`); `NG`/`QG` fast deamidation or `GRAVY` outside `[−2.0, +1.0]` (`−25`) | Any critical flag (or `Score < 55`) assigns **Tier 3 — Avoid** |
+| **Major** | `Met` (`−22`) or `Trp` (`−18`) oxidation; internal `KP`/`RP`, protein N-terminus pos 1–2, or `N-X-S/T` glycosylation sequon (`−20` each); absent from FASTA digest (`−15`); internal alkylated `Cys` (`−12`) | Caps at **Tier 2 — Conditional** (when 0 critical flags and `Score ≥ 55`) |
+| **Minor** | Suboptimal length within 7–25 aa, `NS`/`DG` motif, or no C-terminal `K`/`R` for heavy SIS labeling (`−8` each); ≥ 2 internal `Pro` (`−6`); acidic `D`/`E` near cleavage site or borderline `GRAVY` (`−5` each) | Retains **Tier 1 — Recommended** while 0 critical/major flags and `Score ≥ 85` |
+
+**Boxes & Exports:**
+
+| Component | Content |
+|---|---|
+| **Target Protein Sequence** | Multi-line sequence input (raw or FASTA), example selector + **Load Example Sequence** and **Clear** buttons, UniProt accession lookup (**Fetch from UniProt**), live sanitized sequence length and non-canonical residue warnings, and inline **Evaluate Candidates** trigger |
+| **Assay Design Summary & Candidate Coverage Map** | Summary strip (enzyme, total digested peptides, Tier 1 / Tier 2 / Tier 3 counts, best score, proteotypicity source) and a colour-coded sequence map highlighting Tier 1 (green) and Tier 2 (amber) surrogate coverage across the protein |
+| **Surrogate Peptide Candidates (SRM / MRM / PRM)** | Ranked table filterable by *Tier 1–2*, *Tier 1 only*, or *All digested peptides*, reporting `Rank`, `Tier`, `Score`, flanked peptide (`P1.SEQ.P1'`), coordinates, length, `m/z (2+)`, `m/z (3+)`, `GRAVY`, `Proteotypicity`, mapped FASTA accessions, `y > m/z(2+)` count, top recommended transitions, and rationale flags |
+| **Transition Explorer (Precursor → Product Ions)** | Interactive Plotly fragment spectrum for the clicked (or top-ranked) candidate highlighting recommended `y`-ion transitions (`y3+` above `[M+2H]2+`, prioritizing proline-enhanced `X-P` cleavages) alongside other `y`- and `b`-ions, paired with a product-ion table and collapsible CPTAC / PMC4830481 rules reference |
+| **Sidebar Exports** | **Candidate Table (.tsv)** (currently filtered candidate table) and **Skyline Transitions (.tsv)** (Skyline-compatible transition list for Tier 1–2 candidates with precursor/product charges, modified sequences `C[+57.0215]` / `M[+15.9949]`, and `m/z` values) |
+
+---
+
 ## Input File Reference
 
 | Module | Required files | Optional |
@@ -414,11 +448,12 @@ A complete digest always covers the whole sequence, so coverage counts only the 
 | **QC4DIANN** | `report.parquet` (DIA-NN output) | FASTA file (module sidebar) |
 | **PwrQuant** | Protein abundance matrix (`.tsv` / `.txt` / `.csv`, proteins × samples) | — |
 | **Casanovo** | Directory path containing `.mztab` files | — |
-| **InstaNovo** | Directory path containing InstaNovo `.csv` result files | Global FASTA Mapping |
-| **EncyclopeDIA** | Directory path containing `*.encyclopedia2.txt` result files | Global FASTA Mapping |
-| **Sage** | `results.sage.tsv` or `results.sage.parquet` | Global FASTA Mapping |
+| **InstaNovo** | Directory path containing InstaNovo `.csv` result files | FASTA file (module sidebar) |
+| **EncyclopeDIA** | Directory path containing `*.encyclopedia2.txt` result files | FASTA file (module sidebar) |
+| **Sage** | `results.sage.tsv` or `results.sage.parquet` | FASTA file (iBAQ tab, or auto-read from `results.json`) |
 | **MaxQuant** | Path to the MaxQuant `combined` directory (`txt/` subfolder is located automatically) | — |
 | **SeqProfile** | None; a protein or peptide sequence (raw or FASTA) pasted into the module | — |
+| **TargetDesign** | None; a target protein sequence (raw, FASTA, or UniProt accession) | Background proteome FASTA (proteotypicity check) |
 
 ### PwrQuant abundance matrix format
 
